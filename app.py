@@ -221,10 +221,18 @@ st.markdown(
 .hero-sub { opacity: .85; margin-top: 3px; font-size: clamp(11px, 2.5vw, 13px); }
 .section-card { background: white; border-radius: 14px; padding: 12px 14px;
                 box-shadow: 0 3px 12px rgba(16,59,115,.07); margin-bottom: 8px; }
-@media (max-width: 768px) {
-    .block-container { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
-    section[data-testid="stSidebar"] { min-width: 240px !important; }
-}
+/* ── Sidebar: compact, no excess whitespace ── */
+section[data-testid="stSidebar"] { padding-top: 0.5rem !important; }
+section[data-testid="stSidebar"] .block-container { padding-top: 0.5rem !important; padding-bottom: 0.5rem !important; }
+section[data-testid="stSidebar"] .stRadio { margin-bottom: 0 !important; }
+section[data-testid="stSidebar"] .stRadio > label { margin-bottom: 0.1rem !important; font-size: 13px !important; }
+section[data-testid="stSidebar"] .stRadio > div { gap: 0.15rem !important; }
+section[data-testid="stSidebar"] .stCheckbox { margin-bottom: 0.1rem !important; }
+section[data-testid="stSidebar"] .stCheckbox > label { font-size: 13px !important; }
+section[data-testid="stSidebar"] .stSelectbox { margin-bottom: 0.2rem !important; }
+section[data-testid="stSidebar"] .stButton { margin-top: 0.3rem !important; margin-bottom: 0.1rem !important; }
+section[data-testid="stSidebar"] p { margin-bottom: 0.1rem !important; font-size: 13px !important; }
+section[data-testid="stSidebar"] hr { margin: 0.3rem 0 !important; }
 div[data-testid="stMetric"] { background: transparent !important;
                                padding: 0 !important; border: 0 !important; }
 details summary { font-size: 14px !important; padding: 6px 0 !important; }
@@ -957,16 +965,11 @@ def build_weekly_chart_df(history, allowed, include_crypto_flag, start_date=None
 
 
 def pick_chart_of_day(history, news_df):
-    """Ask Gemini to nominate the most interesting chart given:
-    - The asset with the biggest z-score move vs its 30-day range
-    - The most-mentioned keyword across today's headlines
-    Returns dict: {key, label, reason, timeframe_days} or None.
-    """
-    if not GEMINI_API_KEY or history.empty:
+    """Nominate the most interesting chart using AI (Gemini→Groq), with a rich local fallback."""
+    if history.empty:
         return None
 
-    # Find biggest movers (z-score of latest value vs 30-day rolling)
-    today = pd.Timestamp.today().normalize()
+    # Find biggest movers (z-score of latest value vs 30-day rolling mean)
     movers = []
     for key, g in history.groupby("key"):
         g = g.sort_values("date").set_index("date")
@@ -978,9 +981,16 @@ def pick_chart_of_day(history, news_df):
         if std == 0:
             continue
         latest = float(recent.iloc[-1])
-        z = abs((latest - mean) / std)
-        lbl = g["label"].iloc[0] if "label" in g.columns else key
-        movers.append({"key": key, "label": lbl, "zscore": round(z, 2), "latest": round(latest, 4)})
+        prev   = float(recent.iloc[-2]) if len(recent) >= 2 else latest
+        z      = abs((latest - mean) / std)
+        d1_pct = (latest / prev - 1) * 100 if prev != 0 else 0
+        lbl    = g["label"].iloc[0] if "label" in g.columns else key
+        movers.append({
+            "key": key, "label": lbl,
+            "zscore": round(z, 2),
+            "d1_pct": round(d1_pct, 2),
+            "latest": round(latest, 4),
+        })
 
     movers = sorted(movers, key=lambda x: x["zscore"], reverse=True)[:6]
 
@@ -989,40 +999,69 @@ def pick_chart_of_day(history, news_df):
     if news_df is not None and not news_df.empty:
         all_headlines = " ".join(news_df["headline"].fillna("").str.lower().tolist())
         for kw in ["iran", "fed", "ecb", "china", "tariff", "oil", "gold", "dollar",
-                   "inflation", "rate", "war", "ceasefire", "bitcoin", "recession"]:
+                   "inflation", "rate", "war", "ceasefire", "bitcoin", "recession", "nasdaq", "tech"]:
             cnt = all_headlines.count(kw)
             if cnt > 0:
                 kw_counts[kw] = cnt
     top_kws = sorted(kw_counts.items(), key=lambda x: x[1], reverse=True)[:4]
 
-    payload = json.dumps({
-        "instruction": (
-            "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
-            "You are a financial analyst. Pick ONE chart of the day from the candidates below. "
-            "Choose the most interesting for an investor — biggest unusual move, "
-            "or most relevant to the top news themes. "
-            "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
-            "\"reason\": \"<one concise sentence explaining why this chart matters today>\", "
-            "\"timeframe_days\": <30|60|90|180>}"
-        ),
-        "top_movers_by_zscore": movers,
-        "top_news_keywords": [{"keyword": k, "mentions": v} for k, v in top_kws],
-    })
+    # Try AI (Gemini→Groq)
+    if GEMINI_API_KEY or GROQ_API_KEY:
+        try:
+            payload = _safe_json_dumps({
+                "instruction": (
+                    "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
+                    "You are a financial analyst writing a morning brief. "
+                    "Pick ONE chart of the day from the candidates. Choose the most interesting "
+                    "for an investor today — consider both the unusual statistical move AND the top news themes. "
+                    "The reason field must be 2-3 sentences explaining: (1) what the chart shows, "
+                    "(2) why this asset was chosen over others today (link to news if relevant), "
+                    "(3) what to watch for. "
+                    "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
+                    "\"reason\": \"<2-3 sentence explanation>\", \"timeframe_days\": <30|60|90|180>}"
+                ),
+                "top_movers_by_zscore": movers,
+                "top_news_keywords":    [{"keyword": k, "mentions": v} for k, v in top_kws],
+            })
+            out, _ = ai_generate_json(payload)
+            if isinstance(out, dict) and out.get("key") and out.get("reason"):
+                return out
+        except Exception:
+            pass
 
-    try:
-        out, _ = gemini_generate_json(payload)
-        if isinstance(out, dict) and out.get("key") and out.get("reason"):
-            return out
-    except Exception:
-        pass
+    # Rich local fallback — build a proper explanation without AI
+    if not movers:
+        return None
+    m    = movers[0]
+    rank = 1
+    d1s  = f"{m['d1_pct']:+.2f}%" if m['d1_pct'] != 0 else "flat"
+    z    = m['zscore']
+    magnitude = "extremely" if z > 3 else ("significantly" if z > 2 else "notably")
 
-    # Fallback: just use the top mover
-    if movers:
-        m = movers[0]
-        return {"key": m["key"], "label": m["label"],
-                "reason": f"{m['label']} showing an unusual move today (z-score {m['zscore']:.1f}).",
-                "timeframe_days": 60}
-    return None
+    # Check if top news keywords relate to this asset
+    asset_kws = {
+        "gold":     ["gold","inflation","war","iran","safe"],
+        "bitcoin":  ["bitcoin","crypto","risk"],
+        "wti":      ["oil","iran","war","ceasefire","crude"],
+        "brent":    ["oil","iran","war","ceasefire","crude"],
+        "us10y":    ["fed","rate","inflation","treasury","fomc"],
+        "nasdaq100":["tech","nasdaq","ai","rate"],
+        "sp500":    ["earnings","fed","economy","recession"],
+        "eurusd":   ["ecb","dollar","euro"],
+    }.get(m["key"], [])
+    news_link = ""
+    if asset_kws and top_kws:
+        matched = [kw for kw, _ in top_kws if any(a in kw for a in asset_kws)]
+        if matched:
+            news_link = f" Today's headlines are dominated by '{matched[0]}'-related news, which directly affects this asset."
+
+    reason = (
+        f"{m['label']} is {magnitude} outside its normal 30-day range today "
+        f"(statistical deviation: {z:.1f}× the usual daily variation), moving {d1s} in the latest session. "
+        f"It ranked #{rank} out of all tracked assets for unusual price behaviour.{news_link} "
+        f"Watch whether this move continues or reverts over the next few sessions."
+    )
+    return {"key": m["key"], "label": m["label"], "reason": reason, "timeframe_days": 60}
 
 
 def render_chart_of_day(cotd, history):
@@ -1634,19 +1673,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
         cotd_reason = cotd.get("reason", "")
-        tf          = int(cotd.get("timeframe_days", 60))
-        # Compose reason: distinguish AI-generated vs z-score fallback
-        if "z-score" in cotd_reason.lower():
-            # Enrich fallback with plain-English explanation
-            reason_text = (
-                f"{cotd_label} is showing statistically unusual price movement today — "
-                f"its current level is significantly outside its normal 30-day trading range "
-                f"({cotd_reason.split('(')[-1].rstrip(')') if '(' in cotd_reason else ''}). "
-                f"This means the market is pricing in something material that has not yet fully "
-                f"been reflected in broader indices."
-            )
-        else:
-            reason_text = cotd_reason
+        reason_text = cotd_reason
 
         cotd_header = Paragraph(
             f"<b><font size='7.5' color='{PRIMARY}'>Chart of the Day</font></b><br/>"
@@ -2063,28 +2090,26 @@ use_gemini_writing = True        # always attempt Gemini (falls back if key miss
 generate = False
 
 with st.sidebar:
-    st.markdown("**Data mode**")
+    st.markdown("**Mode**")
     mode = st.radio("", ["Live", "Morning snapshot"], index=1, label_visibility="collapsed")
-    st.caption("Morning snapshot freezes at 08:00 Zurich — use for newsletters.")
+    st.caption("Snapshot freezes at 08:00 Zurich.")
 
-    st.markdown("---")
     st.markdown("**Chart window**")
     chart_window = st.radio("", ["YTD", "3 months", "6 months", "1 year"], index=0, label_visibility="collapsed")
 
-    st.markdown("---")
-    show_definitions = st.checkbox("Show definitions tables", value=False)
-    auto_refresh     = st.checkbox("Auto-refresh (live mode)", value=False)
-    refresh_seconds  = st.selectbox("Refresh every (s)", [30, 60, 120, 300], index=1)
+    st.markdown("**Options**")
+    show_definitions = st.checkbox("Show definitions", value=False)
+    auto_refresh     = st.checkbox("Auto-refresh (live)", value=False)
+    if auto_refresh:
+        refresh_seconds = st.selectbox("Every (s)", [30, 60, 120, 300], index=1, label_visibility="visible")
+        if mode == "Live":
+            st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
 
-    if auto_refresh and mode == "Live":
-        st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
-
-    if st.button("🔄 Refresh now", use_container_width=True):
+    if st.button("🔄 Refresh", use_container_width=True):
         st.rerun()
 
     st.markdown("---")
-    generate = st.button("▶  Generate Daily Brief", type="primary", use_container_width=True)
-    st.caption("Event markers: Iran conflict 28 Feb 2026 · ceasefire 07 Apr 2026")
+    generate = st.button("▶ Generate Brief", type="primary", use_container_width=True)
 
 if generate:
     znow = now_zurich()

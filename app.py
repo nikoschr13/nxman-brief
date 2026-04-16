@@ -1507,231 +1507,374 @@ def render_news_bullets(writing, news_df):
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
               metrics, writing, news_df, status, cotd=None, cotd_png=None):
-    """One-page landscape PDF newsletter."""
-    buffer   = BytesIO()
-    PW       = 28.6   # usable page width in cm
-    doc      = SimpleDocTemplate(
+    """Professional one-page landscape PDF — designer layout."""
+    from reportlab.platypus import HRFlowable
+    buffer  = BytesIO()
+    PW, PH  = 29.7, 21.0   # A4 landscape in cm
+    ML = MR = 0.8           # margins in cm
+    MT = MB = 0.6
+    UW = PW - ML - MR       # usable width = 28.1cm
+
+    doc = SimpleDocTemplate(
         buffer, pagesize=landscape(A4),
-        rightMargin=0.45*cm, leftMargin=0.45*cm,
-        topMargin=0.45*cm,   bottomMargin=0.4*cm,
+        rightMargin=MR*cm, leftMargin=ML*cm,
+        topMargin=MT*cm,   bottomMargin=MB*cm,
     )
     styles = getSampleStyleSheet()
-    S = {
-        "title": ParagraphStyle("T",  parent=styles["Title"],    fontName="Helvetica-Bold", fontSize=15, textColor=colors.white, leading=16),
-        "strap": ParagraphStyle("St", parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.8, leading=8, textColor=colors.white),
-        "sh":    ParagraphStyle("SH", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.5, textColor=colors.HexColor(PRIMARY), spaceAfter=1, leading=8.5),
-        "body":  ParagraphStyle("B",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.2, leading=7.4, textColor=colors.HexColor(TEXT)),
-        "small": ParagraphStyle("Sm", parent=styles["BodyText"], fontName="Helvetica",      fontSize=5.7, leading=6.8, textColor=colors.HexColor(TEXT)),
-        "src":   ParagraphStyle("Sr", parent=styles["BodyText"], fontName="Helvetica-Oblique", fontSize=5.0, leading=6.0, textColor=colors.HexColor("#64748B")),
-        "disc":  ParagraphStyle("D",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=4.8, leading=6.0, textColor=colors.HexColor("#94A3B8")),
+
+    # ── Colour palette ────────────────────────────────────────────────────────
+    C = {
+        "navy":    colors.HexColor("#0F2D52"),
+        "blue":    colors.HexColor("#1E88E5"),
+        "mid":     colors.HexColor("#2C5282"),
+        "light":   colors.HexColor("#EBF4FF"),
+        "stripe":  colors.HexColor("#F7FAFD"),
+        "rule":    colors.HexColor("#CBD5E0"),
+        "green":   colors.HexColor("#16A34A"),
+        "red":     colors.HexColor("#DC2626"),
+        "grey":    colors.HexColor("#64748B"),
+        "text":    colors.HexColor("#1A202C"),
+        "muted":   colors.HexColor("#718096"),
+        "white":   colors.white,
     }
-    GREEN = colors.HexColor("#16A34A")
-    RED   = colors.HexColor("#DC2626")
-    GREY  = colors.HexColor("#64748B")
+
+    # ── Typography ────────────────────────────────────────────────────────────
+    def sty(name, **kw):
+        base = styles["BodyText"]
+        return ParagraphStyle(name, parent=base, **kw)
+
+    T = {
+        "h_white": sty("hw", fontName="Helvetica-Bold",   fontSize=18, textColor=C["white"],  leading=20),
+        "sub_white":sty("sw", fontName="Helvetica",        fontSize=7.5,textColor=C["white"],  leading=9, opacity=0.85),
+        "kpi_lbl":  sty("kl", fontName="Helvetica-Bold",   fontSize=5.5,textColor=C["muted"],  leading=7),
+        "kpi_val":  sty("kv", fontName="Helvetica-Bold",   fontSize=11, textColor=C["navy"],   leading=13),
+        "sec_hdr":  sty("sh", fontName="Helvetica-Bold",   fontSize=7,  textColor=C["blue"],   leading=8, spaceBefore=0, spaceAfter=1),
+        "headline": sty("hl", fontName="Helvetica-Bold",   fontSize=9.5,textColor=C["navy"],   leading=11),
+        "subline":  sty("sl", fontName="Helvetica",        fontSize=6.5,textColor=C["muted"],  leading=8),
+        "bullet":   sty("bl", fontName="Helvetica",        fontSize=5.8,textColor=C["text"],   leading=7.2),
+        "src_tag":  sty("st", fontName="Helvetica-Oblique",fontSize=4.8,textColor=C["muted"],  leading=6),
+        "cotd_why": sty("cw", fontName="Helvetica",        fontSize=5.5,textColor=C["text"],   leading=7),
+        "th":       sty("th", fontName="Helvetica-Bold",   fontSize=5.5,textColor=C["white"],  leading=7),
+        "td":       sty("td", fontName="Helvetica",        fontSize=5.5,textColor=C["text"],   leading=7),
+        "td_g":     sty("tg", fontName="Helvetica-Bold",   fontSize=5.5,textColor=C["green"],  leading=7),
+        "td_r":     sty("tr", fontName="Helvetica-Bold",   fontSize=5.5,textColor=C["red"],    leading=7),
+        "disc":     sty("dc", fontName="Helvetica",        fontSize=4.5,textColor=C["grey"],   leading=5.8),
+    }
 
     def _t(s, n):
         s = "" if s is None else str(s)
         return s if len(s) <= n else s[:n-1] + "\u2026"
 
     def _pct(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return "N/A"
-        f = float(v)
-        return f"{f:+.2f}%" if f != 0 else "0.00%"
-
-    def _num(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return "N/A"
-        return f"{float(v):,.2f}"
-
-    def _col(v):
+        if v is None: return "N/A"
         try:
             f = float(v)
-            return GREEN if f > 0 else (RED if f < 0 else GREY)
-        except Exception:
-            return GREY
+            if str(v) == "nan" or f != f: return "N/A"
+            return f"{f:+.2f}%"
+        except Exception: return "N/A"
 
-    def _styled_section(df, section_title, col_w):
-        rows = [["", "Level", "1D", "WTD", "YTD"]]
-        cmds = [
-            ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor("#1E3A5F")),
-            ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
-            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-            ("FONTSIZE",      (0,0),(-1,0),  5.4),
-            ("TOPPADDING",    (0,0),(-1,0),  2), ("BOTTOMPADDING",(0,0),(-1,0), 2),
-            ("LEFTPADDING",   (0,0),(-1,-1), 3), ("RIGHTPADDING", (0,0),(-1,-1), 3),
-            ("TOPPADDING",    (0,1),(-1,-1), 1.4), ("BOTTOMPADDING",(0,1),(-1,-1), 1.4),
-            ("FONTSIZE",      (0,1),(-1,-1), 5.4),
-            ("FONTNAME",      (0,1),(-1,-1), "Helvetica"),
-            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
-        ]
-        for i, (_, row) in enumerate(df.iterrows()):
-            lbl  = _t(str(row.get("label","")), 20)
-            d1   = row.get("d1")
-            wtd  = row.get("wtd")
-            ytd  = row.get("ytd")
-            rows.append([lbl, _num(row.get("level")), _pct(d1), _pct(wtd), _pct(ytd)])
-            ri = i + 1
-            bg = colors.white if ri % 2 == 1 else colors.HexColor(LIGHT)
-            cmds += [
-                ("BACKGROUND", (0,ri),(-1,ri), bg),
-                ("TEXTCOLOR",  (2,ri),(2,ri),  _col(d1)),
-                ("FONTNAME",   (2,ri),(2,ri),  "Helvetica-Bold"),
-                ("LINEBELOW",  (0,ri),(-1,ri), 0.15, colors.HexColor("#E2EAF2")),
-            ]
-        t = Table(rows, colWidths=col_w, repeatRows=1)
-        t.setStyle(TableStyle(cmds))
-        sec = Table([[Paragraph(section_title, S["sh"])],[t]], colWidths=[sum(col_w)])
-        sec.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
-        return sec
+    def _num(v):
+        if v is None: return "N/A"
+        try:
+            f = float(v)
+            if f != f: return "N/A"
+            return f"{f:,.2f}"
+        except Exception: return "N/A"
+
+    def _pcol(v):
+        try:
+            f = float(v)
+            return C["green"] if f > 0 else (C["red"] if f < 0 else C["grey"])
+        except Exception: return C["grey"]
+
+    def _pstyle(v):
+        try:
+            f = float(v)
+            return T["td_g"] if f > 0 else (T["td_r"] if f < 0 else T["td"])
+        except Exception: return T["td"]
 
     story = []
 
-    # ── Header — single clean row, no status clutter ─────────────────────────
-    hdr = Table(
-        [[Paragraph(title, S["title"]),
-          Paragraph(datetime.now().strftime("%A, %d %B %Y"), S["strap"])]],
-        colWidths=[21*cm, 7.6*cm], rowHeights=[0.72*cm],
-    )
+    # ══════════════════════════════════════════════════════════════════════════
+    # 1. HEADER — full-width navy gradient bar
+    # ══════════════════════════════════════════════════════════════════════════
+    hdr_data = [[
+        Paragraph(title, T["h_white"]),
+        Paragraph(datetime.now().strftime("%A, %d %B %Y"), T["sub_white"]),
+    ]]
+    hdr = Table(hdr_data, colWidths=[UW*0.70*cm, UW*0.30*cm])
     hdr.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(PRIMARY)),
-        ("LEFTPADDING",(0,0),(-1,-1),10), ("RIGHTPADDING",(0,0),(-1,-1),10),
-        ("TOPPADDING", (0,0),(-1,-1),6),  ("BOTTOMPADDING",(0,0),(-1,-1),6),
-        ("ALIGN",(1,0),(1,-1),"RIGHT"),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("BACKGROUND",   (0,0),(-1,-1), C["navy"]),
+        ("LEFTPADDING",  (0,0),(-1,-1), 10),
+        ("RIGHTPADDING", (0,0),(-1,-1), 10),
+        ("TOPPADDING",   (0,0),(-1,-1), 7),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 7),
+        ("ALIGN",        (1,0),(1,0),   "RIGHT"),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+        ("LINEBELOW",    (0,0),(-1,-1), 2, C["blue"]),
     ]))
-    story += [hdr, Spacer(1, 0.05*cm)]
+    story += [hdr, Spacer(1, 0.12*cm)]
 
-    # ── KPI bar ───────────────────────────────────────────────────────────────
-    kpis = [("Global Eq YTD",metrics.get("global_equities_ytd")),("Global Bonds YTD",metrics.get("global_bonds_ytd")),("USD Bonds YTD",metrics.get("usd_bonds_ytd")),("EUR Bonds YTD",metrics.get("eur_bonds_ytd")),("Gold YTD",metrics.get("gold_ytd")),("Bitcoin YTD",metrics.get("bitcoin_ytd"))]
-    kpi_cmds = [("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#C9DCEE")),("INNERGRID",(0,0),(-1,-1),0.2,colors.HexColor("#C9DCEE")),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),("VALIGN",(0,0),(-1,-1),"MIDDLE")]
-    kpi_cells = []
-    for i,(k,v) in enumerate(kpis):
+    # ══════════════════════════════════════════════════════════════════════════
+    # 2. KPI STRIP — 6 coloured metric tiles
+    # ══════════════════════════════════════════════════════════════════════════
+    kpis = [
+        ("Global Eq YTD",    metrics.get("global_equities_ytd")),
+        ("Global Bonds YTD", metrics.get("global_bonds_ytd")),
+        ("USD Bonds YTD",    metrics.get("usd_bonds_ytd")),
+        ("EUR Bonds YTD",    metrics.get("eur_bonds_ytd")),
+        ("Gold YTD",         metrics.get("gold_ytd")),
+        ("Bitcoin YTD",      metrics.get("bitcoin_ytd")),
+    ]
+    kpi_cells, kpi_cmds = [], [
+        ("BACKGROUND",   (0,0),(-1,-1), C["light"]),
+        ("TOPPADDING",   (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+        ("LEFTPADDING",  (0,0),(-1,-1), 8),
+        ("RIGHTPADDING", (0,0),(-1,-1), 8),
+        ("INNERGRID",    (0,0),(-1,-1), 0.5, C["white"]),
+        ("BOX",          (0,0),(-1,-1), 0.5, C["rule"]),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+    ]
+    for i, (lbl, v) in enumerate(kpis):
         vs = _pct(v)
-        kpi_cells.append(Paragraph(f"<b>{k}</b><br/>{vs}", S["small"]))
         try:
-            f=float(v); kpi_cmds.append(("TEXTCOLOR",(i,0),(i,0),GREEN if f>0 else (RED if f<0 else GREY)))
-        except Exception: pass
-    kpi_tbl = Table([kpi_cells], colWidths=[(PW/6)*cm]*6)
-    kpi_tbl.setStyle(TableStyle(kpi_cmds))
-    story += [kpi_tbl, Spacer(1, 0.06*cm)]
+            f = float(v); col = C["green"] if f > 0 else (C["red"] if f < 0 else C["navy"])
+        except Exception: col = C["navy"]
+        arrow = "▲ " if col == C["green"] else ("▼ " if col == C["red"] else "")
+        cell_body = Paragraph(f"{lbl}", T["kpi_lbl"])
+        cell_val  = Paragraph(f"{arrow}{vs}", sty(f"kv{i}", fontName="Helvetica-Bold", fontSize=10, textColor=col, leading=12))
+        kpi_cells.append(Table([[cell_body],[cell_val]], colWidths=[(UW/6)*cm]))
+        kpi_cmds.append(("LINEAFTER", (i,0),(i,0), 0.5, C["white"]))
 
-    # ── Main row: narrative (left) | cross-asset chart (centre) | cotd (right) ─
-    CHART_W, CHART_H = 13.0*cm, 7.6*cm
+    kpi_row = Table([kpi_cells], colWidths=[(UW/6)*cm]*6)
+    kpi_row.setStyle(TableStyle(kpi_cmds))
+    story += [kpi_row, Spacer(1, 0.14*cm)]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 3. MAIN CONTENT ROW — Narrative | Cross-asset chart | CotD
+    # ══════════════════════════════════════════════════════════════════════════
+    NAR_W   = UW * 0.315    # narrative column
+    CHART_W = UW * 0.445    # main chart
+    COTD_W  = UW - NAR_W - CHART_W - 0.3  # chart of day
+
+    # 3a. Narrative — headline + bullets with source tag
+    headline_p = Paragraph(
+        f"<b>{writing.get('headline','')}</b>",
+        sty("hn", fontName="Helvetica-Bold", fontSize=9, textColor=C["navy"], leading=11),
+    )
+    subline_p = Paragraph(writing.get("subheadline",""), T["subline"])
 
     bullets = writing.get("news_bullets") or []
     if not bullets and not news_df.empty:
-        bullets = [r.get("headline","") for _,r in news_df.head(9).iterrows()]
-    bul_content = []
+        bullets = [r.get("headline","") for _,r in news_df.head(8).iterrows()]
+
+    bul_rows = []
     for b in bullets[:9]:
         match = _match_bullet_to_article(b, news_df) if not news_df.empty else None
-        meta = ""
+        meta  = ""
         if match:
-            src = _t(match.get("source","") or "", 14)
+            src = _t(match.get("source","") or "", 12)
             pub = match.get("published_at","") or ""
-            dt_str = ""
-            if pub:
-                try: dt_str = pd.Timestamp(pub).strftime("%d %b")
-                except Exception: pass
+            try: dt_str = pd.Timestamp(pub).strftime("%d %b") if pub else ""
+            except Exception: dt_str = ""
             meta = " \u00b7 ".join([x for x in [src, dt_str] if x])
-        bul_content.append([Paragraph(f"\u2192 {b}", S["small"]), Paragraph(meta, S["src"])])
+        bul_rows.append([
+            Paragraph(f"\u2192", T["bullet"]),
+            Paragraph(b, T["bullet"]),
+            Paragraph(meta, T["src_tag"]),
+        ])
 
-    bul_tbl = Table(bul_content, colWidths=[6.7*cm, 2.1*cm])
-    bul_tbl.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,-1),colors.white),
-        ("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),
-        ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),2),
-        ("TOPPADDING",(0,0),(-1,-1),1.5),("BOTTOMPADDING",(0,0),(-1,-1),1.5),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("LINEBELOW",(0,0),(-1,-2),0.15,colors.HexColor("#EEF2F7")),
-        ("ALIGN",(1,0),(1,-1),"RIGHT"),
+    bul_t = Table(bul_rows, colWidths=[0.28*cm, (NAR_W-0.28-1.6)*cm, 1.6*cm])
+    bul_t.setStyle(TableStyle([
+        ("VALIGN",       (0,0),(-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0),(-1,-1), 1),
+        ("RIGHTPADDING", (0,0),(-1,-1), 1),
+        ("TOPPADDING",   (0,0),(-1,-1), 1.2),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 1.2),
+        ("LINEBELOW",    (0,0),(-1,-2), 0.3, C["rule"]),
+        ("ALIGN",        (2,0),(2,-1),  "RIGHT"),
+        ("BACKGROUND",   (0,0),(-1,0),  C["stripe"]),
     ]))
 
-    headline_p = Paragraph(
-        f"<b><font size='8'>{writing['headline']}</font></b><br/>"
-        f"<font size='6.5' color='#475467'>{writing['subheadline']}</font>",
-        S["body"],
-    )
-    left_col = Table(
-        [[headline_p],[Spacer(1,0.04*cm)],
-         [Paragraph("What's Moving Markets", S["sh"])],[bul_tbl]],
-        colWidths=[9.0*cm],
-    )
-    left_col.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+    # Alternate row backgrounds
+    for ri in range(len(bul_rows)):
+        if ri % 2 == 1:
+            bul_t._argH = None  # reset cached heights
+            bul_t.setStyle(TableStyle([("BACKGROUND",(0,ri),(-1,ri), C["stripe"])]))
 
-    chart_img = Image(BytesIO(chart_png), width=CHART_W, height=CHART_H) if chart_png else Paragraph("<i>Chart unavailable.</i>", S["small"])
-    chart_box = Table([[chart_img]], colWidths=[CHART_W])
+    nar_box = Table(
+        [[Paragraph("What's Moving Markets", T["sec_hdr"])],
+         [Spacer(1, 0.04*cm)],
+         [headline_p],
+         [subline_p],
+         [Spacer(1, 0.06*cm)],
+         [bul_t]],
+        colWidths=[NAR_W*cm],
+    )
+    nar_box.setStyle(TableStyle([
+        ("VALIGN",       (0,0),(-1,-1), "TOP"),
+        ("BACKGROUND",   (0,0),(-1,-1), C["white"]),
+        ("BOX",          (0,0),(-1,-1), 0.5, C["rule"]),
+        ("LEFTPADDING",  (0,0),(-1,-1), 6),
+        ("RIGHTPADDING", (0,0),(-1,-1), 6),
+        ("TOPPADDING",   (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 5),
+    ]))
+
+    # 3b. Main chart
+    if chart_png:
+        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=7.2*cm)
+    else:
+        chart_cell = Paragraph("<i>Chart unavailable</i>", T["subline"])
+    chart_box = Table([[chart_cell]], colWidths=[CHART_W*cm])
     chart_box.setStyle(TableStyle([
-        ("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),
-        ("BACKGROUND",(0,0),(-1,-1),colors.white),
-        ("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),
-        ("TOPPADDING",(0,0),(-1,-1),2),("BOTTOMPADDING",(0,0),(-1,-1),2),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ("BOX",          (0,0),(-1,-1), 0.5, C["rule"]),
+        ("BACKGROUND",   (0,0),(-1,-1), C["white"]),
+        ("LEFTPADDING",  (0,0),(-1,-1), 2),
+        ("RIGHTPADDING", (0,0),(-1,-1), 2),
+        ("TOPPADDING",   (0,0),(-1,-1), 2),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
     ]))
 
-    COTD_W = round(PW - 9.0 - CHART_W/cm - 0.4, 2)
+    # 3c. Chart of Day
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
-        cotd_reason = cotd.get("reason", "")
         tf          = int(cotd.get("timeframe_days", 60))
-        reason_text = cotd_reason
-
-        cotd_header = Paragraph(
-            f"<b><font size='7.5' color='{PRIMARY}'>Chart of the Day</font></b><br/>"
-            f"<font size='6.5'><b>{_t(cotd_label, 26)}</b>  · last {tf} days</font>",
-            S["body"],
+        reason_text = cotd.get("reason", "")
+        cotd_hdr = Paragraph(
+            f"<b><font color='#1E88E5'>Chart of the Day</font></b>  "
+            f"<font size='6' color='#718096'>{_t(cotd_label,22)} · {tf}d</font>",
+            sty("ch", fontName="Helvetica-Bold", fontSize=7, textColor=C["navy"], leading=9),
         )
-        cotd_reason_p = Paragraph(reason_text, S["src"])
-
+        cotd_why  = Paragraph(reason_text, T["cotd_why"])
+        cotd_content = [[cotd_hdr], [Spacer(1,0.05*cm)]]
         if cotd_png:
-            cotd_chart = Image(BytesIO(cotd_png), width=(COTD_W - 0.2)*cm, height=3.8*cm)
-            cotd_inner = Table(
-                [[cotd_header], [Spacer(1,0.03*cm)], [cotd_chart], [Spacer(1,0.03*cm)], [cotd_reason_p]],
-                colWidths=[COTD_W*cm],
-            )
-        else:
-            cotd_inner = Table(
-                [[cotd_header], [Spacer(1,0.03*cm)], [cotd_reason_p]],
-                colWidths=[COTD_W*cm],
-            )
-        cotd_inner.setStyle(TableStyle([
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),
-            ("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#C9DCEE")),
-            ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
-            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+            cotd_img = Image(BytesIO(cotd_png), width=(COTD_W-0.3)*cm, height=3.5*cm)
+            cotd_content += [[cotd_img], [Spacer(1,0.04*cm)]]
+        cotd_content += [[cotd_why]]
+        cotd_box = Table(cotd_content, colWidths=[COTD_W*cm])
+        cotd_box.setStyle(TableStyle([
+            ("VALIGN",       (0,0),(-1,-1), "TOP"),
+            ("BACKGROUND",   (0,0),(-1,-1), C["light"]),
+            ("BOX",          (0,0),(-1,-1), 0.5, C["blue"]),
+            ("LEFTPADDING",  (0,0),(-1,-1), 6),
+            ("RIGHTPADDING", (0,0),(-1,-1), 6),
+            ("TOPPADDING",   (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 5),
         ]))
     else:
-        cotd_inner = Paragraph("", S["small"])
+        cotd_box = Table([[Paragraph("", T["bullet"])]], colWidths=[COTD_W*cm])
 
-    main_row = Table([[left_col, chart_box, cotd_inner]], colWidths=[9.0*cm, CHART_W, COTD_W*cm])
-    main_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
-    story += [main_row, Spacer(1, 0.07*cm)]
+    main_row = Table(
+        [[nar_box, Spacer(0.15*cm, 1), chart_box, Spacer(0.15*cm, 1), cotd_box]],
+        colWidths=[NAR_W*cm, 0.15*cm, CHART_W*cm, 0.15*cm, COTD_W*cm],
+    )
+    main_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+    story += [main_row, Spacer(1, 0.14*cm)]
 
-    # ── Data tables — 2×2 grid, each table wider and clearly separated ────────
-    # Each quadrant = PW/2 = 14.3cm.  Inner cols: label 6.5, level 2.3, 1D 1.8, WTD 1.8, YTD 1.9 = 14.3cm
-    Q  = PW / 2       # quadrant width in cm
-    CW = [Q*0.455*cm, Q*0.160*cm, Q*0.126*cm, Q*0.126*cm, Q*0.133*cm]
+    # ══════════════════════════════════════════════════════════════════════════
+    # 4. DATA TABLES — 2 rows × 2 panels, professional grid style
+    # ══════════════════════════════════════════════════════════════════════════
+    def _panel(df, panel_title):
+        """Build one data panel with coloured section header + striped rows."""
+        # Column widths: name 45%, level 18%, 1D 13%, WTD 12%, YTD 12%
+        half = UW / 2
+        cw = [half*0.45*cm, half*0.18*cm, half*0.13*cm, half*0.12*cm, half*0.12*cm]
 
-    def _sec(df, title_str):
-        return _styled_section(df, title_str, CW)
+        rows = [[
+            Paragraph("Instrument", T["th"]),
+            Paragraph("Level",      T["th"]),
+            Paragraph("1D",         T["th"]),
+            Paragraph("WTD",        T["th"]),
+            Paragraph("YTD",        T["th"]),
+        ]]
+        cmds = [
+            ("BACKGROUND",    (0,0),(-1,0),   C["mid"]),
+            ("TOPPADDING",    (0,0),(-1,0),   3),
+            ("BOTTOMPADDING", (0,0),(-1,0),   3),
+            ("LEFTPADDING",   (0,0),(-1,-1),  4),
+            ("RIGHTPADDING",  (0,0),(-1,-1),  4),
+            ("TOPPADDING",    (0,1),(-1,-1),  1.8),
+            ("BOTTOMPADDING", (0,1),(-1,-1),  1.8),
+            ("VALIGN",        (0,0),(-1,-1),  "MIDDLE"),
+            ("ALIGN",         (1,0),(-1,-1),  "RIGHT"),
+            ("LINEBELOW",     (0,0),(-1,-1),  0.3, C["rule"]),
+        ]
+        for ri, (_, row) in enumerate(df.iterrows()):
+            lbl  = _t(str(row.get("label","")), 22)
+            d1   = row.get("d1")
+            wtd  = row.get("wtd")
+            ytd  = row.get("ytd")
+            bg   = C["white"] if ri % 2 == 0 else C["stripe"]
+            cmds.append(("BACKGROUND", (0,ri+1),(-1,ri+1), bg))
+            rows.append([
+                Paragraph(lbl,      T["td"]),
+                Paragraph(_num(row.get("level")), T["td"]),
+                Paragraph(_pct(d1),  _pstyle(d1)),
+                Paragraph(_pct(wtd), _pstyle(wtd)),
+                Paragraph(_pct(ytd), _pstyle(ytd)),
+            ])
 
-    row1 = Table([[_sec(equities_df,"Equities"), _sec(rates_df,"Rates")]], colWidths=[Q*cm, Q*cm])
+        data_tbl = Table(rows, colWidths=cw, repeatRows=1)
+        data_tbl.setStyle(TableStyle(cmds))
+
+        # Section title bar with blue accent
+        title_p  = Paragraph(panel_title, sty("pt", fontName="Helvetica-Bold", fontSize=6.5, textColor=C["white"], leading=8))
+        title_row = Table([[title_p]], colWidths=[(half)*cm])
+        title_row.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1), C["navy"]),
+            ("LEFTPADDING",  (0,0),(-1,-1), 6),
+            ("TOPPADDING",   (0,0),(-1,-1), 3),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+            ("LINEBELOW",    (0,0),(-1,-1), 1.5, C["blue"]),
+        ]))
+
+        panel = Table([[title_row],[data_tbl]], colWidths=[half*cm])
+        panel.setStyle(TableStyle([
+            ("VALIGN",       (0,0),(-1,-1), "TOP"),
+            ("LEFTPADDING",  (0,0),(-1,-1), 0),
+            ("RIGHTPADDING", (0,0),(-1,-1), 0),
+            ("TOPPADDING",   (0,0),(-1,-1), 0),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+            ("BOX",          (0,0),(-1,-1), 0.5, C["rule"]),
+        ]))
+        return panel
+
+    GAP = 0.25*cm
+    row1 = Table(
+        [[_panel(equities_df,"EQUITIES"),    Spacer(GAP,1), _panel(rates_df,"RATES")]],
+        colWidths=[(UW/2)*cm, GAP, (UW/2)*cm],
+    )
     row1.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
 
-    row2 = Table([[_sec(commodities_df,"Commodities"), _sec(bonds_df,"Bonds & Crypto")]], colWidths=[Q*cm, Q*cm])
+    row2 = Table(
+        [[_panel(commodities_df,"COMMODITIES"), Spacer(GAP,1), _panel(bonds_df,"BONDS & CRYPTO")]],
+        colWidths=[(UW/2)*cm, GAP, (UW/2)*cm],
+    )
     row2.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
 
-    story += [row1, Spacer(1, 0.06*cm), row2]
+    story += [row1, Spacer(1, 0.14*cm), row2]
 
-    # ── Disclaimer ────────────────────────────────────────────────────────────
-    disc = "Disclaimer: This briefing is for informational purposes only and does not constitute investment advice or a recommendation to buy or sell any financial instrument. Information is believed reliable but accuracy cannot be guaranteed. Past performance is not indicative of future results. Market data may be delayed. Always consult a qualified financial adviser before making investment decisions."
-    disc_tbl = Table([[Paragraph(disc, S["disc"])]], colWidths=[PW*cm])
-    disc_tbl.setStyle(TableStyle([("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),2),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("LINEABOVE",(0,0),(-1,0),0.25,colors.HexColor("#D6E4F2"))]))
-    story += [Spacer(1, 0.05*cm), disc_tbl]
+    # ══════════════════════════════════════════════════════════════════════════
+    # 5. DISCLAIMER
+    # ══════════════════════════════════════════════════════════════════════════
+    disc = ("Disclaimer: This briefing is for informational purposes only and does not constitute "
+            "investment advice or a recommendation to buy or sell any financial instrument. "
+            "Information is believed reliable but accuracy cannot be guaranteed. "
+            "Past performance is not indicative of future results. Market data may be delayed. "
+            "Always consult a qualified financial adviser before making investment decisions.")
+    story += [
+        Spacer(1, 0.08*cm),
+        HRFlowable(width=UW*cm, thickness=0.5, color=C["rule"]),
+        Spacer(1, 0.04*cm),
+        Paragraph(disc, T["disc"]),
+    ]
 
     doc.build(story)
     return buffer.getvalue()
+
 
 def serialize_state(state):
     """Serialise state to JSON-safe dict. History is excluded — always re-fetched."""
@@ -1916,6 +2059,19 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
     }
 
 
+def _fig_to_png(fig, width, height, scale=1.5):
+    """Shared kaleido export helper. Returns bytes or None."""
+    try:
+        import plotly.io as pio
+        pio.kaleido.scope.mathjax = None
+        return pio.to_image(fig, format="png", scale=scale, width=width, height=height)
+    except Exception:
+        try:
+            return fig.to_image(format="png", scale=1, width=width, height=height)
+        except Exception:
+            return None
+
+
 def add_render_outputs(base_state, chart_window="YTD"):
     history = base_state["history"]
     chart_allowed_keys = base_state["chart_allowed_keys"]
@@ -2015,16 +2171,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
             add_event_marker(pdf_fig, IRAN_WAR_START_DATE, "Iran conflict start<br>28 Feb 2026", "#C62828", 0.12, 10)
             add_event_marker(pdf_fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 10)
             pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
-            pdf_chart_png = None
-            try:
-                import plotly.io as pio
-                pio.kaleido.scope.mathjax = None   # avoids MathJax download timeout on cloud
-                pdf_chart_png = pio.to_image(pdf_fig, format="png", scale=1.5, width=900, height=380)
-            except Exception:
-                try:
-                    pdf_chart_png = pdf_fig.to_image(format="png", scale=1)
-                except Exception:
-                    pdf_chart_png = None
+            pdf_chart_png = _fig_to_png(pdf_fig, width=940, height=400)
 
     # Chart of the Day — compute before build_pdf so it can appear in PDF
     cotd = pick_chart_of_day(history, base_state.get("news_df"))
@@ -2051,12 +2198,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
                     xaxis=dict(showgrid=False, tickformat="%d %b", tickfont=dict(size=7)),
                     yaxis=dict(showgrid=True, gridcolor="#F0F4F8", tickfont=dict(size=7)),
                 )
-                try:
-                    import plotly.io as pio
-                    pio.kaleido.scope.mathjax = None
-                    cotd_png = pio.to_image(cotd_fig, format="png", scale=2, width=400, height=200)
-                except Exception:
-                    cotd_png = None
+                cotd_png = _fig_to_png(cotd_fig, width=420, height=210)
         except Exception:
             cotd_png = None
 
@@ -2280,12 +2422,25 @@ else:
         with tabs[3]:
             st.dataframe(compact_table(st.session_state.get("bonds_df", st.session_state["commodities_df"])), use_container_width=True, height=260)
         with tabs[4]:
-            if show_definitions:
-                st.dataframe(definitions_table(st.session_state["equities_df"]),    use_container_width=True, height=220)
-                st.dataframe(definitions_table(st.session_state["rates_df"]),       use_container_width=True, height=130)
-                st.dataframe(definitions_table(st.session_state["commodities_df"]), use_container_width=True, height=220)
+            import streamlit as _st
+            dfs_def = []
+            for key in ["equities_df", "rates_df", "commodities_df"]:
+                df_src = st.session_state.get(key)
+                if df_src is not None:
+                    dfs_def.append(definitions_table(df_src))
+            if dfs_def:
+                combined = pd.concat(dfs_def, ignore_index=True).drop_duplicates()
+                st.dataframe(
+                    combined,
+                    use_container_width=True,
+                    height=520,
+                    column_config={
+                        "label":       st.column_config.TextColumn("Instrument", width="small"),
+                        "description": st.column_config.TextColumn("Description & What a Move Means", width="large"),
+                    },
+                )
             else:
-                st.info("Enable 'Show definitions' in the sidebar.")
+                st.info("Generate the brief first.")
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 

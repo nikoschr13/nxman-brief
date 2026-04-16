@@ -1467,7 +1467,7 @@ def render_news_bullets(writing, news_df):
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
-              metrics, writing, news_df, status, cotd=None):
+              metrics, writing, news_df, status, cotd=None, cotd_png=None):
     """One-page landscape PDF newsletter."""
     buffer   = BytesIO()
     PW       = 28.6   # usable page width in cm
@@ -1548,15 +1548,19 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
 
     story = []
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    ai_tag = f"AI: {'ON' if status['gemini_used'] else 'OFF'}"
-    news_tag = f"News: {'live' if status['live_news'] else 'placeholders'} · {status['article_count']} articles"
+    # ── Header — single clean row, no status clutter ─────────────────────────
     hdr = Table(
-        [[Paragraph(title, S["title"]), Paragraph(datetime.now().strftime("%A, %d %B %Y"), S["strap"])],
-         [Paragraph(f"{ai_tag}  ·  {news_tag}", S["strap"]), Paragraph("", S["strap"])]],
-        colWidths=[21*cm, 7.6*cm], rowHeights=[0.56*cm, 0.24*cm],
+        [[Paragraph(title, S["title"]),
+          Paragraph(datetime.now().strftime("%A, %d %B %Y"), S["strap"])]],
+        colWidths=[21*cm, 7.6*cm], rowHeights=[0.72*cm],
     )
-    hdr.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.HexColor(PRIMARY)),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),("ALIGN",(1,0),(1,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    hdr.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(PRIMARY)),
+        ("LEFTPADDING",(0,0),(-1,-1),10), ("RIGHTPADDING",(0,0),(-1,-1),10),
+        ("TOPPADDING", (0,0),(-1,-1),6),  ("BOTTOMPADDING",(0,0),(-1,-1),6),
+        ("ALIGN",(1,0),(1,-1),"RIGHT"),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+    ]))
     story += [hdr, Spacer(1, 0.05*cm)]
 
     # ── KPI bar ───────────────────────────────────────────────────────────────
@@ -1573,8 +1577,8 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     kpi_tbl.setStyle(TableStyle(kpi_cmds))
     story += [kpi_tbl, Spacer(1, 0.06*cm)]
 
-    # ── Main row: narrative | chart | cotd ────────────────────────────────────
-    CHART_W, CHART_H = 13.2*cm, 7.8*cm
+    # ── Main row: narrative (left) | cross-asset chart (centre) | cotd (right) ─
+    CHART_W, CHART_H = 13.0*cm, 7.6*cm
 
     bullets = writing.get("news_bullets") or []
     if not bullets and not news_df.empty:
@@ -1594,23 +1598,81 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         bul_content.append([Paragraph(f"\u2192 {b}", S["small"]), Paragraph(meta, S["src"])])
 
     bul_tbl = Table(bul_content, colWidths=[6.7*cm, 2.1*cm])
-    bul_tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.white),("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),1.5),("BOTTOMPADDING",(0,0),(-1,-1),1.5),("VALIGN",(0,0),(-1,-1),"TOP"),("LINEBELOW",(0,0),(-1,-2),0.15,colors.HexColor("#EEF2F7")),("ALIGN",(1,0),(1,-1),"RIGHT")]))
+    bul_tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,-1),colors.white),
+        ("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),
+        ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("TOPPADDING",(0,0),(-1,-1),1.5),("BOTTOMPADDING",(0,0),(-1,-1),1.5),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LINEBELOW",(0,0),(-1,-2),0.15,colors.HexColor("#EEF2F7")),
+        ("ALIGN",(1,0),(1,-1),"RIGHT"),
+    ]))
 
-    headline_p = Paragraph(f"<b><font size='8'>{writing['headline']}</font></b><br/><font size='6.5' color='#475467'>{writing['subheadline']}</font>", S["body"])
-    left_col = Table([[headline_p],[Spacer(1,0.04*cm)],[Paragraph("What's Moving Markets", S["sh"])],[bul_tbl]], colWidths=[9.0*cm])
+    headline_p = Paragraph(
+        f"<b><font size='8'>{writing['headline']}</font></b><br/>"
+        f"<font size='6.5' color='#475467'>{writing['subheadline']}</font>",
+        S["body"],
+    )
+    left_col = Table(
+        [[headline_p],[Spacer(1,0.04*cm)],
+         [Paragraph("What's Moving Markets", S["sh"])],[bul_tbl]],
+        colWidths=[9.0*cm],
+    )
     left_col.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
 
     chart_img = Image(BytesIO(chart_png), width=CHART_W, height=CHART_H) if chart_png else Paragraph("<i>Chart unavailable.</i>", S["small"])
     chart_box = Table([[chart_img]], colWidths=[CHART_W])
-    chart_box.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),("BACKGROUND",(0,0),(-1,-1),colors.white),("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),2),("BOTTOMPADDING",(0,0),(-1,-1),2),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    chart_box.setStyle(TableStyle([
+        ("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),
+        ("BACKGROUND",(0,0),(-1,-1),colors.white),
+        ("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),
+        ("TOPPADDING",(0,0),(-1,-1),2),("BOTTOMPADDING",(0,0),(-1,-1),2),
+        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+    ]))
 
-    COTD_W = PW - 9.0 - CHART_W/cm - 0.4
+    COTD_W = round(PW - 9.0 - CHART_W/cm - 0.4, 2)
     if cotd and isinstance(cotd, dict):
-        cotd_label  = cotd.get("label","Chart of the Day")
-        cotd_reason = cotd.get("reason","")
+        cotd_label  = cotd.get("label", "Notable Move")
+        cotd_reason = cotd.get("reason", "")
         tf          = int(cotd.get("timeframe_days", 60))
-        cotd_inner  = Table([[Paragraph("Chart of the Day", S["sh"])],[Paragraph(f"<b>{_t(cotd_label,28)}</b>  ({tf}d)", S["small"])],[Spacer(1,0.03*cm)],[Paragraph(cotd_reason, S["src"])]], colWidths=[COTD_W*cm])
-        cotd_inner.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#C9DCEE")),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+        # Compose reason: distinguish AI-generated vs z-score fallback
+        if "z-score" in cotd_reason.lower():
+            # Enrich fallback with plain-English explanation
+            reason_text = (
+                f"{cotd_label} is showing statistically unusual price movement today — "
+                f"its current level is significantly outside its normal 30-day trading range "
+                f"({cotd_reason.split('(')[-1].rstrip(')') if '(' in cotd_reason else ''}). "
+                f"This means the market is pricing in something material that has not yet fully "
+                f"been reflected in broader indices."
+            )
+        else:
+            reason_text = cotd_reason
+
+        cotd_header = Paragraph(
+            f"<b><font size='7.5' color='{PRIMARY}'>Chart of the Day</font></b><br/>"
+            f"<font size='6.5'><b>{_t(cotd_label, 26)}</b>  · last {tf} days</font>",
+            S["body"],
+        )
+        cotd_reason_p = Paragraph(reason_text, S["src"])
+
+        if cotd_png:
+            cotd_chart = Image(BytesIO(cotd_png), width=(COTD_W - 0.2)*cm, height=3.8*cm)
+            cotd_inner = Table(
+                [[cotd_header], [Spacer(1,0.03*cm)], [cotd_chart], [Spacer(1,0.03*cm)], [cotd_reason_p]],
+                colWidths=[COTD_W*cm],
+            )
+        else:
+            cotd_inner = Table(
+                [[cotd_header], [Spacer(1,0.03*cm)], [cotd_reason_p]],
+                colWidths=[COTD_W*cm],
+            )
+        cotd_inner.setStyle(TableStyle([
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),
+            ("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#C9DCEE")),
+            ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
+            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ]))
     else:
         cotd_inner = Paragraph("", S["small"])
 
@@ -1618,16 +1680,21 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     main_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
     story += [main_row, Spacer(1, 0.07*cm)]
 
-    # ── Data tables ───────────────────────────────────────────────────────────
-    SEC = PW / 4
-    CW  = [SEC*0.46*cm, SEC*0.19*cm, SEC*0.13*cm, SEC*0.12*cm, SEC*0.10*cm]
-    data_row = Table(
-        [[_styled_section(equities_df,"Equities",CW), _styled_section(rates_df,"Rates",CW),
-          _styled_section(commodities_df,"Commodities",CW), _styled_section(bonds_df,"Bonds & Crypto",CW)]],
-        colWidths=[SEC*cm]*4,
-    )
-    data_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
-    story += [data_row]
+    # ── Data tables — 2×2 grid, each table wider and clearly separated ────────
+    # Each quadrant = PW/2 = 14.3cm.  Inner cols: label 6.5, level 2.3, 1D 1.8, WTD 1.8, YTD 1.9 = 14.3cm
+    Q  = PW / 2       # quadrant width in cm
+    CW = [Q*0.455*cm, Q*0.160*cm, Q*0.126*cm, Q*0.126*cm, Q*0.133*cm]
+
+    def _sec(df, title_str):
+        return _styled_section(df, title_str, CW)
+
+    row1 = Table([[_sec(equities_df,"Equities"), _sec(rates_df,"Rates")]], colWidths=[Q*cm, Q*cm])
+    row1.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+
+    row2 = Table([[_sec(commodities_df,"Commodities"), _sec(bonds_df,"Bonds & Crypto")]], colWidths=[Q*cm, Q*cm])
+    row2.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+
+    story += [row1, Spacer(1, 0.06*cm), row2]
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     disc = "Disclaimer: This briefing is for informational purposes only and does not constitute investment advice or a recommendation to buy or sell any financial instrument. Information is believed reliable but accuracy cannot be guaranteed. Past performance is not indicative of future results. Market data may be delayed. Always consult a qualified financial adviser before making investment decisions."
@@ -1934,6 +2001,37 @@ def add_render_outputs(base_state, chart_window="YTD"):
     # Chart of the Day — compute before build_pdf so it can appear in PDF
     cotd = pick_chart_of_day(history, base_state.get("news_df"))
 
+    # Generate cotd chart PNG if we have a valid cotd and history
+    cotd_png = None
+    if cotd and isinstance(cotd, dict) and cotd.get("key"):
+        try:
+            key = cotd["key"]
+            tf  = int(cotd.get("timeframe_days", 60))
+            g   = history[history["key"] == key].sort_values("date")
+            cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=tf)
+            g   = g[g["date"] >= cutoff]
+            if not g.empty:
+                cotd_fig = go.Figure()
+                cotd_fig.add_trace(go.Scatter(
+                    x=g["date"], y=g["value"], mode="lines",
+                    line=dict(width=2, color=PRIMARY), fill="tozeroy",
+                    fillcolor="rgba(16,59,115,0.07)",
+                ))
+                cotd_fig.update_layout(
+                    height=200, margin=dict(l=10, r=10, t=10, b=25),
+                    plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
+                    xaxis=dict(showgrid=False, tickformat="%d %b", tickfont=dict(size=7)),
+                    yaxis=dict(showgrid=True, gridcolor="#F0F4F8", tickfont=dict(size=7)),
+                )
+                try:
+                    import plotly.io as pio
+                    pio.kaleido.scope.mathjax = None
+                    cotd_png = pio.to_image(cotd_fig, format="png", scale=2, width=400, height=200)
+                except Exception:
+                    cotd_png = None
+        except Exception:
+            cotd_png = None
+
     pdf_bytes = build_pdf(
         "Daily Market Brief",
         pdf_chart_png,
@@ -1946,6 +2044,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         base_state["news_df"],
         base_state["status"],
         cotd=cotd,
+        cotd_png=cotd_png,
     )
 
     state = dict(base_state)

@@ -1469,10 +1469,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
         return df[cols].copy()
 
     def styled_table(df, widths, font_size=6.0, header_size=6.5):
-        df2 = clean_df_for_pdf(pdf_table_df(df))
+        df2 = clean_df_for_pdf(df)
         if "label" in df2.columns:
             df2["label"] = df2["label"].apply(lambda x: shorten_text(x, 28))
         data = [list(df2.columns)] + df2.astype(str).values.tolist()
+        if len(data) < 2 or len(data[0]) == 0:
+            data = [["No data"], ["—"]]
+            widths = [sum(widths)]
         tbl = Table(data, colWidths=widths, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND",  (0,0),(-1,0),  colors.HexColor(PRIMARY)),
@@ -1496,9 +1499,9 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
     COL_W = [3.3*cm, 1.1*cm, 0.9*cm, 0.9*cm, 0.95*cm]
     SEC_W = sum(COL_W) / cm   # ≈ 7.15cm
 
-    eq_tbl   = Table([[Paragraph("Equities",  h)], [styled_table(equities_df,    COL_W)]], colWidths=[SEC_W*cm])
-    rt_tbl   = Table([[Paragraph("Rates",     h)], [styled_table(rates_df,       COL_W)]], colWidths=[SEC_W*cm])
-    cm_tbl   = Table([[Paragraph("Commodities / Bonds", h)], [styled_table(commodities_df, COL_W)]], colWidths=[SEC_W*cm])
+    eq_tbl   = Table([[Paragraph("Equities",  h)], [styled_table(pdf_table_df(equities_df),    COL_W)]], colWidths=[SEC_W*cm])
+    rt_tbl   = Table([[Paragraph("Rates",     h)], [styled_table(pdf_table_df(rates_df),       COL_W)]], colWidths=[SEC_W*cm])
+    cm_tbl   = Table([[Paragraph("Commodities / Bonds", h)], [styled_table(pdf_table_df(commodities_df), COL_W)]], colWidths=[SEC_W*cm])
 
     news_show = news_df.copy().fillna("")
     if not news_show.empty:

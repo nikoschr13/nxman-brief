@@ -7,3 +7,4 @@ reportlab>=4.2
 kaleido>=0.2.1
 yfinance>=0.2.54
 streamlit-autorefresh>=1.0.1
+feedparser>=6.0

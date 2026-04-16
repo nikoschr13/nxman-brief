@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
+import feedparser
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
@@ -343,102 +344,154 @@ def load_news_marketaux(count):
         return pd.DataFrame()
 
 
+# ── RSS feeds: free, no API key needed ───────────────────────────────────────
+RSS_FEEDS = [
+    ("Reuters",      "https://feeds.reuters.com/reuters/businessNews"),
+    ("Yahoo Finance","https://finance.yahoo.com/news/rssindex"),
+    ("CNBC",         "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
+    ("MarketWatch",  "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("Investing.com","https://www.investing.com/rss/news.rss"),
+]
+
+
 @st.cache_data(ttl=900)
-def load_news(count):
+def load_news_rss(max_per_feed: int = 8) -> pd.DataFrame:
+    """Fetch financial news from free RSS feeds. No API key required."""
+    rows = []
+    cutoff = datetime.utcnow() - timedelta(hours=36)
+
+    for source, url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:max_per_feed]:
+                pub = ""
+                ts  = None
+                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                    ts  = datetime(*entry.published_parsed[:6])
+                    pub = ts.strftime("%Y-%m-%dT%H:%M:%S")
+                    if ts < cutoff:
+                        continue          # skip older than 36h
+
+                headline = (entry.get("title") or "").strip()
+                link     = entry.get("link") or ""
+                summary  = (entry.get("summary") or "").strip()
+                # Strip any HTML tags from summary
+                summary  = summary.replace("<b>","").replace("</b>","").replace("<p>","").replace("</p>","")
+
+                if headline:
+                    rows.append({
+                        "headline":       headline,
+                        "source":         source,
+                        "published_at":   pub,
+                        "url":            link,
+                        "why_it_matters": summary[:200] if summary else "",
+                        "provider":       "RSS",
+                    })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+NEWS_COUNT = 12  # fixed — not user-selectable
+
+
+@st.cache_data(ttl=900)
+def load_news(count=NEWS_COUNT):
     placeholder_items = [
         {"headline": "Oil remains central as geopolitical tension stays elevated",       "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Higher oil prices support inflation concerns and affect rates, equities and currencies.", "provider": "Placeholder"},
-        {"headline": "Markets remain sensitive to higher-for-longer rate expectations",   "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "If rates stay elevated, bonds and equities may both face valuation pressure.",            "provider": "Placeholder"},
-        {"headline": "Risk sentiment mixed across regions",                               "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Regional leadership remains uneven, which supports diversification.",                     "provider": "Placeholder"},
-        {"headline": "Dollar strength weighs on emerging-market assets",                  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "A strong USD tightens financial conditions in EM economies.",                             "provider": "Placeholder"},
-        {"headline": "Gold holds near highs amid central bank demand",                    "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Central bank buying underpins gold as a reserve diversification tool.",                   "provider": "Placeholder"},
-        {"headline": "China stimulus expectations support commodity demand",              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Chinese policy stimulus could lift industrial metals and energy prices.",                  "provider": "Placeholder"},
-        {"headline": "European equities outperform on valuation re-rating",              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Cheaper valuations attract flows when US growth expectations moderate.",                   "provider": "Placeholder"},
-        {"headline": "Credit spreads stable; no systemic stress signals",                "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Tight spreads suggest credit markets are not pricing in near-term recession risk.",        "provider": "Placeholder"},
-        {"headline": "Crypto volatility elevated; Bitcoin tests key resistance",         "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Bitcoin remains a high-beta risk asset, often amplifying broader sentiment moves.",       "provider": "Placeholder"},
-        {"headline": "Swiss franc holds safe-haven bid; EUR/CHF under pressure",         "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "CHF strength can compress Swiss equity earnings and affects EUR-denominated portfolios.", "provider": "Placeholder"},
+        {"headline": "Markets remain sensitive to higher-for-longer rate expectations",  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "If rates stay elevated, bonds and equities may both face valuation pressure.",            "provider": "Placeholder"},
+        {"headline": "Risk sentiment mixed across regions",                              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Regional leadership remains uneven, which supports diversification.",                     "provider": "Placeholder"},
+        {"headline": "Dollar strength weighs on emerging-market assets",                 "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "A strong USD tightens financial conditions in EM economies.",                             "provider": "Placeholder"},
+        {"headline": "Gold holds near highs amid central bank demand",                   "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Central bank buying underpins gold as a reserve diversification tool.",                   "provider": "Placeholder"},
+        {"headline": "China stimulus expectations support commodity demand",             "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Chinese policy stimulus could lift industrial metals and energy prices.",                  "provider": "Placeholder"},
+        {"headline": "European equities outperform on valuation re-rating",             "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Cheaper valuations attract flows when US growth expectations moderate.",                   "provider": "Placeholder"},
+        {"headline": "Credit spreads stable; no systemic stress signals",               "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Tight spreads suggest credit markets are not pricing in near-term recession risk.",        "provider": "Placeholder"},
+        {"headline": "Crypto volatility elevated; Bitcoin tests key resistance",        "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Bitcoin remains a high-beta risk asset, often amplifying broader sentiment moves.",       "provider": "Placeholder"},
+        {"headline": "Swiss franc holds safe-haven bid; EUR/CHF under pressure",        "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "CHF strength can compress Swiss equity earnings and affects EUR-denominated portfolios.", "provider": "Placeholder"},
+        {"headline": "Global equities digest mixed macro signals",                      "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Uneven growth signals are keeping cross-asset correlations unstable.",                    "provider": "Placeholder"},
+        {"headline": "Bond markets price in fewer rate cuts for 2026",                  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Fewer expected cuts support yields but put pressure on equity valuations.",               "provider": "Placeholder"},
     ]
-    placeholder_df = pd.DataFrame(placeholder_items[:max(count, 10)])
+    placeholder_df = pd.DataFrame(placeholder_items)
     placeholder_df["category"] = "Other"
-
-    if not MARKETAUX_API_TOKEN:
-        return placeholder_df, {
-            "live_news": False,
-            "article_count": 0,
-            "url_count": 0,
-            "reason": "No MARKETAUX_API_TOKEN",
-        }
-
-    df = load_news_marketaux(count)
-    if df.empty:
-        return placeholder_df, {
-            "live_news": False,
-            "article_count": 0,
-            "url_count": 0,
-            "reason": "Marketaux returned no usable articles",
-        }
-
-    df["headline_key"] = df["headline"].fillna("").str.lower().str.strip()
-    df = df.drop_duplicates(subset=["headline_key", "source", "url"]).copy()
 
     def classify(headline: str):
         h = (headline or "").lower()
-        if any(k in h for k in ["fed", "ecb", "inflation", "treasury", "yield", "rates", "cpi", "ppi"]):
+        if any(k in h for k in ["fed", "ecb", "boe", "snb", "inflation", "treasury", "yield", "rates", "cpi", "ppi", "gdp", "fomc"]):
             return "Macro / Rates"
-        if any(k in h for k in ["iran", "war", "ceasefire", "russia", "ukraine", "china", "tariff", "trade"]):
+        if any(k in h for k in ["iran", "war", "ceasefire", "russia", "ukraine", "china", "tariff", "trade", "sanctions", "nato", "geopolit"]):
             return "Geopolitics"
-        if any(k in h for k in ["oil", "gold", "copper", "crude", "brent", "wti", "commodity"]):
+        if any(k in h for k in ["oil", "gold", "copper", "crude", "brent", "wti", "commodity", "gas", "silver", "wheat"]):
             return "Commodities"
-        if any(k in h for k in ["bitcoin", "crypto", "ethereum"]):
+        if any(k in h for k in ["bitcoin", "crypto", "ethereum", "blockchain", "defi", "token"]):
             return "Crypto"
-        if any(k in h for k in ["earnings", "stock", "shares", "equity", "nasdaq", "s&p", "dow"]):
+        if any(k in h for k in ["earnings", "stock", "shares", "equity", "nasdaq", "s&p", "dow", "ipo", "buyback", "dividend"]):
             return "Equities"
         return "Other"
 
     def score_row(row):
-        headline = (row.get("headline") or "").lower()
+        h = (row.get("headline") or "").lower()
         score = 0
-        for kw in [
-            "fed", "ecb", "inflation", "yield", "treasury", "oil", "iran", "war",
-            "ceasefire", "china", "tariff", "earnings", "economy", "rates",
-            "dollar", "euro", "franc", "bitcoin", "gold"
-        ]:
-            if kw in headline:
+        for kw in ["fed","ecb","inflation","yield","treasury","oil","iran","war","ceasefire",
+                   "china","tariff","earnings","economy","rates","dollar","euro","franc","bitcoin","gold","snb"]:
+            if kw in h:
                 score += 2
-        if row.get("url"):
-            score += 1
-        if row.get("source"):
-            score += 1
+        if row.get("url"):   score += 1
+        if row.get("source"): score += 1
         return score
 
+    # ── Fetch from all sources ────────────────────────────────────────────────
+    frames = []
+
+    # Marketaux (paid, most relevant if token set)
+    if MARKETAUX_API_TOKEN:
+        mdf = load_news_marketaux(count * 3)
+        if not mdf.empty:
+            frames.append(mdf)
+
+    # Free RSS feeds (always attempt)
+    rdf = load_news_rss()
+    if not rdf.empty:
+        frames.append(rdf)
+
+    if not frames:
+        return placeholder_df.head(count), {
+            "live_news": False, "article_count": 0, "url_count": 0,
+            "reason": "No live sources returned data — showing placeholders",
+        }
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Deduplicate by normalised headline
+    df["headline_key"] = df["headline"].fillna("").str.lower().str.strip()
+    df = df.drop_duplicates(subset=["headline_key"]).copy()
+    df = df[df["headline"].str.len() > 15].copy()   # drop junk short entries
+
     df["category"] = df["headline"].apply(classify)
-    df["score"] = df.apply(score_row, axis=1)
-    df = df.sort_values(by=["score", "published_at"], ascending=[False, False]).head(max(count, 10)).copy()
+    df["score"]    = df.apply(score_row, axis=1)
+    df = df.sort_values(by=["score", "published_at"], ascending=[False, False])
     df = df.drop(columns=["headline_key", "score"], errors="ignore")
 
-    final_rows = []
-    seen = set()
-    # First pass: up to 3 per category to ensure variety
-    for category in ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]:
-        sub = df[df["category"] == category].head(3)
-        for _, row in sub.iterrows():
-            hk = row["headline"]
-            if hk not in seen:
-                seen.add(hk)
+    # Ensure variety: up to 3 per category, then fill to count
+    final_rows, seen = [], set()
+    for cat in ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]:
+        for _, row in df[df["category"] == cat].head(3).iterrows():
+            if row["headline"] not in seen:
+                seen.add(row["headline"])
                 final_rows.append(row)
-    # If still under count, fill from remaining scored articles
-    remaining = df[~df["headline"].isin(seen)].head(count)
-    for _, row in remaining.iterrows():
+    for _, row in df[~df["headline"].isin(seen)].iterrows():
         if len(final_rows) >= count:
             break
         final_rows.append(row)
 
     final_df = pd.DataFrame(final_rows).head(count) if final_rows else df.head(count)
+    sources_used = ", ".join(sorted(final_df["provider"].fillna("").unique()))
 
     return final_df, {
-        "live_news": True,
+        "live_news":     True,
         "article_count": len(final_df),
-        "url_count": int(final_df["url"].fillna("").astype(str).str.len().gt(0).sum()),
-        "reason": "Live Marketaux news ranked by relevance and topic coverage",
+        "url_count":     int(final_df["url"].fillna("").astype(str).str.len().gt(0).sum()),
+        "reason":        f"Live: {sources_used}",
     }
 
 
@@ -1325,6 +1378,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
         )
     )
     left_col = Table([[summary], [Spacer(1, 0.04 * cm)], [metrics_tbl]], colWidths=[10.4 * cm])
+    left_col.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
 
     # What Matters bullets
     wm_rows = [[Paragraph(f"• {x}", body_small)] for x in writing["what_matters"][:4]]
@@ -1355,6 +1409,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
          [Paragraph("What's Moving Markets", h)], [news_bul_tbl]],
         colWidths=[7.2 * cm],
     )
+    mid_col.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
 
     chart_box = Table(
         [[Image(BytesIO(chart_png), width=9.0 * cm, height=4.9 * cm)]] if chart_png else [[Paragraph("No chart available", body)]],
@@ -1373,7 +1428,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
         )
     )
 
-    story += [Table([[left_col, mid_col, chart_box]], colWidths=[10.5 * cm, 7.3 * cm, 9.3 * cm]), Spacer(1, 0.06 * cm)]
+    outer_tbl = Table([[left_col, mid_col, chart_box]], colWidths=[10.5 * cm, 7.3 * cm, 9.3 * cm])
+    outer_tbl.setStyle(TableStyle([
+        ("VALIGN",       (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+    ]))
+    story += [outer_tbl, Spacer(1, 0.06 * cm)]
 
     def styled_table(df, widths, font_size=6.0, header_size=6.5):
         df2 = clean_df_for_pdf(df)
@@ -1545,17 +1606,17 @@ def latest_available_snapshot():
         return latest.stem, load_snapshot(latest.stem)
 
 
-def build_base_state(include_crypto_flag, news_count_value, use_gemini_flag):
+def build_base_state(include_crypto_flag, use_gemini_flag):
     snapshot, history, chart_allowed_keys = build_bundle()
 
     if not include_crypto_flag:
         snapshot = snapshot[snapshot["group"] != "alternatives"].reset_index(drop=True)
 
-    equities_df = snapshot[snapshot["group"] == "equities"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
-    rates_df = snapshot[snapshot["group"] == "rates"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
-    commodities_df = snapshot[snapshot["group"].isin(["commodities", "alternatives", "bonds"])] [["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    equities_df    = snapshot[snapshot["group"] == "equities"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    rates_df       = snapshot[snapshot["group"] == "rates"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    commodities_df = snapshot[snapshot["group"].isin(["commodities", "alternatives", "bonds"])][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
 
-    news_df, news_status = load_news(news_count_value)
+    news_df, news_status = load_news()
     writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag)
 
     # Merge Gemini per-article angles into news_df (keyed by headline)
@@ -1729,36 +1790,26 @@ def add_render_outputs(base_state, chart_window="YTD"):
     return state
 
 
+# ── Fixed constants (not user-selectable) ────────────────────────────────────
+include_crypto    = True         # always include crypto
+chart_mode        = "Expanded"   # always use extended chart
+use_gemini_writing = True        # always attempt Gemini (falls back if key missing)
+
 generate = False
 
 with st.sidebar:
-    st.markdown("**Data**")
-    include_crypto = st.checkbox("Include crypto", value=True)
-    mode = st.radio("Data mode", ["Live", "Morning snapshot"], index=1)
+    st.markdown("**Data mode**")
+    mode = st.radio("", ["Live", "Morning snapshot"], index=1, label_visibility="collapsed")
     st.caption("Morning snapshot freezes at 08:00 Zurich — use for newsletters.")
 
     st.markdown("---")
-    st.markdown("**Chart**")
-    chart_mode   = st.radio("Series", ["Core", "Expanded"], index=0)
-    chart_window = st.radio("Window", ["YTD", "3 months", "6 months", "1 year"], index=0)
+    st.markdown("**Chart window**")
+    chart_window = st.radio("", ["YTD", "3 months", "6 months", "1 year"], index=0, label_visibility="collapsed")
 
     st.markdown("---")
-    st.markdown("**News**")
-    news_count = st.selectbox("Articles to fetch", [5, 8, 10, 15], index=1)
-    all_categories = ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]
-    news_category_filter = st.multiselect(
-        "Filter by topic",
-        all_categories,
-        default=[],
-        placeholder="All topics",
-    )
-
-    st.markdown("---")
-    st.markdown("**AI & refresh**")
-    use_gemini_writing = st.checkbox("Gemini commentary + article angles", value=True)
-    show_definitions   = st.checkbox("Show definitions tables", value=False)
-    auto_refresh       = st.checkbox("Auto-refresh (live mode)", value=False)
-    refresh_seconds    = st.selectbox("Refresh every (s)", [30, 60, 120, 300], index=1)
+    show_definitions = st.checkbox("Show definitions tables", value=False)
+    auto_refresh     = st.checkbox("Auto-refresh (live mode)", value=False)
+    refresh_seconds  = st.selectbox("Refresh every (s)", [30, 60, 120, 300], index=1)
 
     if auto_refresh and mode == "Live":
         st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
@@ -1768,14 +1819,14 @@ with st.sidebar:
 
     st.markdown("---")
     generate = st.button("▶  Generate Daily Brief", type="primary", use_container_width=True)
-    st.caption("Default ceasefire marker: 07 Apr 2026. Override via IRAN_CEASEFIRE_DATE in secrets.")
+    st.caption("Event markers: Iran conflict 28 Feb 2026 · ceasefire 07 Apr 2026")
 
 if generate:
     znow = now_zurich()
     today_str = znow.date().isoformat()
 
     if mode == "Live":
-        base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
+        base_state = build_base_state(include_crypto, use_gemini_writing)
         state = add_render_outputs(base_state, chart_window)
         st.session_state.update(state)
         st.session_state["snapshot_mode_note"] = f"Live mode | generated at {znow.strftime('%H:%M')} Zurich"
@@ -1797,7 +1848,7 @@ if generate:
 
         else:
             if znow.hour >= SNAPSHOT_HOUR:
-                base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
+                base_state = build_base_state(include_crypto, use_gemini_writing)
                 save_snapshot(base_state, today_str)
                 state = add_render_outputs(base_state, chart_window)
                 st.session_state.update(state)
@@ -1817,7 +1868,7 @@ if generate:
                     )
                     st.session_state["ui_use_gemini"] = use_gemini_writing
                 else:
-                    base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
+                    base_state = build_base_state(include_crypto, use_gemini_writing)
                     state = add_render_outputs(base_state, chart_window)
                     st.session_state.update(state)
                     st.session_state["snapshot_mode_note"] = (

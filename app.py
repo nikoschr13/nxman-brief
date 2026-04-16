@@ -60,6 +60,8 @@ GEMINI_FALLBACK_MODELS = [
     ).split(",")
     if m.strip()
 ]
+GROQ_API_KEY   = get_secret("GROQ_API_KEY")
+GROQ_MODEL     = get_secret("GROQ_MODEL", "llama-3.3-70b-versatile")
 MANUAL_BUND_10Y = get_secret("MANUAL_BUND_10Y")
 MANUAL_CH_10Y   = get_secret("MANUAL_CH_10Y")
 
@@ -515,8 +517,7 @@ def build_local_news_summary(news_df):
 
 
 def try_gemini_model(model_name, payload):
-    """Call Gemini. Does NOT set responseMimeType — that header causes 400s on some models.
-    Instead we ask for JSON in the prompt and strip fences ourselves."""
+    """Call one Gemini model. Returns requests.Response."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     return requests.post(
         url,
@@ -543,74 +544,116 @@ def _safe_json_dumps(obj) -> str:
 
 
 def _strip_json_fences(raw: str) -> str:
-    """Remove ```json / ``` markdown fences Gemini sometimes adds."""
+    """Remove ```json / ``` markdown fences that models sometimes add."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]
     if raw.endswith("```"):
         raw = raw.rsplit("```", 1)[0]
     return raw.strip()
+    return requests.post(
+        url,
+        headers={"Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": payload}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
+        },
+        timeout=60,
+    )
+
+
+def try_groq(payload_obj: dict):
+    """Call Groq OpenAI-compatible endpoint. payload_obj is the already-parsed dict."""
+    # Build a clean natural-language prompt from the structured payload
+    instruction = payload_obj.get("instruction", "")
+    headlines   = payload_obj.get("headlines", [])
+    snapshot    = payload_obj.get("market_snapshot", [])
+
+    user_msg = (
+        f"{instruction}\n\n"
+        f"Headlines (JSON):\n{json.dumps(headlines, ensure_ascii=False)}\n\n"
+        f"Market snapshot (JSON):\n{json.dumps(snapshot, ensure_ascii=False)}"
+    )
+
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model":       GROQ_MODEL,
+            "messages":    [{"role": "user", "content": user_msg}],
+            "temperature": 0.2,
+            "max_tokens":  2048,
+        },
+        timeout=60,
+    )
+    return r
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def gemini_generate_json(payload):
-    if not GEMINI_API_KEY:
-        return None, "No GEMINI_API_KEY"
-
-    models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+def ai_generate_json(payload: str):
+    """Try Gemini first (all fallback models), then Groq. Returns (parsed_dict, reason_str)."""
     errors = []
 
-    for model_name in models_to_try:
-        for attempt in range(3):
-            try:
-                r = try_gemini_model(model_name, payload)
-
-                if r.ok:
-                    data = r.json()
-                    # Check for safety blocks
-                    if data.get("promptFeedback", {}).get("blockReason"):
-                        errors.append(f"{model_name}: blocked — {data['promptFeedback']['blockReason']}")
+    # ── 1. Gemini chain ───────────────────────────────────────────────────────
+    if GEMINI_API_KEY:
+        models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+        for model_name in models_to_try:
+            for attempt in range(2):
+                try:
+                    r = try_gemini_model(model_name, payload)
+                    if r.ok:
+                        data       = r.json()
+                        if data.get("promptFeedback", {}).get("blockReason"):
+                            errors.append(f"Gemini/{model_name}: blocked")
+                            break
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            errors.append(f"Gemini/{model_name}: no candidates")
+                            break
+                        raw     = "".join(p.get("text","") for p in candidates[0].get("content",{}).get("parts",[])).strip()
+                        cleaned = _strip_json_fences(raw)
+                        if not cleaned:
+                            errors.append(f"Gemini/{model_name}: empty")
+                            break
+                        try:
+                            return json.loads(cleaned), f"Gemini OK ({model_name})"
+                        except Exception:
+                            errors.append(f"Gemini/{model_name}: bad JSON")
+                            break
+                    else:
+                        if r.status_code == 429:
+                            errors.append(f"Gemini/{model_name}: 429 quota")
+                            break          # skip to next model immediately
+                        if r.status_code in {500, 503} and attempt == 0:
+                            time.sleep(3)
+                            continue
+                        errors.append(f"Gemini/{model_name}: HTTP {r.status_code}")
                         break
-                    candidates = data.get("candidates", [])
-                    if not candidates:
-                        errors.append(f"{model_name}: no candidates returned")
+                except Exception as e:
+                    errors.append(f"Gemini/{model_name}: {type(e).__name__}")
+                    if attempt == 0:
+                        time.sleep(2)
+                    else:
                         break
 
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    raw = "".join([p.get("text", "") for p in parts]).strip()
-                    if not raw:
-                        errors.append(f"{model_name}: empty response")
-                        break
+    # ── 2. Groq fallback ──────────────────────────────────────────────────────
+    if GROQ_API_KEY:
+        try:
+            payload_obj = json.loads(payload)
+            r = try_groq(payload_obj)
+            if r.ok:
+                raw     = r.json()["choices"][0]["message"]["content"].strip()
+                cleaned = _strip_json_fences(raw)
+                return json.loads(cleaned), f"Groq OK ({GROQ_MODEL})"
+            else:
+                errors.append(f"Groq: HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"Groq: {type(e).__name__}: {str(e)[:80]}")
 
-                    cleaned = _strip_json_fences(raw)
-                    try:
-                        parsed = json.loads(cleaned)
-                        return parsed, f"Gemini OK ({model_name})"
-                    except Exception:
-                        errors.append(f"{model_name}: invalid JSON | {cleaned[:120]}")
-                        break
-
-                else:
-                    msg = f"{model_name}: HTTP {r.status_code}"
-                    if r.status_code == 429:
-                        # Rate limited on this model — move to next immediately
-                        errors.append(msg + " (quota)")
-                        break
-                    if r.status_code in {500, 503} and attempt < 2:
-                        time.sleep(3 + attempt * 2)
-                        continue
-                    errors.append(msg)
-                    break
-
-            except Exception as e:
-                msg = f"{model_name}: {type(e).__name__}: {str(e)[:120]}"
-                if attempt < 2:
-                    time.sleep(2 + attempt)
-                    continue
-                errors.append(msg)
-                break
-
-    return None, "Gemini failed: " + " || ".join(errors[:4])
+    return None, "AI failed: " + " | ".join(errors[:6])
 
 
 def build_writing(news_df, snapshot, use_gemini):
@@ -660,15 +703,15 @@ def build_writing(news_df, snapshot, use_gemini):
     except Exception as e:
         return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
 
-    out, reason = gemini_generate_json(payload)
+    out, reason = ai_generate_json(payload)
     if isinstance(out, dict) and isinstance(out.get("what_matters"), list) and len(out["what_matters"]) >= 4:
         return (
             {
-                "headline":      out.get("headline")     or fallback["headline"],
-                "subheadline":   out.get("subheadline")  or fallback["subheadline"],
-                "news_summary":  out.get("news_summary") or fallback["news_summary"],
-                "what_matters":  out["what_matters"][:4],
-                "news_bullets":  out.get("news_bullets") or [],
+                "headline":       out.get("headline")    or fallback["headline"],
+                "subheadline":    out.get("subheadline") or fallback["subheadline"],
+                "news_summary":   out.get("news_summary") or fallback["news_summary"],
+                "what_matters":   out["what_matters"][:4],
+                "news_bullets":   out.get("news_bullets") or [],
                 "article_angles": out.get("article_angles") or [],
             },
             {"gemini_used": True, "reason": reason},
@@ -1949,9 +1992,10 @@ else:
     mode_note = st.session_state.get("snapshot_mode_note", "")
     g_col  = "🟢" if status["gemini_used"]  else "🟡"
     n_col  = "🟢" if status["live_news"]    else "🟡"
-    gemini_detail = "" if status["gemini_used"] else f" ({status.get('gemini_reason','')[:60]})"
+    ai_detail = status.get("gemini_reason", "")
+    ai_label  = ai_detail if status["gemini_used"] else f"OFF ({ai_detail[:55]})"
     st.caption(
-        f"{mode_note}   |   {g_col} Gemini {'ON' if status['gemini_used'] else 'OFF'}{gemini_detail}  "
+        f"{mode_note}   |   {g_col} AI {ai_label}  "
         f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
         f"·  {status['article_count']} articles"
     )

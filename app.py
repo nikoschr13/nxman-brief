@@ -520,10 +520,23 @@ def try_gemini_model(model_name, payload):
         headers={"Content-Type": "application/json"},
         json={
             "contents": [{"parts": [{"text": payload}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1200},
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
         },
-        timeout=45,
+        timeout=60,
     )
+
+
+def _safe_json_dumps(obj) -> str:
+    """json.dumps that converts numpy/pandas scalars to native Python types."""
+    import math
+    class SafeEncoder(json.JSONEncoder):
+        def default(self, o):
+            if hasattr(o, "item"):        # numpy scalar
+                return o.item()
+            if isinstance(o, float) and (math.isnan(o) or math.isinf(o)):
+                return None
+            return super().default(o)
+    return json.dumps(obj, cls=SafeEncoder)
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -612,23 +625,33 @@ def build_writing(news_df, snapshot, use_gemini):
     if not use_gemini:
         return fallback, {"gemini_used": False, "reason": "Checkbox off"}
 
-    payload = json.dumps(
-        {
+    try:
+        snap_rows = (
+            snapshot[["label", "group", "d1", "ytd"]]
+            .fillna(0)
+            .round(2)
+            .to_dict(orient="records")[:15]
+        )
+        head_rows = (
+            news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records")
+            if news_df is not None and not news_df.empty else []
+        )
+        payload = _safe_json_dumps({
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
                 "Keys required: headline, subheadline, news_summary, what_matters, news_bullets. "
                 "what_matters: exactly 4 concise bullet strings about key investment themes. "
                 "news_bullets: 5 to 8 plain-English bullets summarising what happened since yesterday "
                 "and what it means for markets. "
-                "Each bullet must link the event to the market impact — like: "
-                "'US-Iran nuclear talks progressed — equity markets rallied while Treasury yields fell as risk appetite improved' "
-                "or 'Fed minutes signalled fewer cuts — bond prices fell as traders repriced rate expectations upward'. "
-                "Be specific, factual, cause-and-effect. No jargon, no preamble."
+                "Each bullet must link the event to the market impact — for example: "
+                "'US-Iran talks progressed — equities rallied while Treasury yields fell as risk appetite improved'. "
+                "Be specific, factual, cause-and-effect. No jargon. No preamble."
             ),
-            "headlines": news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records") if news_df is not None and not news_df.empty else [],
-            "market_snapshot": snapshot[["label", "group", "d1", "wtd", "ytd"]].fillna("").to_dict(orient="records")[:20],
-        }
-    )
+            "headlines":        head_rows,
+            "market_snapshot":  snap_rows,
+        })
+    except Exception as e:
+        return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
 
     out, reason = gemini_generate_json(payload)
     if isinstance(out, dict) and isinstance(out.get("what_matters"), list) and len(out["what_matters"]) >= 4:
@@ -1436,49 +1459,70 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
     ]))
     story += [outer_tbl, Spacer(1, 0.06 * cm)]
 
+    # ── Available width on landscape A4 with 0.45cm margins each side ──────────
+    # 29.7cm - 0.9cm margins = 28.8cm usable. Use 28.6cm to be safe.
+    PAGE_W = 28.6  # cm
+
+    def pdf_table_df(df):
+        """Remove description col and keep only display columns."""
+        cols = [c for c in ["label", "level", "d1", "wtd", "ytd"] if c in df.columns]
+        return df[cols].copy()
+
     def styled_table(df, widths, font_size=6.0, header_size=6.5):
-        df2 = clean_df_for_pdf(df)
+        df2 = clean_df_for_pdf(pdf_table_df(df))
         if "label" in df2.columns:
-            df2["label"] = df2["label"].apply(lambda x: shorten_text(x, 34))
+            df2["label"] = df2["label"].apply(lambda x: shorten_text(x, 28))
         data = [list(df2.columns)] + df2.astype(str).values.tolist()
         tbl = Table(data, colWidths=widths, repeatRows=1)
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(PRIMARY)),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, 0), header_size),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D6E4F2")),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor(LIGHT)]),
-                    ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor(TEXT)),
-                    ("FONTSIZE", (0, 1), (-1, -1), font_size),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-                    ("TOPPADDING", (0, 0), (-1, -1), 2),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]
-            )
-        )
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",  (0,0),(-1,0),  colors.HexColor(PRIMARY)),
+            ("TEXTCOLOR",   (0,0),(-1,0),  colors.white),
+            ("FONTNAME",    (0,0),(-1,0),  "Helvetica-Bold"),
+            ("FONTSIZE",    (0,0),(-1,0),  header_size),
+            ("GRID",        (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor(LIGHT)]),
+            ("TEXTCOLOR",   (0,1),(-1,-1), colors.HexColor(TEXT)),
+            ("FONTSIZE",    (0,1),(-1,-1), font_size),
+            ("LEFTPADDING", (0,0),(-1,-1), 2),
+            ("RIGHTPADDING",(0,0),(-1,-1), 2),
+            ("TOPPADDING",  (0,0),(-1,-1), 2),
+            ("BOTTOMPADDING",(0,0),(-1,-1),2),
+            ("VALIGN",      (0,0),(-1,-1), "MIDDLE"),
+        ]))
         return tbl
 
-    eq_tbl = Table([[Paragraph("Equities", h)], [styled_table(equities_df, [3.65 * cm, 1.05 * cm, 0.82 * cm, 0.82 * cm, 0.82 * cm, 0.82 * cm])]], colWidths=[7.98 * cm])
-    rt_tbl = Table([[Paragraph("Rates", h)], [styled_table(rates_df, [3.55 * cm, 1.0 * cm, 0.8 * cm, 0.8 * cm, 0.8 * cm, 0.8 * cm])]], colWidths=[7.75 * cm])
-    cm_tbl = Table([[Paragraph("Commodities / Alternatives / Bonds", h)], [styled_table(commodities_df, [3.55 * cm, 1.0 * cm, 0.8 * cm, 0.8 * cm, 0.8 * cm, 0.8 * cm])]], colWidths=[7.75 * cm])
+    # label + level + d1 + wtd + ytd = 5 cols
+    # Each section gets ~7.15cm wrapper. Inner cols: label 3.3, level 1.1, d1 0.9, wtd 0.9, ytd 0.95 = 7.15
+    COL_W = [3.3*cm, 1.1*cm, 0.9*cm, 0.9*cm, 0.95*cm]
+    SEC_W = sum(COL_W) / cm   # ≈ 7.15cm
+
+    eq_tbl   = Table([[Paragraph("Equities",  h)], [styled_table(equities_df,    COL_W)]], colWidths=[SEC_W*cm])
+    rt_tbl   = Table([[Paragraph("Rates",     h)], [styled_table(rates_df,       COL_W)]], colWidths=[SEC_W*cm])
+    cm_tbl   = Table([[Paragraph("Commodities / Bonds", h)], [styled_table(commodities_df, COL_W)]], colWidths=[SEC_W*cm])
 
     news_show = news_df.copy().fillna("")
     if not news_show.empty:
-        news_show = news_show[["headline", "source", "url"]].head(3).copy()
-        news_show["headline"] = news_show["headline"].apply(lambda x: shorten_text(x, 52))
-        news_show["source"] = news_show["source"].apply(lambda x: shorten_text(x, 16))
-        news_show["url"] = news_show["url"].apply(lambda x: short_url(x, 24))
+        news_show = news_show[["headline", "source", "url"]].head(4).copy()
+        news_show["headline"] = news_show["headline"].apply(lambda x: shorten_text(x, 48))
+        news_show["source"]   = news_show["source"].apply(lambda x: shorten_text(x, 14))
+        news_show["url"]      = news_show["url"].apply(lambda x: short_url(x, 22))
     else:
-        news_show = pd.DataFrame({"headline": ["No live article links"], "source": [""], "url": [""]})
+        news_show = pd.DataFrame({"headline": ["No live articles"], "source": [""], "url": [""]})
 
-    news_tbl = Table([[Paragraph("Specific News / Links", h)], [styled_table(news_show, [4.5 * cm, 1.35 * cm, 1.8 * cm], font_size=5.8, header_size=6.3)]], colWidths=[7.95 * cm])
+    # News section gets remaining width
+    news_w = PAGE_W - 3 * SEC_W   # ≈ 28.6 - 21.45 = 7.15cm
+    news_tbl = Table(
+        [[Paragraph("News / Links", h)],
+         [styled_table(news_show, [3.8*cm, 1.3*cm, 2.05*cm], font_size=5.8, header_size=6.3)]],
+        colWidths=[news_w * cm],
+    )
 
-    story += [Table([[eq_tbl, rt_tbl, cm_tbl, news_tbl]], colWidths=[8.0 * cm, 7.8 * cm, 7.8 * cm, 8.0 * cm])]
+    bottom_row = Table(
+        [[eq_tbl, rt_tbl, cm_tbl, news_tbl]],
+        colWidths=[SEC_W*cm, SEC_W*cm, SEC_W*cm, news_w*cm],
+    )
+    bottom_row.setStyle(TableStyle([("VALIGN", (0,0),(-1,-1), "TOP")]))
+    story += [bottom_row]
     doc.build(story)
     return buffer.getvalue()
 
@@ -1763,10 +1807,16 @@ def add_render_outputs(base_state, chart_window="YTD"):
             add_event_marker(pdf_fig, IRAN_WAR_START_DATE, "Iran conflict start<br>28 Feb 2026", "#C62828", 0.12, 10)
             add_event_marker(pdf_fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 10)
             pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
-            try:
-                pdf_chart_png = pdf_fig.to_image(format="png", scale=2)
-            except Exception:
-                pdf_chart_png = None
+            pdf_chart_png = None
+            for _scale in (1.5, 1, None):
+                if _scale is None:
+                    break
+                try:
+                    pdf_chart_png = pdf_fig.to_image(format="png", scale=_scale, engine="kaleido")
+                    if pdf_chart_png:
+                        break
+                except Exception:
+                    continue
 
     pdf_bytes = build_pdf(
         "Daily Market Brief",
@@ -1889,8 +1939,9 @@ else:
     mode_note = st.session_state.get("snapshot_mode_note", "")
     g_col  = "🟢" if status["gemini_used"]  else "🟡"
     n_col  = "🟢" if status["live_news"]    else "🟡"
+    gemini_detail = "" if status["gemini_used"] else f" ({status.get('gemini_reason','')[:60]})"
     st.caption(
-        f"{mode_note}   |   {g_col} Gemini {'ON' if status['gemini_used'] else 'OFF'}  "
+        f"{mode_note}   |   {g_col} Gemini {'ON' if status['gemini_used'] else 'OFF'}{gemini_detail}  "
         f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
         f"·  {status['article_count']} articles"
     )

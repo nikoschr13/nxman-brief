@@ -71,34 +71,78 @@ GITHUB_GIST_ID = get_secret("GITHUB_GIST_ID")
 GIST_FILENAME  = "nxman_snapshots.json"
 
 ASSETS = [
-    ("equities", "sp500",      "S&P 500",               "S&P 500 large-cap US equity index",                  "^GSPC",           True),
-    ("equities", "nasdaq100",  "Nasdaq 100",             "Top 100 non-financial Nasdaq companies",             "^NDX",            True),
-    ("equities", "stoxx600",   "Stoxx Europe 600",       "Broad European equity benchmark",                    "^STOXX",          True),
-    ("equities", "msci_world", "MSCI World",             "Global developed-market equity index",               "^990100-USD-STRD",True),  # fallback: ^MXWO, URTH
-    ("equities", "msci_em",    "MSCI Emerging Markets",  "Emerging-market equity index",                       "^891800-USD-STRD",False),
-    ("equities", "nikkei225",  "Nikkei 225",             "Japanese large-cap equity index",                    "^N225",           False),
-    ("equities", "smi",        "SMI (Switzerland)",      "Swiss large-cap equity index",                       "^SSMI",           True),
-    ("fx",       "eurusd",     "EUR/USD",                "Euros per US dollar — key global FX pair",           "EURUSD=X",        False),
-    ("fx",       "usdchf",     "USD/CHF",                "US dollars per Swiss franc",                         "USDCHF=X",        False),
-    ("fx",       "eurchf",     "EUR/CHF",                "Euros per Swiss franc — key for Swiss investors",    "EURCHF=X",        True),
-    ("fx",       "dxy",        "DXY (USD Index)",        "US Dollar basket index vs major currencies",         "DX-Y.NYB",        False),
-    ("commodities","gold",     "Gold",                   "Gold spot / front-month futures",                    "GC=F",            True),
-    ("commodities","silver",   "Silver",                 "Silver spot / front-month futures",                  "SI=F",            False),
-    ("commodities","wti",      "WTI Crude",              "WTI crude oil front-month futures",                  "CL=F",            True),
-    ("commodities","brent",    "Brent Crude",            "Brent crude oil front-month futures",                "BZ=F",            False),
-    ("commodities","copper",   "Copper",                 "Copper front-month futures",                         "HG=F",            False),
-    ("alternatives","bitcoin", "Bitcoin",                "Largest cryptocurrency by market cap",               "BTC-USD",         True),
-    ("alternatives","ethereum","Ethereum",               "Second-largest cryptocurrency by market cap",        "ETH-USD",         False),
-    ("sentiment",  "vix",      "VIX",                    "CBOE Volatility Index — S&P 500 implied vol, fear gauge", "^VIX",       False),
+    ("equities", "sp500",      "S&P 500",
+     "Index of 500 large US companies. When it goes UP, US equity prices are rising — good for stock holders. When it goes DOWN, US stocks are losing value.",
+     "^GSPC", True),
+    ("equities", "nasdaq100",  "Nasdaq 100",
+     "Index of the 100 largest non-financial Nasdaq companies, heavily weighted to tech. When UP, tech and growth stocks are gaining. A bigger move than S&P 500 usually signals risk-on sentiment.",
+     "^NDX", True),
+    ("equities", "stoxx600",   "Stoxx Europe 600",
+     "Benchmark covering 600 European companies across 17 countries. When UP, European equity prices are rising. A divergence from US indices signals region-specific drivers.",
+     "^STOXX", True),
+    ("equities", "msci_world", "MSCI World",
+     "Index of large and mid-cap stocks across 23 developed markets. When UP, global equity portfolios are gaining value in aggregate.",
+     "^990100-USD-STRD", True),
+    ("equities", "msci_em",    "MSCI Emerging Markets",
+     "Index of stocks across 24 emerging-market countries. When UP, EM equity prices are rising. More volatile than developed markets and sensitive to USD strength.",
+     "^891800-USD-STRD", False),
+    ("equities", "nikkei225",  "Nikkei 225",
+     "Index of 225 large Japanese companies. When UP, Japanese equities are gaining. Often moves with USD/JPY — a weaker yen can boost Japanese exporters.",
+     "^N225", False),
+    ("equities", "smi",        "SMI (Switzerland)",
+     "Index of the 20 largest Swiss companies (Nestlé, Novartis, Roche dominate). When UP, Swiss large-caps are gaining. Defensive nature means it often falls less than peers in downturns.",
+     "^SSMI", True),
+    ("fx",       "eurusd",     "EUR/USD",
+     "How many USD one euro buys. When UP, the euro is strengthening vs the dollar — good for EUR-based investors holding USD assets (they lose value) and vice versa. Affects European exporters' competitiveness.",
+     "EURUSD=X", False),
+    ("fx",       "usdchf",     "USD/CHF",
+     "How many CHF one USD buys. When UP, the dollar is strengthening vs the franc — CHF-based investors holding USD assets gain. A falling CHF can pressure Swiss exporters' margins.",
+     "USDCHF=X", False),
+    ("fx",       "eurchf",     "EUR/CHF",
+     "How many CHF one euro buys. When DOWN, the franc is strengthening vs the euro — typical in risk-off markets as CHF is a safe-haven. Relevant for Swiss investors with EUR exposure.",
+     "EURCHF=X", True),
+    ("fx",       "dxy",        "DXY (USD Index)",
+     "The dollar's strength against a basket of major currencies. When UP, the USD is strengthening globally — generally negative for commodities (priced in USD) and emerging markets.",
+     "DX-Y.NYB", False),
+    ("commodities","gold",     "Gold",
+     "Gold spot price. When UP, gold is gaining — typically signals risk-off sentiment, inflation concerns, or USD weakness. Gold rises when investors seek safety.",
+     "GC=F", True),
+    ("commodities","silver",   "Silver",
+     "Silver spot price. When UP, silver is gaining. Has both safe-haven and industrial demand, so it can move with gold OR with economic activity expectations.",
+     "SI=F", False),
+    ("commodities","wti",      "WTI Crude",
+     "West Texas Intermediate crude oil price. When UP, oil costs more — raises energy and transport costs, feeds inflation, and benefits oil-exporting nations. Negative for airlines and energy-intensive industries.",
+     "CL=F", True),
+    ("commodities","brent",    "Brent Crude",
+     "Brent crude oil price (global benchmark). When UP, global energy costs are rising. Brent typically trades at a slight premium to WTI and is more relevant for European and Asian pricing.",
+     "BZ=F", False),
+    ("commodities","copper",   "Copper",
+     "Copper futures price. When UP, copper is gaining — often a signal of stronger global growth expectations, as copper is used in construction and manufacturing. Known as 'Dr Copper' for its predictive power.",
+     "HG=F", False),
+    ("alternatives","bitcoin", "Bitcoin",
+     "Price of Bitcoin in USD. When UP, crypto is gaining. Bitcoin behaves as a high-beta risk asset — it tends to amplify market moves. A rally often reflects broader risk-on sentiment.",
+     "BTC-USD", True),
+    ("alternatives","ethereum","Ethereum",
+     "Price of Ethereum in USD. When UP, ETH is gaining. More sensitive to developments in decentralised finance than Bitcoin. Usually moves directionally with Bitcoin but with higher volatility.",
+     "ETH-USD", False),
+    ("sentiment",  "vix",      "VIX (Fear Index)",
+     "The CBOE Volatility Index — measures expected S&P 500 volatility over the next 30 days. When UP, fear and uncertainty are rising — investors expect larger price swings. Above 20 = elevated anxiety; above 30 = high fear. VIX rising is generally BAD for equities.",
+     "^VIX", False),
 ]
 
 # Multiple tickers to try for MSCI World (in order of preference)
 MSCI_WORLD_TICKERS = ["^990100-USD-STRD", "^MXWO", "URTH"]
 
 RATES = [
-    ("rates", "us10y", "US 10Y Treasury", "Yield on 10-year US government bonds; key global benchmark", "DGS10", True),
-    ("rates", "bund10y", "German 10Y Bund", "Yield on 10-year German government bonds; core euro area benchmark", None, False),
-    ("rates", "ch10y", "Swiss 10Y Government Bond", "Yield on 10-year Swiss government bonds; Swiss franc benchmark", None, False),
+    ("rates", "us10y", "US 10Y Treasury",
+     "Yield on 10-year US government bonds. When the YIELD goes UP, existing bond prices fall (inverse relationship) — bad for bond holders. A rising yield also increases borrowing costs for companies and mortgages, and can pressure equity valuations. When the yield falls, existing bond prices rise.",
+     "DGS10", True),
+    ("rates", "bund10y", "German 10Y Bund",
+     "Yield on 10-year German government bonds — the euro area's benchmark safe rate. When the YIELD goes UP, existing Bund prices fall. Rising Bund yields signal ECB tightening expectations or euro-area growth optimism. Falling yields signal flight to safety or rate-cut expectations.",
+     None, False),
+    ("rates", "ch10y", "Swiss 10Y Government Bond",
+     "Yield on 10-year Swiss government bonds — one of the world's lowest-yielding safe assets. When UP, existing Swiss bond prices fall. A very low or negative yield reflects the franc's safe-haven status and SNB policy.",
+     None, False),
 ]
 
 INDICATOR_STRIP = [
@@ -1423,356 +1467,176 @@ def render_news_bullets(writing, news_df):
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
-              metrics, writing, news_df, status):
-    buffer = BytesIO()
-    PAGE_W_CM = 28.6   # usable width on landscape A4 (29.7 - 2×0.45cm margins - tolerance)
-    doc = SimpleDocTemplate(
+              metrics, writing, news_df, status, cotd=None):
+    """One-page landscape PDF newsletter."""
+    buffer   = BytesIO()
+    PW       = 28.6   # usable page width in cm
+    doc      = SimpleDocTemplate(
         buffer, pagesize=landscape(A4),
         rightMargin=0.45*cm, leftMargin=0.45*cm,
         topMargin=0.45*cm,   bottomMargin=0.4*cm,
     )
+    styles = getSampleStyleSheet()
+    S = {
+        "title": ParagraphStyle("T",  parent=styles["Title"],    fontName="Helvetica-Bold", fontSize=15, textColor=colors.white, leading=16),
+        "strap": ParagraphStyle("St", parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.8, leading=8, textColor=colors.white),
+        "sh":    ParagraphStyle("SH", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.5, textColor=colors.HexColor(PRIMARY), spaceAfter=1, leading=8.5),
+        "body":  ParagraphStyle("B",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.2, leading=7.4, textColor=colors.HexColor(TEXT)),
+        "small": ParagraphStyle("Sm", parent=styles["BodyText"], fontName="Helvetica",      fontSize=5.7, leading=6.8, textColor=colors.HexColor(TEXT)),
+        "src":   ParagraphStyle("Sr", parent=styles["BodyText"], fontName="Helvetica-Oblique", fontSize=5.0, leading=6.0, textColor=colors.HexColor("#64748B")),
+        "disc":  ParagraphStyle("D",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=4.8, leading=6.0, textColor=colors.HexColor("#94A3B8")),
+    }
+    GREEN = colors.HexColor("#16A34A")
+    RED   = colors.HexColor("#DC2626")
+    GREY  = colors.HexColor("#64748B")
 
-    styles   = getSampleStyleSheet()
-    ts       = ParagraphStyle("ts",    parent=styles["Title"],    fontName="Helvetica-Bold", fontSize=16, textColor=colors.white, leading=17)
-    strap    = ParagraphStyle("strap", parent=styles["BodyText"], fontName="Helvetica",      fontSize=7,  leading=8.4, textColor=colors.white)
-    h        = ParagraphStyle("h",     parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.8, textColor=colors.HexColor(PRIMARY), spaceAfter=1, leading=9)
-    body     = ParagraphStyle("body",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.5, leading=7.8, textColor=colors.HexColor(TEXT))
-    small    = ParagraphStyle("small", parent=body,               fontSize=5.9, leading=7.0)
-    tiny     = ParagraphStyle("tiny",  parent=body,               fontSize=5.2, leading=6.2, textColor=colors.HexColor("#64748B"))
-
-    def _trunc(s, n):
+    def _t(s, n):
         s = "" if s is None else str(s)
-        return s if len(s) <= n else s[:n-1] + "…"
+        return s if len(s) <= n else s[:n-1] + "\u2026"
 
     def _pct(v):
-        return "N/A" if v is None or pd.isna(v) else f"{float(v):.2f}%"
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "N/A"
+        f = float(v)
+        return f"{f:+.2f}%" if f != 0 else "0.00%"
 
-    def _clean(df):
-        out = df.copy()
-        for c in out.columns:
-            if c == "level":
-                out[c] = out[c].apply(fmt_num)
-            elif c in ("d1","wtd","ytd"):
-                out[c] = out[c].apply(_pct)
-            else:
-                out[c] = out[c].astype(str)
-        return out
+    def _num(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "N/A"
+        return f"{float(v):,.2f}"
 
-    def _mkdf(df):
-        cols = [c for c in ["label","level","d1","wtd","ytd"] if c in df.columns]
-        return df[cols].copy()
+    def _col(v):
+        try:
+            f = float(v)
+            return GREEN if f > 0 else (RED if f < 0 else GREY)
+        except Exception:
+            return GREY
 
-    def _tbl(df, widths):
-        df2 = _clean(_mkdf(df))
-        if "label" in df2.columns:
-            df2["label"] = df2["label"].apply(lambda x: _trunc(x, 26))
-        data = [list(df2.columns)] + df2.astype(str).values.tolist()
-        if len(data) < 2 or not data[0]:
-            data, widths = [["No data"],["—"]], [sum(widths)]
-        t = Table(data, colWidths=widths, repeatRows=1)
-        t.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,0),   colors.HexColor(PRIMARY)),
-            ("TEXTCOLOR",     (0,0),(-1,0),   colors.white),
-            ("FONTNAME",      (0,0),(-1,0),   "Helvetica-Bold"),
-            ("FONTSIZE",      (0,0),(-1,0),   5.8),
-            ("GRID",          (0,0),(-1,-1),  0.2, colors.HexColor("#D6E4F2")),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),  [colors.white, colors.HexColor(LIGHT)]),
-            ("TEXTCOLOR",     (0,1),(-1,-1),  colors.HexColor(TEXT)),
-            ("FONTSIZE",      (0,1),(-1,-1),  5.6),
-            ("LEFTPADDING",   (0,0),(-1,-1),  2),
-            ("RIGHTPADDING",  (0,0),(-1,-1),  2),
-            ("TOPPADDING",    (0,0),(-1,-1),  1.5),
-            ("BOTTOMPADDING", (0,0),(-1,-1),  1.5),
-            ("VALIGN",        (0,0),(-1,-1),  "MIDDLE"),
-        ]))
-        return t
+    def _styled_section(df, section_title, col_w):
+        rows = [["", "Level", "1D", "WTD", "YTD"]]
+        cmds = [
+            ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor("#1E3A5F")),
+            ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
+            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0),(-1,0),  5.4),
+            ("TOPPADDING",    (0,0),(-1,0),  2), ("BOTTOMPADDING",(0,0),(-1,0), 2),
+            ("LEFTPADDING",   (0,0),(-1,-1), 3), ("RIGHTPADDING", (0,0),(-1,-1), 3),
+            ("TOPPADDING",    (0,1),(-1,-1), 1.4), ("BOTTOMPADDING",(0,1),(-1,-1), 1.4),
+            ("FONTSIZE",      (0,1),(-1,-1), 5.4),
+            ("FONTNAME",      (0,1),(-1,-1), "Helvetica"),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ]
+        for i, (_, row) in enumerate(df.iterrows()):
+            lbl  = _t(str(row.get("label","")), 20)
+            d1   = row.get("d1")
+            wtd  = row.get("wtd")
+            ytd  = row.get("ytd")
+            rows.append([lbl, _num(row.get("level")), _pct(d1), _pct(wtd), _pct(ytd)])
+            ri = i + 1
+            bg = colors.white if ri % 2 == 1 else colors.HexColor(LIGHT)
+            cmds += [
+                ("BACKGROUND", (0,ri),(-1,ri), bg),
+                ("TEXTCOLOR",  (2,ri),(2,ri),  _col(d1)),
+                ("FONTNAME",   (2,ri),(2,ri),  "Helvetica-Bold"),
+                ("LINEBELOW",  (0,ri),(-1,ri), 0.15, colors.HexColor("#E2EAF2")),
+            ]
+        t = Table(rows, colWidths=col_w, repeatRows=1)
+        t.setStyle(TableStyle(cmds))
+        sec = Table([[Paragraph(section_title, S["sh"])],[t]], colWidths=[sum(col_w)])
+        sec.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+        return sec
 
     story = []
 
     # ── Header ────────────────────────────────────────────────────────────────
-    ai_label = f"AI: {'ON' if status['gemini_used'] else 'OFF'}"
-    news_label = f"News: {'live' if status['live_news'] else 'placeholder'} ({status['article_count']} articles)"
+    ai_tag = f"AI: {'ON' if status['gemini_used'] else 'OFF'}"
+    news_tag = f"News: {'live' if status['live_news'] else 'placeholders'} · {status['article_count']} articles"
     hdr = Table(
-        [[Paragraph(title, ts),
-          Paragraph(datetime.now().strftime("%A, %d %B %Y"), strap)],
-         [Paragraph(f"{ai_label}  ·  {news_label}", strap), Paragraph("", strap)]],
-        colWidths=[22*cm, 6.6*cm], rowHeights=[0.6*cm, 0.26*cm],
+        [[Paragraph(title, S["title"]), Paragraph(datetime.now().strftime("%A, %d %B %Y"), S["strap"])],
+         [Paragraph(f"{ai_tag}  ·  {news_tag}", S["strap"]), Paragraph("", S["strap"])]],
+        colWidths=[21*cm, 7.6*cm], rowHeights=[0.56*cm, 0.24*cm],
     )
-    hdr.setStyle(TableStyle([
-        ("BACKGROUND", (0,0),(-1,-1), colors.HexColor(PRIMARY)),
-        ("LEFTPADDING",(0,0),(-1,-1), 8), ("RIGHTPADDING",(0,0),(-1,-1), 8),
-        ("TOPPADDING", (0,0),(-1,-1), 4), ("BOTTOMPADDING",(0,0),(-1,-1), 4),
-        ("ALIGN",      (1,0),(1,0),   "RIGHT"),
-    ]))
-    story += [hdr, Spacer(1, 0.06*cm)]
+    hdr.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.HexColor(PRIMARY)),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),("ALIGN",(1,0),(1,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+    story += [hdr, Spacer(1, 0.05*cm)]
 
-    # ── Key metrics bar ───────────────────────────────────────────────────────
-    kpi_items = [
-        ("Global Eq YTD",   _pct(metrics.get("global_equities_ytd"))),
-        ("Global Bonds YTD",_pct(metrics.get("global_bonds_ytd"))),
-        ("USD Bonds YTD",   _pct(metrics.get("usd_bonds_ytd"))),
-        ("EUR Bonds YTD",   _pct(metrics.get("eur_bonds_ytd"))),
-        ("Gold YTD",        _pct(metrics.get("gold_ytd"))),
-        ("Bitcoin YTD",     _pct(metrics.get("bitcoin_ytd"))),
-    ]
-    kpi_cells = [Paragraph(f"<b>{k}</b><br/>{v}", small) for k, v in kpi_items]
-    kpi_tbl = Table([kpi_cells], colWidths=[(PAGE_W_CM/6)*cm]*6)
-    kpi_tbl.setStyle(TableStyle([
-        ("BACKGROUND",   (0,0),(-1,-1), colors.HexColor(LIGHT)),
-        ("BOX",          (0,0),(-1,-1), 0.3, colors.HexColor("#C9DCEE")),
-        ("INNERGRID",    (0,0),(-1,-1), 0.2, colors.HexColor("#C9DCEE")),
-        ("LEFTPADDING",  (0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
-        ("TOPPADDING",   (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
-        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
-    ]))
+    # ── KPI bar ───────────────────────────────────────────────────────────────
+    kpis = [("Global Eq YTD",metrics.get("global_equities_ytd")),("Global Bonds YTD",metrics.get("global_bonds_ytd")),("USD Bonds YTD",metrics.get("usd_bonds_ytd")),("EUR Bonds YTD",metrics.get("eur_bonds_ytd")),("Gold YTD",metrics.get("gold_ytd")),("Bitcoin YTD",metrics.get("bitcoin_ytd"))]
+    kpi_cmds = [("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),("BOX",(0,0),(-1,-1),0.3,colors.HexColor("#C9DCEE")),("INNERGRID",(0,0),(-1,-1),0.2,colors.HexColor("#C9DCEE")),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),("VALIGN",(0,0),(-1,-1),"MIDDLE")]
+    kpi_cells = []
+    for i,(k,v) in enumerate(kpis):
+        vs = _pct(v)
+        kpi_cells.append(Paragraph(f"<b>{k}</b><br/>{vs}", S["small"]))
+        try:
+            f=float(v); kpi_cmds.append(("TEXTCOLOR",(i,0),(i,0),GREEN if f>0 else (RED if f<0 else GREY)))
+        except Exception: pass
+    kpi_tbl = Table([kpi_cells], colWidths=[(PW/6)*cm]*6)
+    kpi_tbl.setStyle(TableStyle(kpi_cmds))
     story += [kpi_tbl, Spacer(1, 0.06*cm)]
 
-    # ── Headline + narrative col (left) + chart (right) ───────────────────────
-    headline_para = Paragraph(
-        f"<font size='9'><b>{writing['headline']}</b></font><br/>"
-        f"<font size='7' color='#475467'>{writing['subheadline']}</font>",
-        body,
-    )
+    # ── Main row: narrative | chart | cotd ────────────────────────────────────
+    CHART_W, CHART_H = 13.2*cm, 7.8*cm
 
     bullets = writing.get("news_bullets") or []
     if not bullets and not news_df.empty:
         bullets = [r.get("headline","") for _,r in news_df.head(9).iterrows()]
-    bul_rows = [[Paragraph(f"→ {b}", small)] for b in bullets[:9]]
-    bul_tbl  = Table(bul_rows, colWidths=[9.5*cm])
-    bul_tbl.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,-1), colors.white),
-        ("BOX",       (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
-        ("LEFTPADDING",(0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
-        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
-    ]))
+    bul_content = []
+    for b in bullets[:9]:
+        match = _match_bullet_to_article(b, news_df) if not news_df.empty else None
+        meta = ""
+        if match:
+            src = _t(match.get("source","") or "", 14)
+            pub = match.get("published_at","") or ""
+            dt_str = ""
+            if pub:
+                try: dt_str = pd.Timestamp(pub).strftime("%d %b")
+                except Exception: pass
+            meta = " \u00b7 ".join([x for x in [src, dt_str] if x])
+        bul_content.append([Paragraph(f"\u2192 {b}", S["small"]), Paragraph(meta, S["src"])])
 
-    left_narr = Table(
-        [[headline_para], [Spacer(1,0.04*cm)],
-         [Paragraph("What's Moving Markets", h)], [bul_tbl]],
-        colWidths=[9.7*cm],
-    )
-    left_narr.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+    bul_tbl = Table(bul_content, colWidths=[6.7*cm, 2.1*cm])
+    bul_tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),colors.white),("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),1.5),("BOTTOMPADDING",(0,0),(-1,-1),1.5),("VALIGN",(0,0),(-1,-1),"TOP"),("LINEBELOW",(0,0),(-1,-2),0.15,colors.HexColor("#EEF2F7")),("ALIGN",(1,0),(1,-1),"RIGHT")]))
 
-    if chart_png:
-        chart_cell = Image(BytesIO(chart_png), width=17.8*cm, height=5.2*cm)
+    headline_p = Paragraph(f"<b><font size='8'>{writing['headline']}</font></b><br/><font size='6.5' color='#475467'>{writing['subheadline']}</font>", S["body"])
+    left_col = Table([[headline_p],[Spacer(1,0.04*cm)],[Paragraph("What's Moving Markets", S["sh"])],[bul_tbl]], colWidths=[9.0*cm])
+    left_col.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+
+    chart_img = Image(BytesIO(chart_png), width=CHART_W, height=CHART_H) if chart_png else Paragraph("<i>Chart unavailable.</i>", S["small"])
+    chart_box = Table([[chart_img]], colWidths=[CHART_W])
+    chart_box.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#D6E4F2")),("BACKGROUND",(0,0),(-1,-1),colors.white),("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),2),("BOTTOMPADDING",(0,0),(-1,-1),2),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
+
+    COTD_W = PW - 9.0 - CHART_W/cm - 0.4
+    if cotd and isinstance(cotd, dict):
+        cotd_label  = cotd.get("label","Chart of the Day")
+        cotd_reason = cotd.get("reason","")
+        tf          = int(cotd.get("timeframe_days", 60))
+        cotd_inner  = Table([[Paragraph("Chart of the Day", S["sh"])],[Paragraph(f"<b>{_t(cotd_label,28)}</b>  ({tf}d)", S["small"])],[Spacer(1,0.03*cm)],[Paragraph(cotd_reason, S["src"])]], colWidths=[COTD_W*cm])
+        cotd_inner.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(-1,-1),colors.HexColor(LIGHT)),("BOX",(0,0),(-1,-1),0.25,colors.HexColor("#C9DCEE")),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
     else:
-        chart_cell = Paragraph("<i>Chart unavailable — kaleido not available on this host.</i>", small)
+        cotd_inner = Paragraph("", S["small"])
 
-    chart_box = Table([[chart_cell]], colWidths=[18.0*cm])
-    chart_box.setStyle(TableStyle([
-        ("BOX",          (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
-        ("BACKGROUND",   (0,0),(-1,-1), colors.white),
-        ("LEFTPADDING",  (0,0),(-1,-1), 3), ("RIGHTPADDING",(0,0),(-1,-1), 3),
-        ("TOPPADDING",   (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
-        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
-    ]))
+    main_row = Table([[left_col, chart_box, cotd_inner]], colWidths=[9.0*cm, CHART_W, COTD_W*cm])
+    main_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
+    story += [main_row, Spacer(1, 0.07*cm)]
 
-    narr_chart = Table([[left_narr, chart_box]], colWidths=[9.8*cm, 18.2*cm])
-    narr_chart.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),2)]))
-    story += [narr_chart, Spacer(1, 0.07*cm)]
-
-    # ── 5 data tables in one row ──────────────────────────────────────────────
-    # 28.6cm / 5 = 5.72cm each; inner cols: label 2.7, level 1.0, d1 0.67, wtd 0.67, ytd 0.68 = 5.72
-    CW = [2.7*cm, 1.0*cm, 0.67*cm, 0.67*cm, 0.68*cm]
-    SW = sum(CW)/cm  # ≈ 5.72cm
-
-    eq_t  = Table([[Paragraph("Equities",    h)], [_tbl(equities_df,    CW)]], colWidths=[SW*cm])
-    rt_t  = Table([[Paragraph("Rates",       h)], [_tbl(rates_df,       CW)]], colWidths=[SW*cm])
-    cm_t  = Table([[Paragraph("Commodities", h)], [_tbl(commodities_df, CW)]], colWidths=[SW*cm])
-    bd_t  = Table([[Paragraph("Bonds & Crypto",h)],[_tbl(bonds_df,      CW)]], colWidths=[SW*cm])
-
-    # News table: headline + source + date + url — 4th column
-    news_rows = [[Paragraph("<b>Headline</b>", small),
-                  Paragraph("<b>Source</b>",   small),
-                  Paragraph("<b>Date</b>",      small),
-                  Paragraph("<b>Link</b>",      small)]]
-    ndf = news_df.fillna("") if not news_df.empty else pd.DataFrame()
-    for _, nr in ndf.head(8).iterrows():
-        hl  = _trunc(nr.get("headline",""), 42)
-        src = _trunc(nr.get("source",""),   12)
-        pub = nr.get("published_at","")
-        dt_str = ""
-        if pub:
-            try:
-                dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
-            except Exception:
-                dt_str = str(pub)[:10]
-        url = nr.get("url","")
-        url_short = _trunc(url.replace("https://","").replace("http://",""), 22) if url else ""
-        link_para = Paragraph(f'<link href="{url}">{url_short}</link>' if url else "—", tiny)
-        news_rows.append([
-            Paragraph(hl,  small),
-            Paragraph(src, tiny),
-            Paragraph(dt_str, tiny),
-            link_para,
-        ])
-
-    if len(news_rows) < 2:
-        news_rows.append([Paragraph("No articles",small), Paragraph("",tiny), Paragraph("",tiny), Paragraph("",tiny)])
-
-    NW = PAGE_W_CM - 4*SW   # remaining width
-    news_col_w = [NW*0.44*cm, NW*0.17*cm, NW*0.14*cm, NW*0.25*cm]
-    news_t_inner = Table(news_rows, colWidths=news_col_w, repeatRows=1)
-    news_t_inner.setStyle(TableStyle([
-        ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor(PRIMARY)),
-        ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
-        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0,0),(-1,0),  5.5),
-        ("GRID",          (0,0),(-1,-1), 0.2, colors.HexColor("#D6E4F2")),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, colors.HexColor(LIGHT)]),
-        ("FONTSIZE",      (0,1),(-1,-1), 5.4),
-        ("LEFTPADDING",   (0,0),(-1,-1), 2), ("RIGHTPADDING",(0,0),(-1,-1), 2),
-        ("TOPPADDING",    (0,0),(-1,-1), 1.5), ("BOTTOMPADDING",(0,0),(-1,-1), 1.5),
-        ("VALIGN",        (0,0),(-1,-1), "TOP"),
-    ]))
-    nw_t = Table([[Paragraph("News", h)], [news_t_inner]], colWidths=[NW*cm])
-
-    data_row = Table([[eq_t, rt_t, cm_t, bd_t, nw_t]],
-                     colWidths=[SW*cm, SW*cm, SW*cm, SW*cm, NW*cm])
-    data_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+    # ── Data tables ───────────────────────────────────────────────────────────
+    SEC = PW / 4
+    CW  = [SEC*0.46*cm, SEC*0.19*cm, SEC*0.13*cm, SEC*0.12*cm, SEC*0.10*cm]
+    data_row = Table(
+        [[_styled_section(equities_df,"Equities",CW), _styled_section(rates_df,"Rates",CW),
+          _styled_section(commodities_df,"Commodities",CW), _styled_section(bonds_df,"Bonds & Crypto",CW)]],
+        colWidths=[SEC*cm]*4,
+    )
+    data_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),4),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
     story += [data_row]
 
-    # ── Disclaimer footer ────────────────────────────────────────────────────
-    disclaimer_text = (
-        "Disclaimer: This briefing is produced for informational purposes only and does not constitute "
-        "investment advice, a solicitation, or a recommendation to buy or sell any financial instrument or security. "
-        "The information is believed to be from reliable sources but its accuracy and completeness cannot be guaranteed. "
-        "Past performance is not indicative of future results. Market data may be delayed. "
-        "Always consult a qualified and authorised financial adviser before making any investment decisions."
-    )
-    disc_style = ParagraphStyle("disc", parent=styles["BodyText"], fontName="Helvetica",
-                                 fontSize=5.0, leading=6.2, textColor=colors.HexColor("#94A3B8"))
-    disc_tbl = Table([[Paragraph(disclaimer_text, disc_style)]], colWidths=[PAGE_W_CM * cm])
-    disc_tbl.setStyle(TableStyle([
-        ("TOPPADDING",    (0,0),(-1,-1), 4),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 2),
-        ("LEFTPADDING",   (0,0),(-1,-1), 0),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 0),
-        ("LINEABOVE",     (0,0),(-1,0),  0.25, colors.HexColor("#D6E4F2")),
-    ]))
+    # ── Disclaimer ────────────────────────────────────────────────────────────
+    disc = "Disclaimer: This briefing is for informational purposes only and does not constitute investment advice or a recommendation to buy or sell any financial instrument. Information is believed reliable but accuracy cannot be guaranteed. Past performance is not indicative of future results. Market data may be delayed. Always consult a qualified financial adviser before making investment decisions."
+    disc_tbl = Table([[Paragraph(disc, S["disc"])]], colWidths=[PW*cm])
+    disc_tbl.setStyle(TableStyle([("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),2),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("LINEABOVE",(0,0),(-1,0),0.25,colors.HexColor("#D6E4F2"))]))
     story += [Spacer(1, 0.05*cm), disc_tbl]
 
     doc.build(story)
     return buffer.getvalue()
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(A4),
-        rightMargin=0.45 * cm,
-        leftMargin=0.45 * cm,
-        topMargin=0.45 * cm,
-        bottomMargin=0.4 * cm,
-    )
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=17, textColor=colors.white, leading=18)
-    strap = ParagraphStyle("strap", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.2, leading=8.4, textColor=colors.white)
-    h = ParagraphStyle("h", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=8.4, textColor=colors.HexColor(PRIMARY), spaceAfter=2, leading=9.5)
-    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=7.8, textColor=colors.HexColor(TEXT))
-    body_small = ParagraphStyle("body_small", parent=body, fontSize=6.1, leading=7.1)
-
-    def clean_df_for_pdf(df):
-        out = df.copy()
-        for c in out.columns:
-            if c in ["level", "d1", "wtd", "mtd", "ytd"]:
-                if c == "level":
-                    out[c] = out[c].apply(fmt_num)
-                else:
-                    out[c] = out[c].apply(lambda x: "N/A" if x is None or pd.isna(x) else f"{float(x):.2f}%")
-            else:
-                out[c] = out[c].astype(str)
-        return out
-
-    def shorten_text(s, max_len=44):
-        s = "" if s is None else str(s)
-        return s if len(s) <= max_len else s[: max_len - 3] + "..."
-
-    def pct_cell(v):
-        return "N/A" if v is None or pd.isna(v) else f"{float(v):.2f}%"
-
-    story = []
-
-    header = Table(
-        [
-            [Paragraph(title, title_style), Paragraph(datetime.now().strftime("%A, %d %B %Y"), strap)],
-            [Paragraph("Daily Market Brief", strap), Paragraph("", strap)],
-        ],
-        colWidths=[22.8 * cm, 5.0 * cm],
-        rowHeights=[0.62 * cm, 0.28 * cm],
-    )
-    header.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(PRIMARY)),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-            ]
-        )
-    )
-    story += [header, Spacer(1, 0.05 * cm)]
-
-    status_line = f"Gemini: {'ON' if status['gemini_used'] else 'OFF'} | Live news: {'ON' if status['live_news'] else 'OFF'} | Articles: {status['article_count']} | URLs: {status['url_count']}"
-    status_tbl = Table([[Paragraph(status_line, body_small)]], colWidths=[27.8 * cm])
-    status_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT)),
-                ("BOX", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9DCEE")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
-    story += [status_tbl, Spacer(1, 0.05 * cm)]
-
-    summary_text = (
-        f"<b>Today in one line</b><br/><br/>"
-        f"<font size='10'><b>{writing['headline']}</b></font><br/><br/>"
-        f"{writing['subheadline']}"
-    )
-    summary = Table([[Paragraph(summary_text, body)]], colWidths=[10.4 * cm])
-    summary.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.30, colors.HexColor("#D6E4F2")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-
-    metric_cells = [
-        Paragraph(f"<b>Global eq. YTD</b><br/>{pct_cell(metrics.get('global_equities_ytd'))}", body_small),
-        Paragraph(f"<b>Global bonds YTD</b><br/>{pct_cell(metrics.get('global_bonds_ytd'))}", body_small),
-        Paragraph(f"<b>USD bonds YTD</b><br/>{pct_cell(metrics.get('usd_bonds_ytd'))}", body_small),
-        Paragraph(f"<b>EUR bonds YTD</b><br/>{pct_cell(metrics.get('eur_bonds_ytd'))}", body_small),
-    ]
-    metrics_tbl = Table([metric_cells], colWidths=[2.55 * cm] * 4)
-    metrics_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT)),
-                ("BOX", (0, 0), (-1, -1), 0.30, colors.HexColor("#C9DCEE")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9DCEE")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ]
-        )
-    )
-    left_col = Table([[summary], [Spacer(1, 0.04 * cm)], [metrics_tbl]], colWidths=[10.4 * cm])
-    left_col.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
-
 
 def serialize_state(state):
     """Serialise state to JSON-safe dict. History is excluded — always re-fetched."""
@@ -2067,6 +1931,9 @@ def add_render_outputs(base_state, chart_window="YTD"):
                 except Exception:
                     pdf_chart_png = None
 
+    # Chart of the Day — compute before build_pdf so it can appear in PDF
+    cotd = pick_chart_of_day(history, base_state.get("news_df"))
+
     pdf_bytes = build_pdf(
         "Daily Market Brief",
         pdf_chart_png,
@@ -2078,10 +1945,8 @@ def add_render_outputs(base_state, chart_window="YTD"):
         base_state["writing"],
         base_state["news_df"],
         base_state["status"],
+        cotd=cotd,
     )
-
-    # Chart of the Day — Gemini picks the most interesting move + news theme
-    cotd = pick_chart_of_day(history, base_state.get("news_df"))
 
     state = dict(base_state)
     state["fig"]           = fig

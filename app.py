@@ -459,16 +459,28 @@ def build_local_news_summary(news_df):
 
 
 def try_gemini_model(model_name, payload):
+    """Call Gemini. Does NOT set responseMimeType — that header causes 400s on some models.
+    Instead we ask for JSON in the prompt and strip fences ourselves."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     return requests.post(
         url,
         headers={"Content-Type": "application/json"},
         json={
             "contents": [{"parts": [{"text": payload}]}],
-            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1200},
         },
         timeout=45,
     )
+
+
+def _strip_json_fences(raw: str) -> str:
+    """Remove ```json / ``` markdown fences Gemini sometimes adds."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+    if raw.endswith("```"):
+        raw = raw.rsplit("```", 1)[0]
+    return raw.strip()
 
 
 def gemini_generate_json(payload):
@@ -485,6 +497,10 @@ def gemini_generate_json(payload):
 
                 if r.ok:
                     data = r.json()
+                    # Check for safety blocks
+                    if data.get("promptFeedback", {}).get("blockReason"):
+                        errors.append(f"{model_name}: blocked — {data['promptFeedback']['blockReason']}")
+                        break
                     candidates = data.get("candidates", [])
                     if not candidates:
                         errors.append(f"{model_name}: no candidates returned")
@@ -496,17 +512,19 @@ def gemini_generate_json(payload):
                         errors.append(f"{model_name}: empty response")
                         break
 
+                    cleaned = _strip_json_fences(raw)
                     try:
-                        parsed = json.loads(raw)
-                        return parsed, f"Gemini response OK ({model_name})"
+                        parsed = json.loads(cleaned)
+                        return parsed, f"Gemini OK ({model_name})"
                     except Exception:
-                        errors.append(f"{model_name}: invalid JSON | {raw[:120]}")
+                        errors.append(f"{model_name}: invalid JSON | {cleaned[:120]}")
                         break
 
                 else:
-                    msg = f"{model_name}: HTTP {r.status_code} | {r.text[:160]}"
-                    if r.status_code == 503 and attempt < 2:
-                        time.sleep(2 + attempt)
+                    msg = f"{model_name}: HTTP {r.status_code}"
+                    retry_codes = {429, 500, 503}
+                    if r.status_code in retry_codes and attempt < 2:
+                        time.sleep(3 + attempt * 2)
                         continue
                     errors.append(msg)
                     break
@@ -544,7 +562,8 @@ def build_writing(news_df, snapshot, use_gemini):
     payload = json.dumps(
         {
             "instruction": (
-                "Return strict JSON with keys: headline, subheadline, news_summary, what_matters, news_bullets. "
+                "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
+                "Keys required: headline, subheadline, news_summary, what_matters, news_bullets. "
                 "what_matters: exactly 4 concise bullet strings about key investment themes. "
                 "news_bullets: 5 to 8 plain-English bullets summarising what happened since yesterday "
                 "and what it means for markets. "
@@ -770,7 +789,8 @@ def pick_chart_of_day(history, news_df):
     movers = []
     for key, g in history.groupby("key"):
         g = g.sort_values("date").set_index("date")
-        recent = g["value"].last("30D").dropna()
+        cutoff = g.index.max() - pd.Timedelta(days=30)
+        recent = g["value"][g.index >= cutoff].dropna()
         if len(recent) < 5:
             continue
         mean, std = recent.mean(), recent.std()
@@ -796,10 +816,11 @@ def pick_chart_of_day(history, news_df):
 
     payload = json.dumps({
         "instruction": (
+            "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
             "You are a financial analyst. Pick ONE chart of the day from the candidates below. "
-            "Choose the most interesting for an investor to see right now — biggest unusual move, "
+            "Choose the most interesting for an investor — biggest unusual move, "
             "or most relevant to the top news themes. "
-            "Return strict JSON only: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
+            "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
             "\"reason\": \"<one concise sentence explaining why this chart matters today>\", "
             "\"timeframe_days\": <30|60|90|180>}"
         ),

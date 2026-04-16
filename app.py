@@ -156,25 +156,38 @@ CATEGORY_STYLE = {
 }
 
 
-st.set_page_config(page_title="NXMAN Daily Market Brief", layout="wide")
+st.set_page_config(page_title="Daily Market Brief", layout="wide")
 
 st.markdown(
     """
 <style>
 .stApp { background: #F3F8FE; }
-.block-container { padding-top: 0.8rem; max-width: 98rem; }
-.hero { background: linear-gradient(90deg, #103B73, #1E88E5); color: white; padding: 22px 26px; border-radius: 18px; margin-bottom: 14px; box-shadow: 0 6px 20px rgba(16,59,115,.12); }
-.section-card { background: white; border-radius: 16px; padding: 14px 16px; box-shadow: 0 4px 16px rgba(16,59,115,.08); margin-bottom: 10px; }
-.news-card { background: white; border: 1px solid #D6E4F2; border-radius: 12px; padding: 9px 11px; margin-bottom: 7px; }
-.small-muted { color:#667085; font-size:12px; }
-div[data-testid=\"stMetric\"] { background: transparent !important; padding: 0 !important; border: 0 !important; }
+.block-container { padding-top: 0.6rem !important; padding-left: 1rem !important;
+                   padding-right: 1rem !important; max-width: 100% !important; }
+.hero { background: linear-gradient(90deg, #103B73, #1E88E5); color: white;
+        padding: 14px 18px; border-radius: 14px; margin-bottom: 10px;
+        box-shadow: 0 4px 14px rgba(16,59,115,.14); }
+.hero h1 { margin: 0; font-size: clamp(16px, 4vw, 22px); }
+.hero-sub { opacity: .85; margin-top: 3px; font-size: clamp(11px, 2.5vw, 13px); }
+.section-card { background: white; border-radius: 14px; padding: 12px 14px;
+                box-shadow: 0 3px 12px rgba(16,59,115,.07); margin-bottom: 8px; }
+@media (max-width: 768px) {
+    .block-container { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
+    section[data-testid="stSidebar"] { min-width: 240px !important; }
+}
+div[data-testid="stMetric"] { background: transparent !important;
+                               padding: 0 !important; border: 0 !important; }
+details summary { font-size: 14px !important; padding: 6px 0 !important; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    "<div class='hero'><h1 style='margin:0'>NXMAN Daily Market Brief</h1><div style='opacity:.9;margin-top:6px'>Indicators + asset classes + sparklines + frozen morning snapshot mode</div></div>",
+    "<div class='hero'>"
+    "<h1>Daily Market Brief</h1>"
+    "<div class='hero-sub'>Cross-asset · News · Morning snapshot mode</div>"
+    "</div>",
     unsafe_allow_html=True,
 )
 
@@ -859,7 +872,7 @@ def render_chart_of_day(cotd, history):
     st.caption(f"🔍 {reason}")
 
 
-
+def add_event_marker(fig, event_date, label, line_color, fill_opacity=0.10, font_size=11):
     if not event_date:
         return
     dt = pd.Timestamp(event_date)
@@ -1079,8 +1092,8 @@ def render_ticker_strip(snapshot):
 
     st.markdown(
         "<div style='background:white;border:1px solid #D6E4F2;border-radius:12px;"
-        "overflow:hidden;margin-bottom:10px;'>"
-        "<table style='width:100%;border-collapse:collapse;'><tr>"
+        "overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:10px;'>"
+        "<table style='width:100%;min-width:600px;border-collapse:collapse;'><tr>"
         + "".join(cells) +
         "</tr></table></div>",
         unsafe_allow_html=True,
@@ -1674,7 +1687,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
                 pdf_chart_png = None
 
     pdf_bytes = build_pdf(
-        "NXMAN Daily Market Brief",
+        "Daily Market Brief",
         pdf_chart_png,
         base_state["equities_df"],
         base_state["rates_df"],

@@ -1313,27 +1313,272 @@ def render_macro_calendar():
 
 
 def render_news_bullets(writing, news_df):
-    """Simple plain-English bullet list: what happened + why markets moved.
-    Uses Gemini news_bullets when available, falls back to ranked headlines."""
-
+    """AI-written cause-and-effect bullets (Gemini/Groq), with source articles below."""
     bullets = writing.get("news_bullets") or []
 
     if bullets:
         for b in bullets:
             st.markdown(f"- {b}")
     else:
-        # Fallback: ranked headlines with category prefix
         if news_df is None or news_df.empty:
             st.caption("No news available.")
             return
         for _, r in news_df.head(10).iterrows():
-            cat = r.get("category", "")
-            headline = r.get("headline", "")
+            cat = r.get("category","")
+            headline = r.get("headline","")
             prefix = f"**{cat}** — " if cat and cat != "Other" else ""
             st.markdown(f"- {prefix}{headline}")
 
+    # Always show source articles with link + date underneath
+    if news_df is not None and not news_df.empty:
+        st.markdown("<div style='margin-top:10px;'>", unsafe_allow_html=True)
+        st.caption("**Source articles**")
+        for _, r in news_df.head(NEWS_COUNT).iterrows():
+            headline = r.get("headline","") or ""
+            url      = r.get("url","")      or ""
+            source   = r.get("source","")   or ""
+            pub      = r.get("published_at","") or ""
+            dt_str   = ""
+            if pub:
+                try:
+                    dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
+                except Exception:
+                    dt_str = str(pub)[:10]
 
-def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, writing, news_df, status):
+            meta = " · ".join([x for x in [source, dt_str] if x])
+            link_part = f"[{headline}]({url})" if url else headline
+            st.markdown(
+                f"<div style='padding:4px 0;border-bottom:1px solid #F0F4F8;font-size:12px;'>"
+                f"<span style='color:#0F2D52;'>{('📎 ' if url else '') + link_part}</span>"
+                f"{'  <span style=\"color:#9AA8B7;font-size:11px;\">— ' + meta + '</span>' if meta else ''}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
+              metrics, writing, news_df, status):
+    buffer = BytesIO()
+    PAGE_W_CM = 28.6   # usable width on landscape A4 (29.7 - 2×0.45cm margins - tolerance)
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        rightMargin=0.45*cm, leftMargin=0.45*cm,
+        topMargin=0.45*cm,   bottomMargin=0.4*cm,
+    )
+
+    styles   = getSampleStyleSheet()
+    ts       = ParagraphStyle("ts",    parent=styles["Title"],    fontName="Helvetica-Bold", fontSize=16, textColor=colors.white, leading=17)
+    strap    = ParagraphStyle("strap", parent=styles["BodyText"], fontName="Helvetica",      fontSize=7,  leading=8.4, textColor=colors.white)
+    h        = ParagraphStyle("h",     parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.8, textColor=colors.HexColor(PRIMARY), spaceAfter=1, leading=9)
+    body     = ParagraphStyle("body",  parent=styles["BodyText"], fontName="Helvetica",      fontSize=6.5, leading=7.8, textColor=colors.HexColor(TEXT))
+    small    = ParagraphStyle("small", parent=body,               fontSize=5.9, leading=7.0)
+    tiny     = ParagraphStyle("tiny",  parent=body,               fontSize=5.2, leading=6.2, textColor=colors.HexColor("#64748B"))
+
+    def _trunc(s, n):
+        s = "" if s is None else str(s)
+        return s if len(s) <= n else s[:n-1] + "…"
+
+    def _pct(v):
+        return "N/A" if v is None or pd.isna(v) else f"{float(v):.2f}%"
+
+    def _clean(df):
+        out = df.copy()
+        for c in out.columns:
+            if c == "level":
+                out[c] = out[c].apply(fmt_num)
+            elif c in ("d1","wtd","ytd"):
+                out[c] = out[c].apply(_pct)
+            else:
+                out[c] = out[c].astype(str)
+        return out
+
+    def _mkdf(df):
+        cols = [c for c in ["label","level","d1","wtd","ytd"] if c in df.columns]
+        return df[cols].copy()
+
+    def _tbl(df, widths):
+        df2 = _clean(_mkdf(df))
+        if "label" in df2.columns:
+            df2["label"] = df2["label"].apply(lambda x: _trunc(x, 26))
+        data = [list(df2.columns)] + df2.astype(str).values.tolist()
+        if len(data) < 2 or not data[0]:
+            data, widths = [["No data"],["—"]], [sum(widths)]
+        t = Table(data, colWidths=widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),   colors.HexColor(PRIMARY)),
+            ("TEXTCOLOR",     (0,0),(-1,0),   colors.white),
+            ("FONTNAME",      (0,0),(-1,0),   "Helvetica-Bold"),
+            ("FONTSIZE",      (0,0),(-1,0),   5.8),
+            ("GRID",          (0,0),(-1,-1),  0.2, colors.HexColor("#D6E4F2")),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),  [colors.white, colors.HexColor(LIGHT)]),
+            ("TEXTCOLOR",     (0,1),(-1,-1),  colors.HexColor(TEXT)),
+            ("FONTSIZE",      (0,1),(-1,-1),  5.6),
+            ("LEFTPADDING",   (0,0),(-1,-1),  2),
+            ("RIGHTPADDING",  (0,0),(-1,-1),  2),
+            ("TOPPADDING",    (0,0),(-1,-1),  1.5),
+            ("BOTTOMPADDING", (0,0),(-1,-1),  1.5),
+            ("VALIGN",        (0,0),(-1,-1),  "MIDDLE"),
+        ]))
+        return t
+
+    story = []
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    ai_label = f"AI: {'ON' if status['gemini_used'] else 'OFF'}"
+    news_label = f"News: {'live' if status['live_news'] else 'placeholder'} ({status['article_count']} articles)"
+    hdr = Table(
+        [[Paragraph(title, ts),
+          Paragraph(datetime.now().strftime("%A, %d %B %Y"), strap)],
+         [Paragraph(f"{ai_label}  ·  {news_label}", strap), Paragraph("", strap)]],
+        colWidths=[22*cm, 6.6*cm], rowHeights=[0.6*cm, 0.26*cm],
+    )
+    hdr.setStyle(TableStyle([
+        ("BACKGROUND", (0,0),(-1,-1), colors.HexColor(PRIMARY)),
+        ("LEFTPADDING",(0,0),(-1,-1), 8), ("RIGHTPADDING",(0,0),(-1,-1), 8),
+        ("TOPPADDING", (0,0),(-1,-1), 4), ("BOTTOMPADDING",(0,0),(-1,-1), 4),
+        ("ALIGN",      (1,0),(1,0),   "RIGHT"),
+    ]))
+    story += [hdr, Spacer(1, 0.06*cm)]
+
+    # ── Key metrics bar ───────────────────────────────────────────────────────
+    kpi_items = [
+        ("Global Eq YTD",   _pct(metrics.get("global_equities_ytd"))),
+        ("Global Bonds YTD",_pct(metrics.get("global_bonds_ytd"))),
+        ("USD Bonds YTD",   _pct(metrics.get("usd_bonds_ytd"))),
+        ("EUR Bonds YTD",   _pct(metrics.get("eur_bonds_ytd"))),
+        ("Gold YTD",        _pct(metrics.get("gold_ytd"))),
+        ("Bitcoin YTD",     _pct(metrics.get("bitcoin_ytd"))),
+    ]
+    kpi_cells = [Paragraph(f"<b>{k}</b><br/>{v}", small) for k, v in kpi_items]
+    kpi_tbl = Table([kpi_cells], colWidths=[(PAGE_W_CM/6)*cm]*6)
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0),(-1,-1), colors.HexColor(LIGHT)),
+        ("BOX",          (0,0),(-1,-1), 0.3, colors.HexColor("#C9DCEE")),
+        ("INNERGRID",    (0,0),(-1,-1), 0.2, colors.HexColor("#C9DCEE")),
+        ("LEFTPADDING",  (0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
+        ("TOPPADDING",   (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    story += [kpi_tbl, Spacer(1, 0.06*cm)]
+
+    # ── Headline + narrative col (left) + chart (right) ───────────────────────
+    headline_para = Paragraph(
+        f"<font size='9'><b>{writing['headline']}</b></font><br/>"
+        f"<font size='7' color='#475467'>{writing['subheadline']}</font>",
+        body,
+    )
+
+    wm_rows = [[Paragraph(f"• {x}", small)] for x in writing["what_matters"][:4]]
+    wm_tbl  = Table(wm_rows, colWidths=[9.5*cm])
+    wm_tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,-1), colors.white),
+        ("BOX",       (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
+        ("LEFTPADDING",(0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
+        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+    ]))
+
+    bullets = writing.get("news_bullets") or []
+    if not bullets and not news_df.empty:
+        bullets = [r.get("headline","") for _,r in news_df.head(6).iterrows()]
+    bul_rows = [[Paragraph(f"→ {b}", small)] for b in bullets[:7]]
+    bul_tbl  = Table(bul_rows, colWidths=[9.5*cm])
+    bul_tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,-1), colors.white),
+        ("BOX",       (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
+        ("LEFTPADDING",(0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
+        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+    ]))
+
+    left_narr = Table(
+        [[headline_para], [Spacer(1,0.04*cm)],
+         [Paragraph("What Matters", h)], [wm_tbl], [Spacer(1,0.04*cm)],
+         [Paragraph("What's Moving Markets", h)], [bul_tbl]],
+        colWidths=[9.7*cm],
+    )
+    left_narr.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+
+    if chart_png:
+        chart_cell = Image(BytesIO(chart_png), width=17.8*cm, height=5.2*cm)
+    else:
+        chart_cell = Paragraph("<i>Chart unavailable — kaleido not available on this host.</i>", small)
+
+    chart_box = Table([[chart_cell]], colWidths=[18.0*cm])
+    chart_box.setStyle(TableStyle([
+        ("BOX",          (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
+        ("BACKGROUND",   (0,0),(-1,-1), colors.white),
+        ("LEFTPADDING",  (0,0),(-1,-1), 3), ("RIGHTPADDING",(0,0),(-1,-1), 3),
+        ("TOPPADDING",   (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+    ]))
+
+    narr_chart = Table([[left_narr, chart_box]], colWidths=[9.8*cm, 18.2*cm])
+    narr_chart.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),2)]))
+    story += [narr_chart, Spacer(1, 0.07*cm)]
+
+    # ── 5 data tables in one row ──────────────────────────────────────────────
+    # 28.6cm / 5 = 5.72cm each; inner cols: label 2.7, level 1.0, d1 0.67, wtd 0.67, ytd 0.68 = 5.72
+    CW = [2.7*cm, 1.0*cm, 0.67*cm, 0.67*cm, 0.68*cm]
+    SW = sum(CW)/cm  # ≈ 5.72cm
+
+    eq_t  = Table([[Paragraph("Equities",    h)], [_tbl(equities_df,    CW)]], colWidths=[SW*cm])
+    rt_t  = Table([[Paragraph("Rates",       h)], [_tbl(rates_df,       CW)]], colWidths=[SW*cm])
+    cm_t  = Table([[Paragraph("Commodities", h)], [_tbl(commodities_df, CW)]], colWidths=[SW*cm])
+    bd_t  = Table([[Paragraph("Bonds & Crypto",h)],[_tbl(bonds_df,      CW)]], colWidths=[SW*cm])
+
+    # News table: headline + source + date + url — 4th column
+    news_rows = [[Paragraph("<b>Headline</b>", small),
+                  Paragraph("<b>Source</b>",   small),
+                  Paragraph("<b>Date</b>",      small),
+                  Paragraph("<b>Link</b>",      small)]]
+    ndf = news_df.fillna("") if not news_df.empty else pd.DataFrame()
+    for _, nr in ndf.head(8).iterrows():
+        hl  = _trunc(nr.get("headline",""), 42)
+        src = _trunc(nr.get("source",""),   12)
+        pub = nr.get("published_at","")
+        dt_str = ""
+        if pub:
+            try:
+                dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
+            except Exception:
+                dt_str = str(pub)[:10]
+        url = nr.get("url","")
+        url_short = _trunc(url.replace("https://","").replace("http://",""), 22) if url else ""
+        link_para = Paragraph(f'<link href="{url}">{url_short}</link>' if url else "—", tiny)
+        news_rows.append([
+            Paragraph(hl,  small),
+            Paragraph(src, tiny),
+            Paragraph(dt_str, tiny),
+            link_para,
+        ])
+
+    if len(news_rows) < 2:
+        news_rows.append([Paragraph("No articles",small), Paragraph("",tiny), Paragraph("",tiny), Paragraph("",tiny)])
+
+    NW = PAGE_W_CM - 4*SW   # remaining width
+    news_col_w = [NW*0.44*cm, NW*0.17*cm, NW*0.14*cm, NW*0.25*cm]
+    news_t_inner = Table(news_rows, colWidths=news_col_w, repeatRows=1)
+    news_t_inner.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor(PRIMARY)),
+        ("TEXTCOLOR",     (0,0),(-1,0),  colors.white),
+        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0),(-1,0),  5.5),
+        ("GRID",          (0,0),(-1,-1), 0.2, colors.HexColor("#D6E4F2")),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [colors.white, colors.HexColor(LIGHT)]),
+        ("FONTSIZE",      (0,1),(-1,-1), 5.4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 2), ("RIGHTPADDING",(0,0),(-1,-1), 2),
+        ("TOPPADDING",    (0,0),(-1,-1), 1.5), ("BOTTOMPADDING",(0,0),(-1,-1), 1.5),
+        ("VALIGN",        (0,0),(-1,-1), "TOP"),
+    ]))
+    nw_t = Table([[Paragraph("News", h)], [news_t_inner]], colWidths=[NW*cm])
+
+    data_row = Table([[eq_t, rt_t, cm_t, bd_t, nw_t]],
+                     colWidths=[SW*cm, SW*cm, SW*cm, SW*cm, NW*cm])
+    data_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+    story += [data_row]
+
+    doc.build(story)
+    return buffer.getvalue()
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -1513,72 +1758,6 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
     # 29.7cm - 0.9cm margins = 28.8cm usable. Use 28.6cm to be safe.
     PAGE_W = 28.6  # cm
 
-    def pdf_table_df(df):
-        """Remove description col and keep only display columns."""
-        cols = [c for c in ["label", "level", "d1", "wtd", "ytd"] if c in df.columns]
-        return df[cols].copy()
-
-    def styled_table(df, widths, font_size=6.0, header_size=6.5):
-        df2 = clean_df_for_pdf(df)
-        if "label" in df2.columns:
-            df2["label"] = df2["label"].apply(lambda x: shorten_text(x, 28))
-        data = [list(df2.columns)] + df2.astype(str).values.tolist()
-        if len(data) < 2 or len(data[0]) == 0:
-            data = [["No data"], ["—"]]
-            widths = [sum(widths)]
-        tbl = Table(data, colWidths=widths, repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",  (0,0),(-1,0),  colors.HexColor(PRIMARY)),
-            ("TEXTCOLOR",   (0,0),(-1,0),  colors.white),
-            ("FONTNAME",    (0,0),(-1,0),  "Helvetica-Bold"),
-            ("FONTSIZE",    (0,0),(-1,0),  header_size),
-            ("GRID",        (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, colors.HexColor(LIGHT)]),
-            ("TEXTCOLOR",   (0,1),(-1,-1), colors.HexColor(TEXT)),
-            ("FONTSIZE",    (0,1),(-1,-1), font_size),
-            ("LEFTPADDING", (0,0),(-1,-1), 2),
-            ("RIGHTPADDING",(0,0),(-1,-1), 2),
-            ("TOPPADDING",  (0,0),(-1,-1), 2),
-            ("BOTTOMPADDING",(0,0),(-1,-1),2),
-            ("VALIGN",      (0,0),(-1,-1), "MIDDLE"),
-        ]))
-        return tbl
-
-    # label + level + d1 + wtd + ytd = 5 cols
-    # Each section gets ~7.15cm wrapper. Inner cols: label 3.3, level 1.1, d1 0.9, wtd 0.9, ytd 0.95 = 7.15
-    COL_W = [3.3*cm, 1.1*cm, 0.9*cm, 0.9*cm, 0.95*cm]
-    SEC_W = sum(COL_W) / cm   # ≈ 7.15cm
-
-    eq_tbl   = Table([[Paragraph("Equities",  h)], [styled_table(pdf_table_df(equities_df),    COL_W)]], colWidths=[SEC_W*cm])
-    rt_tbl   = Table([[Paragraph("Rates",     h)], [styled_table(pdf_table_df(rates_df),       COL_W)]], colWidths=[SEC_W*cm])
-    cm_tbl   = Table([[Paragraph("Commodities / Bonds", h)], [styled_table(pdf_table_df(commodities_df), COL_W)]], colWidths=[SEC_W*cm])
-
-    news_show = news_df.copy().fillna("")
-    if not news_show.empty:
-        news_show = news_show[["headline", "source", "url"]].head(4).copy()
-        news_show["headline"] = news_show["headline"].apply(lambda x: shorten_text(x, 48))
-        news_show["source"]   = news_show["source"].apply(lambda x: shorten_text(x, 14))
-        news_show["url"]      = news_show["url"].apply(lambda x: short_url(x, 22))
-    else:
-        news_show = pd.DataFrame({"headline": ["No live articles"], "source": [""], "url": [""]})
-
-    # News section gets remaining width
-    news_w = PAGE_W - 3 * SEC_W   # ≈ 28.6 - 21.45 = 7.15cm
-    news_tbl = Table(
-        [[Paragraph("News / Links", h)],
-         [styled_table(news_show, [3.8*cm, 1.3*cm, 2.05*cm], font_size=5.8, header_size=6.3)]],
-        colWidths=[news_w * cm],
-    )
-
-    bottom_row = Table(
-        [[eq_tbl, rt_tbl, cm_tbl, news_tbl]],
-        colWidths=[SEC_W*cm, SEC_W*cm, SEC_W*cm, news_w*cm],
-    )
-    bottom_row.setStyle(TableStyle([("VALIGN", (0,0),(-1,-1), "TOP")]))
-    story += [bottom_row]
-    doc.build(story)
-    return buffer.getvalue()
-
 
 def serialize_state(state):
     """Serialise state to JSON-safe dict. History is excluded — always re-fetched."""
@@ -1711,7 +1890,8 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
 
     equities_df    = snapshot[snapshot["group"] == "equities"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
     rates_df       = snapshot[snapshot["group"] == "rates"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
-    commodities_df = snapshot[snapshot["group"].isin(["commodities", "alternatives", "bonds"])][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    commodities_df = snapshot[snapshot["group"] == "commodities"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    bonds_df       = snapshot[snapshot["group"].isin(["bonds", "alternatives"])][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
 
     news_df, news_status = load_news()
     writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag)
@@ -1752,6 +1932,7 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
         "equities_df": equities_df,
         "rates_df": rates_df,
         "commodities_df": commodities_df,
+        "bonds_df": bonds_df,
         "news_df": news_df,
         "writing": writing,
         "status": status,
@@ -1877,6 +2058,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         base_state["equities_df"],
         base_state["rates_df"],
         base_state["commodities_df"],
+        base_state.get("bonds_df", base_state.get("commodities_df")),
         base_state["metrics"],
         base_state["writing"],
         base_state["news_df"],
@@ -2074,21 +2256,23 @@ else:
 
     # ── 6. Data tables ────────────────────────────────────────────────────────
     with st.expander("📋 Full Data Tables", expanded=False):
-        tabs = st.tabs(["Equities", "Rates", "Commodities / Bonds", "Definitions", "History"])
+        tabs = st.tabs(["Equities", "Rates", "Commodities", "Bonds & Crypto", "Definitions", "History"])
         with tabs[0]:
-            st.dataframe(compact_table(st.session_state["equities_df"]),   use_container_width=True, height=380)
+            st.dataframe(compact_table(st.session_state["equities_df"]),   use_container_width=True, height=300)
         with tabs[1]:
-            st.dataframe(compact_table(st.session_state["rates_df"]),      use_container_width=True, height=220)
+            st.dataframe(compact_table(st.session_state["rates_df"]),      use_container_width=True, height=180)
         with tabs[2]:
-            st.dataframe(compact_table(st.session_state["commodities_df"]),use_container_width=True, height=380)
+            st.dataframe(compact_table(st.session_state["commodities_df"]),use_container_width=True, height=260)
         with tabs[3]:
+            st.dataframe(compact_table(st.session_state.get("bonds_df", st.session_state["commodities_df"])), use_container_width=True, height=260)
+        with tabs[4]:
             if show_definitions:
                 st.dataframe(definitions_table(st.session_state["equities_df"]),    use_container_width=True, height=220)
                 st.dataframe(definitions_table(st.session_state["rates_df"]),       use_container_width=True, height=130)
                 st.dataframe(definitions_table(st.session_state["commodities_df"]), use_container_width=True, height=220)
             else:
                 st.info("Enable 'Show definitions' in the sidebar.")
-        with tabs[4]:
+        with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
     # ── 7. PDF download ───────────────────────────────────────────────────────

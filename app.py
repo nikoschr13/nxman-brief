@@ -54,7 +54,10 @@ GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_FALLBACK_MODELS = [
     m.strip()
-    for m in get_secret("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-1.5-flash").split(",")
+    for m in get_secret(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-2.5-flash,gemini-1.5-flash,gemini-1.5-flash-8b,gemini-1.5-pro,gemini-1.0-pro"
+    ).split(",")
     if m.strip()
 ]
 MANUAL_BUND_10Y = get_secret("MANUAL_BUND_10Y")
@@ -549,6 +552,7 @@ def _strip_json_fences(raw: str) -> str:
     return raw.strip()
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def gemini_generate_json(payload):
     if not GEMINI_API_KEY:
         return None, "No GEMINI_API_KEY"
@@ -588,8 +592,11 @@ def gemini_generate_json(payload):
 
                 else:
                     msg = f"{model_name}: HTTP {r.status_code}"
-                    retry_codes = {429, 500, 503}
-                    if r.status_code in retry_codes and attempt < 2:
+                    if r.status_code == 429:
+                        # Rate limited on this model — move to next immediately
+                        errors.append(msg + " (quota)")
+                        break
+                    if r.status_code in {500, 503} and attempt < 2:
                         time.sleep(3 + attempt * 2)
                         continue
                     errors.append(msg)

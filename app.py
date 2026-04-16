@@ -501,6 +501,7 @@ def build_writing(news_df, snapshot, use_gemini):
             "Currencies remain important for CHF-based and EUR-linked investors.",
             "Cross-asset performance is mixed, so leadership should be monitored rather than assumed.",
         ],
+        "news_bullets": [],
     }
 
     if not use_gemini:
@@ -509,10 +510,14 @@ def build_writing(news_df, snapshot, use_gemini):
     payload = json.dumps(
         {
             "instruction": (
-                "Return strict JSON with these keys: headline, subheadline, news_summary, what_matters, article_angles. "
-                "what_matters: exactly 4 concise bullet strings. "
-                "article_angles: for each article in headlines, return {\"headline\": <original headline>, \"angle\": <one sentence, investment-focused interpretation>}. "
-                "Write like an institutional morning brief — factual, direct, non-promotional."
+                "Return strict JSON with keys: headline, subheadline, news_summary, what_matters, news_bullets. "
+                "what_matters: exactly 4 concise bullet strings about key investment themes. "
+                "news_bullets: 5 to 8 plain-English bullets summarising what happened since yesterday "
+                "and what it means for markets. "
+                "Each bullet must link the event to the market impact — like: "
+                "'US-Iran nuclear talks progressed — equity markets rallied while Treasury yields fell as risk appetite improved' "
+                "or 'Fed minutes signalled fewer cuts — bond prices fell as traders repriced rate expectations upward'. "
+                "Be specific, factual, cause-and-effect. No jargon, no preamble."
             ),
             "headlines": news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records") if news_df is not None and not news_df.empty else [],
             "market_snapshot": snapshot[["label", "group", "d1", "wtd", "ytd"]].fillna("").to_dict(orient="records")[:20],
@@ -527,12 +532,13 @@ def build_writing(news_df, snapshot, use_gemini):
                 "subheadline":   out.get("subheadline")  or fallback["subheadline"],
                 "news_summary":  out.get("news_summary") or fallback["news_summary"],
                 "what_matters":  out["what_matters"][:4],
+                "news_bullets":  out.get("news_bullets") or [],
                 "article_angles": out.get("article_angles") or [],
             },
             {"gemini_used": True, "reason": reason},
         )
 
-    return {**fallback, "article_angles": []}, {"gemini_used": False, "reason": reason}
+    return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": reason}
 
 
 def build_bundle():
@@ -749,12 +755,131 @@ def pdf_chart_subset(weekly_df):
 def render_combined_card(item, snapshot_row, history, chart_key):
     """Single Plotly figure per card: coloured border + metric annotations + sparkline.
 
-    Layout maths (height=245, margin_t=125, margin_b=26):
-      plot-area paper-top  = (245-125)/245 = 0.490
-      plot-area paper-bot  = 26/245        = 0.106
-      annotation zone      = paper y 0.50 … 1.0  (safely above plot area)
+    Layout: height=265, margin_t=118, margin_b=24
+      plot-area top  = (265-118)/265 = 0.555  → annotations sit at y > 0.56
+      plot-area bot  = 24/265        = 0.091
+    3 cards per row gives ~33 % screen width — enough breathing room.
     """
-    HEIGHT, MT, MB, ML, MR = 245, 125, 26, 10, 10
+    H, MT, MB, ML, MR = 265, 118, 24, 10, 8
+
+    if snapshot_row.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            height=H, margin=dict(l=ML, r=MR, t=MT, b=MB),
+            plot_bgcolor="#F8FAFC", paper_bgcolor="#F8FAFC",
+            showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False),
+            annotations=[dict(x=0.5, y=0.75, xref="paper", yref="paper",
+                              text=f"<b>{item['label']}</b><br><span style='color:#9AA8B7'>No data</span>",
+                              font=dict(size=11, color="#475467"), showarrow=False)],
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
+        return
+
+    r = snapshot_row.iloc[0]
+    card_type = item.get("type", "asset")
+
+    # ── Compute display values ────────────────────────────────────────────────
+    if card_type == "yield":
+        level = r["level"]
+        hd1, hytd = r["d1"], r["ytd"]
+        prev_l = level / (1 + hd1  / 100) if level is not None and hd1  not in (None, 0) and not pd.isna(hd1)  else None
+        ytd_l  = level / (1 + hytd / 100) if level is not None and hytd not in (None, 0) and not pd.isna(hytd) else None
+        d1_bps  = bps_change(level, prev_l) if prev_l is not None else None
+        ytd_bps = bps_change(level, ytd_l)  if ytd_l  is not None else None
+        value_str = "N/A" if level is None or pd.isna(level) else f"{float(level):.2f}%"
+        d1_str    = "N/A" if d1_bps  is None else f"{d1_bps:+.1f} bps"
+        ytd_str   = "N/A" if ytd_bps is None else f"{ytd_bps:+.1f} bps"
+        move = d1_bps
+        pos_col, neg_col = ("#F04438", "#FFF5F5"), ("#12B76A", "#F0FDF4")   # yield: up = bad
+
+    elif card_type == "fear":   # VIX — up = bad (inverted)
+        d1 = r["d1"]
+        value_str = fmt_num(r["level"])
+        d1_str    = fmt_pct(d1)
+        ytd_str   = fmt_pct(r["ytd"])
+        move = d1
+        pos_col, neg_col = ("#F04438", "#FFF5F5"), ("#12B76A", "#F0FDF4")
+
+    else:                       # regular asset
+        d1 = r["d1"]
+        value_str = fmt_num(r["level"])
+        d1_str    = fmt_pct(d1)
+        ytd_str   = fmt_pct(r["ytd"])
+        move = d1
+        pos_col, neg_col = ("#12B76A", "#F0FDF4"), ("#F04438", "#FFF5F5")
+
+    if move is not None and not pd.isna(move) and move > 0:
+        accent, bg = pos_col
+    elif move is not None and not pd.isna(move) and move < 0:
+        accent, bg = neg_col
+    else:
+        accent, bg = "#94A3B8", "#F8FAFC"
+
+    line_color = accent if accent != "#94A3B8" else PRIMARY
+
+    # Optional VIX note
+    extra = ""
+    if card_type == "fear" and r["level"] is not None and not pd.isna(r["level"]):
+        v = float(r["level"])
+        extra = "  ⚠ High" if v >= 30 else ("  Elevated" if v >= 20 else "  Calm")
+
+    # Sparkline
+    g = history[history["key"] == item["key"]].sort_values("date").tail(30)
+
+    fig = go.Figure()
+    if not g.empty:
+        fig.add_trace(go.Scatter(
+            x=g["date"], y=g["value"],
+            mode="lines",
+            line=dict(width=2, color=line_color),
+            hovertemplate="%{x|%d %b}<br>%{y:.2f}<extra></extra>",
+        ))
+
+    lbl = item["label"][:24] + ("…" if len(item["label"]) > 24 else "")
+
+    fig.update_layout(
+        height=H,
+        margin=dict(l=ML, r=MR, t=MT, b=MB),
+        plot_bgcolor=bg,
+        paper_bgcolor=bg,
+        showlegend=False,
+        xaxis=dict(
+            showgrid=False, showline=False,
+            tickformat="%d %b", tickfont=dict(size=8, color="#9AA8B7"),
+            nticks=4, showticklabels=True, automargin=True,
+        ),
+        yaxis=dict(
+            showgrid=False, showline=False,
+            showticklabels=False,   # hide y-axis numbers — sparkline is for shape only
+            automargin=False,
+        ),
+        # All annotation y values > 0.56 (above plot area top at 0.555)
+        annotations=[
+            dict(x=0.04, y=0.98, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>{lbl}</b>",
+                 font=dict(size=10, color="#475467"), showarrow=False),
+            dict(x=0.04, y=0.87, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>{value_str}</b>{extra}",
+                 font=dict(size=21, color="#0F2D52"), showarrow=False),
+            dict(x=0.04, y=0.71, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>1D</b> {d1_str}",
+                 font=dict(size=11, color="#344054"), showarrow=False),
+            dict(x=0.04, y=0.61, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"YTD  {ytd_str}",
+                 font=dict(size=10, color="#667085"), showarrow=False),
+        ],
+        shapes=[dict(
+            type="rect", xref="paper", yref="paper",
+            x0=0, y0=0, x1=1, y1=1,
+            line=dict(color=accent, width=2),
+            fillcolor="rgba(0,0,0,0)", layer="above",
+        )],
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
 
     if snapshot_row.empty:
         fig = go.Figure()
@@ -890,7 +1015,7 @@ def render_card_strip(snapshot, history, strip, title, caption, strip_name):
     st.subheader(title)
     st.caption(caption)
 
-    rows = [strip[i:i + 4] for i in range(0, len(strip), 4)]
+    rows = [strip[i:i + 3] for i in range(0, len(strip), 3)]
     for row_idx, block in enumerate(rows):
         cols = st.columns(len(block), gap="small")
         for col_idx, (col, item) in enumerate(zip(cols, block)):
@@ -950,62 +1075,25 @@ def render_macro_calendar():
             )
 
 
-def render_news_section(news_df, writing, category_filter=None):
-    """Optimised news section: category badges, Gemini investment angles, optional filter."""
-    if news_df is None or news_df.empty:
-        st.info("No news available.")
-        return
+def render_news_bullets(writing, news_df):
+    """Simple plain-English bullet list: what happened + why markets moved.
+    Uses Gemini news_bullets when available, falls back to ranked headlines."""
 
-    df = news_df.copy()
+    bullets = writing.get("news_bullets") or []
 
-    # Apply category filter
-    if category_filter:
-        mask = df["category"].isin(category_filter) if "category" in df.columns else pd.Series([True] * len(df))
-        df = df[mask]
-        if df.empty:
-            st.caption(f"No articles in selected categories. Showing all.")
-            df = news_df.copy()
-
-    for i, (_, r) in enumerate(df.head(10).iterrows()):
-        headline  = r.get("headline", "") or ""
-        url       = r.get("url", "")      or ""
-        source    = r.get("source", "")   or ""
-        category  = r.get("category", "Other") or "Other"
-        angle     = r.get("gemini_angle", "") or r.get("why_it_matters", "") or ""
-        pub       = r.get("published_at", "") or ""
-
-        style = CATEGORY_STYLE.get(category, CATEGORY_STYLE["Other"])
-        badge = (
-            f"<span style='background:{style['bg']};color:{style['text']};"
-            f"border:1px solid {style['border']};border-radius:4px;"
-            f"padding:1px 7px;font-size:10px;font-weight:700;'>{category}</span>"
-        )
-
-        # Format time if available
-        time_str = ""
-        if pub:
-            try:
-                time_str = pd.Timestamp(pub).strftime("%d %b, %H:%M")
-            except Exception:
-                pass
-
-        meta_parts = [s for s in [source, time_str] if s]
-        meta_str   = "  ·  ".join(meta_parts)
-
-        st.markdown(
-            f"""
-            <div style='background:white;border:1px solid #E4EDF6;border-radius:12px;
-                        padding:10px 14px;margin-bottom:8px;'>
-                <div style='margin-bottom:5px;'>{badge}</div>
-                <div style='font-size:13px;font-weight:700;color:#0F2D52;margin-bottom:4px;line-height:1.4;'>
-                    {"<a href='" + url + "' target='_blank' style='color:#0F2D52;text-decoration:none;'>" + headline + "</a>" if url else headline}
-                </div>
-                {"<div style='font-size:11px;color:#475467;line-height:1.5;margin-bottom:3px;'>" + angle + "</div>" if angle else ""}
-                <div style='font-size:10px;color:#9AA8B7;'>{meta_str}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    if bullets:
+        for b in bullets:
+            st.markdown(f"- {b}")
+    else:
+        # Fallback: ranked headlines with category prefix
+        if news_df is None or news_df.empty:
+            st.caption("No news available.")
+            return
+        for _, r in news_df.head(10).iterrows():
+            cat = r.get("category", "")
+            headline = r.get("headline", "")
+            prefix = f"**{cat}** — " if cat and cat != "Other" else ""
+            st.markdown(f"- {prefix}{headline}")
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, writing, news_df, status):
@@ -1622,23 +1710,10 @@ else:
     st.markdown("---")
 
     # ── News section ──────────────────────────────────────────────────────────
-    st.subheader("📰 Market News")
-    active_filter = news_category_filter if news_category_filter else None
-    if active_filter:
-        st.caption(f"Filtered: {', '.join(active_filter)}")
-
-    with st.expander("How to read the US 10Y Yield card", expanded=False):
-        st.write(
-            "The large number is the current yield in %. "
-            "The 1D and YTD figures are basis-point moves (1 bps = 0.01%). "
-            "Rising yield = existing bond prices fall. Falling yield = bond prices rise."
-        )
-
-    render_news_section(
-        st.session_state["news_df"],
-        st.session_state["writing"],
-        category_filter=active_filter,
-    )
+    st.subheader("📰 What's Moving Markets")
+    gemini_note = "Gemini-written, based on today's headlines + market moves." if st.session_state["status"]["gemini_used"] else "Headline list (enable Gemini for cause-and-effect commentary)."
+    st.caption(gemini_note)
+    render_news_bullets(st.session_state["writing"], st.session_state["news_df"])
 
     st.markdown("---")
 

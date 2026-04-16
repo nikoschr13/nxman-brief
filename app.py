@@ -78,6 +78,8 @@ ASSETS = [
     ("commodities", "copper", "Copper", "Copper futures", "HG=F", False),
     ("alternatives", "bitcoin", "Bitcoin", "Largest cryptocurrency", "BTC-USD", True),
     ("alternatives", "ethereum", "Ethereum", "Second-largest cryptocurrency", "ETH-USD", False),
+    ("sentiment", "vix", "VIX", "CBOE Volatility Index — measures expected S&P 500 volatility; above 20 = elevated fear", "^VIX", False),
+    ("fx", "dxy", "DXY", "US Dollar Index — basket of major currencies vs USD", "DX-Y.NYB", False),
 ]
 
 RATES = [
@@ -87,24 +89,57 @@ RATES = [
 ]
 
 INDICATOR_STRIP = [
-    {"type": "asset", "key": "sp500", "label": "S&P 500 (^GSPC)"},
-    {"type": "asset", "key": "nasdaq100", "label": "Nasdaq 100 (^NDX)"},
-    {"type": "asset", "key": "stoxx600", "label": "Stoxx Europe 600 (^STOXX)"},
-    {"type": "asset", "key": "msci_world", "label": "MSCI World (^990100-USD-STRD)"},
-    {"type": "asset", "key": "smi", "label": "SMI (^SSMI)"},
+    {"type": "asset", "key": "sp500", "label": "S&P 500"},
+    {"type": "asset", "key": "nasdaq100", "label": "Nasdaq 100"},
+    {"type": "asset", "key": "stoxx600", "label": "Stoxx Europe 600"},
+    {"type": "asset", "key": "msci_world", "label": "MSCI World"},
+    {"type": "asset", "key": "smi", "label": "SMI (Switzerland)"},
+    {"type": "asset", "key": "nikkei225", "label": "Nikkei 225"},
+    {"type": "fear",  "key": "vix",     "label": "VIX (Fear Gauge)"},
+    {"type": "asset", "key": "dxy",     "label": "DXY (USD Index)"},
 ]
 
 ASSET_CLASS_STRIP = [
-    {"type": "asset", "key": "msci_world", "label": "Global Equities (MSCI World)"},
-    {"type": "asset", "key": "global_bonds", "label": "Global Bonds (BNDW)"},
-    {"type": "asset", "key": "usd_bonds", "label": "USD Bonds (BND)"},
-    {"type": "asset", "key": "eur_bonds", "label": "EUR Bonds (IEAG)"},
-    {"type": "asset", "key": "gold", "label": "Gold (GC=F)"},
-    {"type": "asset", "key": "bitcoin", "label": "Bitcoin (BTC-USD)"},
-    {"type": "asset", "key": "wti", "label": "Oil (CL=F)"},
-    {"type": "yield", "key": "us10y", "label": "US 10Y Yield (DGS10/^TNX)"},
-    {"type": "asset", "key": "eurchf", "label": "EUR/CHF (EURCHF=X)"},
+    {"type": "asset", "key": "msci_world",   "label": "Global Equities"},
+    {"type": "asset", "key": "global_bonds", "label": "Global Bonds"},
+    {"type": "asset", "key": "usd_bonds",    "label": "USD Bonds"},
+    {"type": "asset", "key": "eur_bonds",    "label": "EUR Bonds"},
+    {"type": "asset", "key": "gold",         "label": "Gold"},
+    {"type": "asset", "key": "bitcoin",      "label": "Bitcoin"},
+    {"type": "asset", "key": "wti",          "label": "WTI Oil"},
+    {"type": "yield", "key": "us10y",        "label": "US 10Y Yield"},
+    {"type": "asset", "key": "eurchf",       "label": "EUR/CHF"},
 ]
+
+# ── Macro events calendar (update as needed) ─────────────────────────────────
+MACRO_EVENTS = [
+    {"date": "2026-04-17", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-05-02", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-05-07", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-05-13", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-06-05", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-06-05", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-06-11", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-06-18", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-07-03", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-07-15", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-07-24", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-07-30", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-08-05", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-09-11", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-09-17", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+]
+
+# ── News category style map ───────────────────────────────────────────────────
+CATEGORY_STYLE = {
+    "Macro / Rates":  {"bg": "#DBEAFE", "text": "#1E3A5F", "border": "#93C5FD"},
+    "Geopolitics":    {"bg": "#FEE2E2", "text": "#7F1D1D", "border": "#FCA5A5"},
+    "Equities":       {"bg": "#DCFCE7", "text": "#14532D", "border": "#86EFAC"},
+    "Commodities":    {"bg": "#FEF3C7", "text": "#78350F", "border": "#FCD34D"},
+    "Crypto":         {"bg": "#EDE9FE", "text": "#4C1D95", "border": "#C4B5FD"},
+    "Other":          {"bg": "#F3F4F6", "text": "#374151", "border": "#D1D5DB"},
+}
+
 
 st.set_page_config(page_title="NXMAN Daily Market Brief", layout="wide")
 
@@ -474,14 +509,13 @@ def build_writing(news_df, snapshot, use_gemini):
     payload = json.dumps(
         {
             "instruction": (
-                "Return strict JSON with keys: headline, subheadline, news_summary, what_matters. "
-                "what_matters must be an array of exactly 4 concise bullet strings. "
-                "Write like an institutional morning brief. "
-                "Focus on major world news and investment implications. "
-                "Be factual, natural, concise, and non-promotional."
+                "Return strict JSON with these keys: headline, subheadline, news_summary, what_matters, article_angles. "
+                "what_matters: exactly 4 concise bullet strings. "
+                "article_angles: for each article in headlines, return {\"headline\": <original headline>, \"angle\": <one sentence, investment-focused interpretation>}. "
+                "Write like an institutional morning brief — factual, direct, non-promotional."
             ),
             "headlines": news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records") if news_df is not None and not news_df.empty else [],
-            "market_snapshot": snapshot[["label", "group", "d1", "wtd", "mtd", "ytd"]].fillna("").to_dict(orient="records")[:24],
+            "market_snapshot": snapshot[["label", "group", "d1", "wtd", "ytd"]].fillna("").to_dict(orient="records")[:20],
         }
     )
 
@@ -489,15 +523,16 @@ def build_writing(news_df, snapshot, use_gemini):
     if isinstance(out, dict) and isinstance(out.get("what_matters"), list) and len(out["what_matters"]) >= 4:
         return (
             {
-                "headline": out.get("headline") or fallback["headline"],
-                "subheadline": out.get("subheadline") or fallback["subheadline"],
-                "news_summary": out.get("news_summary") or fallback["news_summary"],
-                "what_matters": out["what_matters"][:4],
+                "headline":      out.get("headline")     or fallback["headline"],
+                "subheadline":   out.get("subheadline")  or fallback["subheadline"],
+                "news_summary":  out.get("news_summary") or fallback["news_summary"],
+                "what_matters":  out["what_matters"][:4],
+                "article_angles": out.get("article_angles") or [],
             },
             {"gemini_used": True, "reason": reason},
         )
 
-    return fallback, {"gemini_used": False, "reason": reason}
+    return {**fallback, "article_angles": []}, {"gemini_used": False, "reason": reason}
 
 
 def build_bundle():
@@ -630,14 +665,21 @@ def build_bundle():
     return pd.DataFrame(snapshot_rows), history, chart_allowed_keys
 
 
-def build_weekly_chart_df(history, allowed, include_crypto_flag):
+def build_weekly_chart_df(history, allowed, include_crypto_flag, start_date=None):
+    """Weekly-resampled YTD (or custom window) returns, always including today's latest close."""
     if history.empty:
         return pd.DataFrame(columns=["date", "key", "label", "group", "return_pct"])
 
     df = history.copy()
     df["date"] = pd.to_datetime(df["date"])
-    year = df["date"].max().year
-    df = df[(df["date"] >= pd.Timestamp(year, 1, 1)) & (df["key"].isin(allowed))]
+    max_date = df["date"].max()
+
+    if start_date is None:
+        window_start = pd.Timestamp(max_date.year, 1, 1)
+    else:
+        window_start = pd.Timestamp(start_date)
+
+    df = df[(df["date"] >= window_start) & (df["key"].isin(allowed))]
 
     if not include_crypto_flag:
         df = df[df["group"] != "alternatives"]
@@ -648,21 +690,30 @@ def build_weekly_chart_df(history, allowed, include_crypto_flag):
         weekly = g["value"].resample("W-FRI").last().dropna()
         if weekly.empty:
             continue
-        base = weekly.iloc[0]
-        returns = ((weekly / base) - 1.0) * 100.0
-        parts.append(
-            pd.DataFrame(
-                {
-                    "date": returns.index,
-                    "key": key,
-                    "label": g["label"].iloc[0],
-                    "group": g["group"].iloc[0],
-                    "return_pct": returns.values,
-                }
-            )
-        )
 
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["date", "key", "label", "group", "return_pct"])
+        # Always append today's latest close if it's newer than the last weekly point
+        latest_daily = g["value"].dropna()
+        if not latest_daily.empty:
+            latest_ts = latest_daily.index[-1]
+            if latest_ts > weekly.index[-1]:
+                weekly.loc[latest_ts] = float(latest_daily.iloc[-1])
+                weekly = weekly.sort_index()
+
+        base = float(weekly.iloc[0])
+        if base == 0:
+            continue
+        returns = ((weekly / base) - 1.0) * 100.0
+        parts.append(pd.DataFrame({
+            "date":       returns.index,
+            "key":        key,
+            "label":      g["label"].iloc[0],
+            "group":      g["group"].iloc[0],
+            "return_pct": returns.values,
+        }))
+
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
+        columns=["date", "key", "label", "group", "return_pct"]
+    )
 
 
 def add_event_marker(fig, event_date, label, line_color, fill_opacity=0.10, font_size=11):
@@ -696,155 +747,142 @@ def pdf_chart_subset(weekly_df):
 
 
 def render_combined_card(item, snapshot_row, history, chart_key):
-    """Single Plotly figure per card: colored border + metric annotations + sparkline trace.
-    This is the only reliable way to integrate a chart visually inside the card in Streamlit."""
+    """Single Plotly figure per card: coloured border + metric annotations + sparkline.
+
+    Layout maths (height=245, margin_t=125, margin_b=26):
+      plot-area paper-top  = (245-125)/245 = 0.490
+      plot-area paper-bot  = 26/245        = 0.106
+      annotation zone      = paper y 0.50 … 1.0  (safely above plot area)
+    """
+    HEIGHT, MT, MB, ML, MR = 245, 125, 26, 10, 10
 
     if snapshot_row.empty:
         fig = go.Figure()
         fig.update_layout(
-            height=170,
-            margin=dict(l=8, r=8, t=8, b=8),
-            plot_bgcolor="#F8FAFC",
-            paper_bgcolor="#F8FAFC",
-            showlegend=False,
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            annotations=[dict(
-                x=0.5, y=0.5, xref="paper", yref="paper",
-                text=f"<b>{item['label']}</b><br><span style='color:#9AA8B7'>No data</span>",
-                font=dict(size=11, color="#475467"), showarrow=False,
-            )],
+            height=HEIGHT, margin=dict(l=ML, r=MR, t=MT, b=MB),
+            plot_bgcolor="#F8FAFC", paper_bgcolor="#F8FAFC",
+            showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False),
+            annotations=[dict(x=0.5, y=0.75, xref="paper", yref="paper",
+                               text=f"<b>{item['label']}</b><br><span style='color:#9AA8B7'>No data</span>",
+                               font=dict(size=11, color="#475467"), showarrow=False)],
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
         return
 
     r = snapshot_row.iloc[0]
 
-    # ── Compute display strings + accent colour ──────────────────────────────
-    if item["type"] == "yield":
+    # ── Compute display values and accent colour ──────────────────────────────
+    card_type = item.get("type", "asset")
+
+    if card_type == "yield":
         level = r["level"]
-        hist_d1 = r["d1"]
-        hist_ytd = r["ytd"]
-        prev_level = (
-            level / (1 + hist_d1 / 100)
-            if level is not None and hist_d1 not in (None, 0) and not pd.isna(hist_d1)
-            else None
-        )
-        ytd_level = (
-            level / (1 + hist_ytd / 100)
-            if level is not None and hist_ytd not in (None, 0) and not pd.isna(hist_ytd)
-            else None
-        )
-        d1_bps = bps_change(level, prev_level) if prev_level is not None else None
-        ytd_bps = bps_change(level, ytd_level) if ytd_level is not None else None
+        hist_d1, hist_ytd = r["d1"], r["ytd"]
+        prev_l = level / (1 + hist_d1 / 100) if level is not None and hist_d1 not in (None, 0) and not pd.isna(hist_d1) else None
+        ytd_l  = level / (1 + hist_ytd / 100) if level is not None and hist_ytd not in (None, 0) and not pd.isna(hist_ytd) else None
+        d1_bps  = bps_change(level, prev_l) if prev_l  is not None else None
+        ytd_bps = bps_change(level, ytd_l)  if ytd_l   is not None else None
         value_str = "N/A" if level is None or pd.isna(level) else f"{float(level):.2f}%"
-        d1_str = "N/A" if d1_bps is None else f"{d1_bps:+.1f} bps"
-        ytd_str = "N/A" if ytd_bps is None else f"{ytd_bps:+.1f} bps"
-        if d1_bps is not None and d1_bps > 0:
-            accent, bg = "#F04438", "#FFF5F5"
-        elif d1_bps is not None and d1_bps < 0:
-            accent, bg = "#12B76A", "#F0FDF4"
-        else:
-            accent, bg = "#94A3B8", "#F8FAFC"
-    else:
+        d1_str    = "N/A" if d1_bps  is None else f"{d1_bps:+.1f} bps"
+        ytd_str   = "N/A" if ytd_bps is None else f"{ytd_bps:+.1f} bps"
+        move = d1_bps
+        # For yields: higher = bonds expensive = red for bond investors
+        up_col, dn_col = ("#F04438", "#FFF5F5"), ("#12B76A", "#F0FDF4")
+
+    elif card_type == "fear":
+        # VIX: higher = more fear = RED; lower = calmer = GREEN (inverted)
         d1 = r["d1"]
         value_str = fmt_num(r["level"])
-        d1_str = fmt_pct(d1)
-        ytd_str = fmt_pct(r["ytd"])
-        if d1 is not None and not pd.isna(d1) and d1 > 0:
-            accent, bg = "#12B76A", "#F0FDF4"
-        elif d1 is not None and not pd.isna(d1) and d1 < 0:
-            accent, bg = "#F04438", "#FFF5F5"
-        else:
-            accent, bg = "#94A3B8", "#F8FAFC"
+        d1_str    = fmt_pct(d1)
+        ytd_str   = fmt_pct(r["ytd"])
+        move = d1
+        up_col, dn_col = ("#F04438", "#FFF5F5"), ("#12B76A", "#F0FDF4")
+
+    else:  # "asset"
+        d1 = r["d1"]
+        value_str = fmt_num(r["level"])
+        d1_str    = fmt_pct(d1)
+        ytd_str   = fmt_pct(r["ytd"])
+        move = d1
+        up_col, dn_col = ("#12B76A", "#F0FDF4"), ("#F04438", "#FFF5F5")
+
+    if move is not None and not pd.isna(move) and move > 0:
+        accent, bg = up_col
+    elif move is not None and not pd.isna(move) and move < 0:
+        accent, bg = dn_col
+    else:
+        accent, bg = "#94A3B8", "#F8FAFC"
 
     line_color = accent if accent != "#94A3B8" else PRIMARY
 
-    # ── Sparkline data (last 30 days) ────────────────────────────────────────
+    # ── Sparkline data (last 30 trading days) ────────────────────────────────
     g = history[history["key"] == item["key"]].sort_values("date").tail(30)
 
     fig = go.Figure()
-
     if not g.empty:
         fig.add_trace(go.Scatter(
-            x=g["date"],
-            y=g["value"],
+            x=g["date"], y=g["value"],
             mode="lines",
             line=dict(width=2, color=line_color),
             hovertemplate="%{x|%d %b}<br>%{y:.2f}<extra></extra>",
         ))
 
-    # Truncate long labels for annotation
-    label_text = item["label"] if len(item["label"]) <= 28 else item["label"][:26] + "…"
+    # Truncate long labels
+    lbl = item["label"] if len(item["label"]) <= 22 else item["label"][:20] + "…"
 
-    # ── Figure layout: big top margin holds text annotations ─────────────────
+    # VIX: add interpretation suffix
+    vix_note = ""
+    if card_type == "fear" and r["level"] is not None and not pd.isna(r["level"]):
+        v = float(r["level"])
+        if v >= 30:
+            vix_note = "  ⚠ High fear"
+        elif v >= 20:
+            vix_note = "  Elevated"
+        else:
+            vix_note = "  Calm"
+
     fig.update_layout(
-        height=205,
-        margin=dict(l=10, r=10, t=95, b=26),
+        height=HEIGHT,
+        margin=dict(l=ML, r=MR, t=MT, b=MB),
         plot_bgcolor=bg,
         paper_bgcolor=bg,
         showlegend=False,
         xaxis=dict(
-            showgrid=False,
-            showline=False,
-            tickformat="%d %b",
-            tickfont=dict(size=8, color="#9AA8B7"),
-            nticks=4,
-            showticklabels=True,
-            automargin=True,
+            showgrid=False, showline=False,
+            tickformat="%d %b", tickfont=dict(size=8, color="#9AA8B7"),
+            nticks=4, showticklabels=True, automargin=True,
         ),
         yaxis=dict(
-            showgrid=False,
-            showline=False,
+            showgrid=False, showline=False,
             tickfont=dict(size=8, color="#9AA8B7"),
-            nticks=3,
-            showticklabels=True,
-            automargin=True,
-            side="right",
+            nticks=3, showticklabels=True, automargin=True, side="right",
         ),
+        # Annotation y values are all > 0.50, safely above the plot area
         annotations=[
-            dict(
-                x=0.03, y=1.01, xref="paper", yref="paper",
-                xanchor="left", yanchor="top",
-                text=f"<b>{label_text}</b>",
-                font=dict(size=10, color="#475467"),
-                showarrow=False,
-            ),
-            dict(
-                x=0.03, y=0.87, xref="paper", yref="paper",
-                xanchor="left", yanchor="top",
-                text=f"<b>{value_str}</b>",
-                font=dict(size=22, color="#0F2D52"),
-                showarrow=False,
-            ),
-            dict(
-                x=0.03, y=0.64, xref="paper", yref="paper",
-                xanchor="left", yanchor="top",
-                text=f"<b>1D</b> {d1_str}",
-                font=dict(size=11, color="#344054"),
-                showarrow=False,
-            ),
-            dict(
-                x=0.03, y=0.50, xref="paper", yref="paper",
-                xanchor="left", yanchor="top",
-                text=f"YTD  {ytd_str}",
-                font=dict(size=10, color="#667085"),
-                showarrow=False,
-            ),
+            dict(x=0.04, y=0.97, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>{lbl}</b>",
+                 font=dict(size=10, color="#475467"), showarrow=False),
+            dict(x=0.04, y=0.85, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>{value_str}</b>{vix_note}",
+                 font=dict(size=20, color="#0F2D52"), showarrow=False),
+            dict(x=0.04, y=0.70, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"<b>1D</b> {d1_str}",
+                 font=dict(size=11, color="#344054"), showarrow=False),
+            dict(x=0.04, y=0.59, xref="paper", yref="paper",
+                 xanchor="left", yanchor="top",
+                 text=f"YTD  {ytd_str}",
+                 font=dict(size=10, color="#667085"), showarrow=False),
         ],
-        shapes=[
-            dict(
-                type="rect", xref="paper", yref="paper",
-                x0=0, y0=0, x1=1, y1=1,
-                line=dict(color=accent, width=2),
-                fillcolor="rgba(0,0,0,0)",
-                layer="above",
-            )
-        ],
+        shapes=[dict(
+            type="rect", xref="paper", yref="paper",
+            x0=0, y0=0, x1=1, y1=1,
+            line=dict(color=accent, width=2),
+            fillcolor="rgba(0,0,0,0)", layer="above",
+        )],
     )
-
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
-
 
 
 def render_card_strip(snapshot, history, strip, title, caption, strip_name):
@@ -863,6 +901,111 @@ def render_card_strip(snapshot, history, strip, title, caption, strip_name):
                     item, row, history,
                     chart_key=f"card_{strip_name}_{row_idx}_{col_idx}_{key}",
                 )
+
+
+def render_macro_calendar():
+    """Show the next upcoming macro events from the hardcoded MACRO_EVENTS list."""
+    today = pd.Timestamp.today().normalize()
+    upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:7]
+
+    if not upcoming:
+        st.caption("No upcoming events in the calendar.")
+        return
+
+    CAT_COLOR = {
+        "Central Banks": ("#1E3A5F", "#DBEAFE"),
+        "US Data":       ("#14532D", "#DCFCE7"),
+        "EU Data":       ("#78350F", "#FEF3C7"),
+    }
+
+    cols = st.columns(len(upcoming))
+    for col, ev in zip(cols, upcoming):
+        dt = pd.Timestamp(ev["date"])
+        days_away = (dt - today).days
+        if days_away == 0:
+            day_label = "TODAY"
+            day_color = "#EF4444"
+        elif days_away == 1:
+            day_label = "Tomorrow"
+            day_color = "#F97316"
+        else:
+            day_label = f"In {days_away}d"
+            day_color = "#475467"
+
+        cat = ev.get("category", "Other")
+        text_c, bg_c = CAT_COLOR.get(cat, ("#374151", "#F3F4F6"))
+
+        with col:
+            st.markdown(
+                f"""
+                <div style='background:{bg_c};border:1px solid {text_c}33;border-radius:10px;
+                            padding:8px 10px;text-align:center;'>
+                    <div style='font-size:10px;font-weight:700;color:{text_c};margin-bottom:2px;'>{cat}</div>
+                    <div style='font-size:11px;font-weight:800;color:#0F2D52;line-height:1.25;margin-bottom:4px;'>{ev["event"]}</div>
+                    <div style='font-size:10px;color:#475467;'>{dt.strftime("%d %b %Y")}</div>
+                    <div style='font-size:11px;font-weight:700;color:{day_color};margin-top:2px;'>{day_label}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_news_section(news_df, writing, category_filter=None):
+    """Optimised news section: category badges, Gemini investment angles, optional filter."""
+    if news_df is None or news_df.empty:
+        st.info("No news available.")
+        return
+
+    df = news_df.copy()
+
+    # Apply category filter
+    if category_filter:
+        mask = df["category"].isin(category_filter) if "category" in df.columns else pd.Series([True] * len(df))
+        df = df[mask]
+        if df.empty:
+            st.caption(f"No articles in selected categories. Showing all.")
+            df = news_df.copy()
+
+    for i, (_, r) in enumerate(df.head(10).iterrows()):
+        headline  = r.get("headline", "") or ""
+        url       = r.get("url", "")      or ""
+        source    = r.get("source", "")   or ""
+        category  = r.get("category", "Other") or "Other"
+        angle     = r.get("gemini_angle", "") or r.get("why_it_matters", "") or ""
+        pub       = r.get("published_at", "") or ""
+
+        style = CATEGORY_STYLE.get(category, CATEGORY_STYLE["Other"])
+        badge = (
+            f"<span style='background:{style['bg']};color:{style['text']};"
+            f"border:1px solid {style['border']};border-radius:4px;"
+            f"padding:1px 7px;font-size:10px;font-weight:700;'>{category}</span>"
+        )
+
+        # Format time if available
+        time_str = ""
+        if pub:
+            try:
+                time_str = pd.Timestamp(pub).strftime("%d %b, %H:%M")
+            except Exception:
+                pass
+
+        meta_parts = [s for s in [source, time_str] if s]
+        meta_str   = "  ·  ".join(meta_parts)
+
+        st.markdown(
+            f"""
+            <div style='background:white;border:1px solid #E4EDF6;border-radius:12px;
+                        padding:10px 14px;margin-bottom:8px;'>
+                <div style='margin-bottom:5px;'>{badge}</div>
+                <div style='font-size:13px;font-weight:700;color:#0F2D52;margin-bottom:4px;line-height:1.4;'>
+                    {"<a href='" + url + "' target='_blank' style='color:#0F2D52;text-decoration:none;'>" + headline + "</a>" if url else headline}
+                </div>
+                {"<div style='font-size:11px;color:#475467;line-height:1.5;margin-bottom:3px;'>" + angle + "</div>" if angle else ""}
+                <div style='font-size:10px;color:#9AA8B7;'>{meta_str}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, writing, news_df, status):
@@ -1140,6 +1283,13 @@ def build_base_state(include_crypto_flag, news_count_value, use_gemini_flag):
     news_df, news_status = load_news(news_count_value)
     writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag)
 
+    # Merge Gemini per-article angles into news_df (keyed by headline)
+    angles = writing.pop("article_angles", [])
+    if angles and not news_df.empty:
+        angle_map = {a.get("headline", ""): a.get("angle", "") for a in angles if isinstance(a, dict)}
+        news_df = news_df.copy()
+        news_df["gemini_angle"] = news_df["headline"].map(angle_map).fillna("")
+
     status = {
         "gemini_used": gemini_status["gemini_used"],
         "gemini_reason": gemini_status["reason"],
@@ -1178,12 +1328,22 @@ def build_base_state(include_crypto_flag, news_count_value, use_gemini_flag):
     }
 
 
-def add_render_outputs(base_state):
+def add_render_outputs(base_state, chart_window="YTD"):
     history = base_state["history"]
     chart_allowed_keys = base_state["chart_allowed_keys"]
     include_crypto_flag = base_state.get("include_crypto_flag", True)
 
-    weekly_df = build_weekly_chart_df(history, chart_allowed_keys, include_crypto_flag)
+    # Determine start date from chart_window
+    today = pd.Timestamp.today().normalize()
+    window_map = {
+        "YTD":       pd.Timestamp(today.year, 1, 1),
+        "3 months":  today - pd.DateOffset(months=3),
+        "6 months":  today - pd.DateOffset(months=6),
+        "1 year":    today - pd.DateOffset(years=1),
+    }
+    start_date = window_map.get(chart_window, pd.Timestamp(today.year, 1, 1))
+
+    weekly_df = build_weekly_chart_df(history, chart_allowed_keys, include_crypto_flag, start_date=start_date)
     fig = None
     pdf_chart_png = None
 
@@ -1210,7 +1370,7 @@ def add_render_outputs(base_state):
             x="date",
             y="return_pct",
             color="short_label",
-            title=f"{chart_mode} Cross-Asset YTD Performance (Start of Year = 0%)",
+            title=f"{chart_mode} Cross-Asset Performance — {chart_window} (base = 0%)",
             color_discrete_sequence=["#103B73", "#1E88E5", "#38A3FF", "#26A69A", "#EF6C00", "#7E57C2", "#6D4C41", "#00897B", "#C62828"],
         )
         fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>")
@@ -1293,25 +1453,43 @@ def add_render_outputs(base_state):
 generate = False
 
 with st.sidebar:
+    st.markdown("**Data**")
     include_crypto = st.checkbox("Include crypto", value=True)
-    chart_mode = st.radio("Main chart", ["Core", "Expanded"], index=0)
-    news_count = st.selectbox("News items", [3, 5, 8, 10], index=2)
-    use_gemini_writing = st.checkbox("Use Gemini for headline + What Matters + news summary", value=True)
-    show_definitions = st.checkbox("Show definitions tables", value=False)
-    auto_refresh = st.checkbox("Auto-refresh live snapshot", value=True)
-    refresh_seconds = st.selectbox("Refresh every (seconds)", [15, 30, 60, 120], index=1)
+    mode = st.radio("Data mode", ["Live", "Morning snapshot"], index=1)
+    st.caption("Morning snapshot freezes at 08:00 Zurich — use for newsletters.")
 
-    if auto_refresh:
+    st.markdown("---")
+    st.markdown("**Chart**")
+    chart_mode   = st.radio("Series", ["Core", "Expanded"], index=0)
+    chart_window = st.radio("Window", ["YTD", "3 months", "6 months", "1 year"], index=0)
+
+    st.markdown("---")
+    st.markdown("**News**")
+    news_count = st.selectbox("Articles to fetch", [5, 8, 10, 15], index=1)
+    all_categories = ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]
+    news_category_filter = st.multiselect(
+        "Filter by topic",
+        all_categories,
+        default=[],
+        placeholder="All topics",
+    )
+
+    st.markdown("---")
+    st.markdown("**AI & refresh**")
+    use_gemini_writing = st.checkbox("Gemini commentary + article angles", value=True)
+    show_definitions   = st.checkbox("Show definitions tables", value=False)
+    auto_refresh       = st.checkbox("Auto-refresh (live mode)", value=False)
+    refresh_seconds    = st.selectbox("Refresh every (s)", [30, 60, 120, 300], index=1)
+
+    if auto_refresh and mode == "Live":
         st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
 
-    if st.button("Refresh now", use_container_width=True):
+    if st.button("🔄 Refresh now", use_container_width=True):
         st.rerun()
 
-    mode = st.radio("Data mode", ["Live", "Morning snapshot"], index=1)
-    st.caption("Morning snapshot mode uses the first saved snapshot of the day. It is the right mode for a newsletter.")
-    st.caption("Default ceasefire marker date is 07 Apr 2026 unless you override IRAN_CEASEFIRE_DATE in .env.")
-
-    generate = st.button("Generate Daily Brief", type="primary", use_container_width=True)
+    st.markdown("---")
+    generate = st.button("▶  Generate Daily Brief", type="primary", use_container_width=True)
+    st.caption("Default ceasefire marker: 07 Apr 2026. Override via IRAN_CEASEFIRE_DATE in secrets.")
 
 if generate:
     znow = now_zurich()
@@ -1319,7 +1497,7 @@ if generate:
 
     if mode == "Live":
         base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
-        state = add_render_outputs(base_state)
+        state = add_render_outputs(base_state, chart_window)
         st.session_state.update(state)
         st.session_state["snapshot_mode_note"] = f"Live mode | generated at {znow.strftime('%H:%M')} Zurich"
         st.session_state["ui_use_gemini"] = use_gemini_writing
@@ -1328,68 +1506,82 @@ if generate:
         saved_base = load_snapshot(today_str)
         if saved_base is not None:
             saved_base["include_crypto_flag"] = include_crypto
-            state = add_render_outputs(saved_base)
+            state = add_render_outputs(saved_base, chart_window)
             st.session_state.update(state)
             requested_note = "ON" if use_gemini_writing else "OFF"
             snap_note = "ON" if state["status"].get("gemini_used") else "OFF"
-            st.session_state["snapshot_mode_note"] = f"Morning snapshot mode | using frozen snapshot for {today_str} | Gemini requested now: {requested_note} | Gemini in saved snapshot: {snap_note}"
+            st.session_state["snapshot_mode_note"] = (
+                f"Morning snapshot mode | frozen snapshot for {today_str} | "
+                f"Gemini requested: {requested_note} | in snapshot: {snap_note}"
+            )
             st.session_state["ui_use_gemini"] = use_gemini_writing
 
         else:
             if znow.hour >= SNAPSHOT_HOUR:
                 base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
                 save_snapshot(base_state, today_str)
-                state = add_render_outputs(base_state)
+                state = add_render_outputs(base_state, chart_window)
                 st.session_state.update(state)
                 st.session_state["snapshot_mode_note"] = (
-                    f"Morning snapshot mode | first snapshot for {today_str} was created at "
-                    f"{znow.strftime('%H:%M')} Zurich. It is now frozen for today's newsletter."
+                    f"Morning snapshot mode | first snapshot for {today_str} created at "
+                    f"{znow.strftime('%H:%M')} Zurich — frozen for today's newsletter."
                 )
                 st.session_state["ui_use_gemini"] = use_gemini_writing
             else:
                 prev_date, prev_base = latest_available_snapshot()
                 if prev_base is not None:
                     prev_base["include_crypto_flag"] = include_crypto
-                    state = add_render_outputs(prev_base)
+                    state = add_render_outputs(prev_base, chart_window)
                     st.session_state.update(state)
                     st.session_state["snapshot_mode_note"] = (
-                        f"No {today_str} morning snapshot exists yet. Using latest available snapshot: {prev_date}."
+                        f"No {today_str} morning snapshot yet. Using latest: {prev_date}."
                     )
                     st.session_state["ui_use_gemini"] = use_gemini_writing
                 else:
                     base_state = build_base_state(include_crypto, news_count, use_gemini_writing)
-                    state = add_render_outputs(base_state)
+                    state = add_render_outputs(base_state, chart_window)
                     st.session_state.update(state)
                     st.session_state["snapshot_mode_note"] = (
-                        f"No saved morning snapshot exists yet. Showing a provisional live build at "
+                        f"No saved snapshot exists yet. Provisional live build at "
                         f"{znow.strftime('%H:%M')} Zurich."
                     )
                     st.session_state["ui_use_gemini"] = use_gemini_writing
 
 if "snapshot" not in st.session_state:
-    st.info("Press Generate Daily Brief.")
+    st.info("▶  Press **Generate Daily Brief** in the sidebar to load market data.")
 else:
     st.caption(st.session_state.get("snapshot_mode_note", ""))
-    st.caption("Main chart defaults to a professional core cross-asset basket. US 10Y is shown as a yield-change proxy alongside return series. Choose Expanded in the sidebar to add secondary lines.")
 
+    # ── Status bar ────────────────────────────────────────────────────────────
     status = st.session_state["status"]
     s1, s2, s3 = st.columns(3)
     with s1:
-        requested = status.get("gemini_requested", False)
-        st.markdown(f"Gemini output: **{'ON' if status['gemini_used'] else 'OFF'}**")
-        st.caption(f"Requested: {'ON' if requested else 'OFF'} | {status['gemini_reason']}")
+        gemini_on = status["gemini_used"]
+        colour = "green" if gemini_on else "orange"
+        st.markdown(f"Gemini commentary: **:{colour}[{'ON' if gemini_on else 'OFF'}]**")
+        st.caption(f"Requested: {'ON' if status.get('gemini_requested') else 'OFF'} | {status['gemini_reason']}")
     with s2:
-        st.markdown(f"Live news: **{'ON' if status['live_news'] else 'OFF'}**")
+        live_on = status["live_news"]
+        colour2 = "green" if live_on else "orange"
+        st.markdown(f"Live news: **:{colour2}[{'ON' if live_on else 'OFF'}]**")
         st.caption(status["news_reason"])
     with s3:
-        st.markdown(f"Articles / URLs: **{status['article_count']} / {status['url_count']}**")
+        st.markdown(f"Articles: **{status['article_count']}** | URLs: **{status['url_count']}**")
 
+    st.markdown("---")
+
+    # ── Macro events calendar ─────────────────────────────────────────────────
+    st.subheader("📅 Upcoming Macro Events")
+    render_macro_calendar()
+    st.markdown("---")
+
+    # ── Indicator cards ───────────────────────────────────────────────────────
     render_card_strip(
         st.session_state["snapshot"],
         st.session_state["history"],
         INDICATOR_STRIP,
         "Market Indicators",
-        "Individual live market indicators with daily and YTD performance. A 7-day sparkline is shown under each card.",
+        "Major equity indices + VIX fear gauge + DXY. Green = up today, Red = down today. VIX colours are inverted (red = more fear).",
         "market_indicators",
     )
 
@@ -1398,11 +1590,15 @@ else:
         st.session_state["history"],
         ASSET_CLASS_STRIP,
         "Asset Class Performance",
-        "Cross-asset view showing how the main asset classes are performing. A 7-day sparkline is shown under each card.",
+        "Cross-asset view. Yields show basis-point moves. All other cards show % moves.",
         "asset_classes",
     )
 
+    st.markdown("---")
+
+    # ── Main chart + right panel ──────────────────────────────────────────────
     left, right = st.columns([2, 1])
+
     with left:
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.subheader(st.session_state["writing"]["headline"])
@@ -1410,51 +1606,43 @@ else:
         if st.session_state["fig"] is not None:
             st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
         else:
-            st.info("No extracted series available for the chart.")
+            st.info("No chart data available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.subheader("What Matters")
-        for item in st.session_state["writing"]["what_matters"]:
-            st.markdown(f"- {item}")
+        for bullet in st.session_state["writing"]["what_matters"]:
+            st.markdown(f"- {bullet}")
 
         st.subheader("News Summary")
         st.info(st.session_state["writing"]["news_summary"])
-
-        st.subheader("Specific News / Links")
-        if st.session_state["news_df"].empty:
-            st.info("No news rows available.")
-        else:
-            for _, r in st.session_state["news_df"].head(8).iterrows():
-                headline = r.get("headline", "")
-                source = r.get("source", "")
-                url = r.get("url", "")
-                why = r.get("why_it_matters", "")
-                category = r.get("category", "")
-
-                st.markdown("<div class='news-card'>", unsafe_allow_html=True)
-                if url:
-                    st.markdown(f"**[{headline}]({url})**")
-                else:
-                    st.markdown(f"**{headline}**")
-                meta = " | ".join([x for x in [category, source, r.get("provider", "")] if x])
-                if meta:
-                    st.caption(meta)
-                if why:
-                    st.write(why)
-                st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("How to read the US 10Y Yield card"):
+    st.markdown("---")
+
+    # ── News section ──────────────────────────────────────────────────────────
+    st.subheader("📰 Market News")
+    active_filter = news_category_filter if news_category_filter else None
+    if active_filter:
+        st.caption(f"Filtered: {', '.join(active_filter)}")
+
+    with st.expander("How to read the US 10Y Yield card", expanded=False):
         st.write(
-            "The large number is the current 10-year US Treasury yield in percent. "
-            "The 1D and YTD figures are basis-point moves, not returns. "
-            "1 basis point = 0.01%. "
-            "If yield rises, existing bond prices usually fall. "
-            "If yield falls, existing bond prices usually rise."
+            "The large number is the current yield in %. "
+            "The 1D and YTD figures are basis-point moves (1 bps = 0.01%). "
+            "Rising yield = existing bond prices fall. Falling yield = bond prices rise."
         )
 
+    render_news_section(
+        st.session_state["news_df"],
+        st.session_state["writing"],
+        category_filter=active_filter,
+    )
+
+    st.markdown("---")
+
+    # ── Data tables ───────────────────────────────────────────────────────────
     tabs = st.tabs(["Equities", "Rates", "Commodities / Bonds", "Definitions", "History"])
     with tabs[0]:
         st.dataframe(compact_table(st.session_state["equities_df"]), use_container_width=True, height=420)
@@ -1472,10 +1660,11 @@ else:
     with tabs[4]:
         st.dataframe(st.session_state["history"], use_container_width=True, height=520)
 
+    st.markdown("---")
     st.download_button(
-        "Download one-page PDF",
+        "⬇  Download one-page PDF",
         st.session_state["pdf_bytes"],
-        file_name="nxman_daily_brief_one_page.pdf",
+        file_name=f"nxman_daily_brief_{pd.Timestamp.today().date()}.pdf",
         mime="application/pdf",
         use_container_width=True,
     )

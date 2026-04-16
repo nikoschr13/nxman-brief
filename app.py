@@ -1768,7 +1768,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         cotd_box = Table([[Paragraph("", T["bullet"])]], colWidths=[COTD_W*cm])
 
     main_row = Table(
-        [[nar_box, Spacer(0.15*cm, 1), chart_box, Spacer(0.15*cm, 1), cotd_box]],
+        [[nar_box, Paragraph("", styles["BodyText"]), chart_box, Paragraph("", styles["BodyText"]), cotd_box]],
         colWidths=[NAR_W*cm, 0.15*cm, CHART_W*cm, 0.15*cm, COTD_W*cm],
     )
     main_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
@@ -1844,13 +1844,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
 
     GAP = 0.25*cm
     row1 = Table(
-        [[_panel(equities_df,"EQUITIES"),    Spacer(GAP,1), _panel(rates_df,"RATES")]],
+        [[_panel(equities_df,"EQUITIES"),    Paragraph("", styles["BodyText"]), _panel(rates_df,"RATES")]],
         colWidths=[(UW/2)*cm, GAP, (UW/2)*cm],
     )
     row1.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))
 
     row2 = Table(
-        [[_panel(commodities_df,"COMMODITIES"), Spacer(GAP,1), _panel(bonds_df,"BONDS & CRYPTO")]],
+        [[_panel(commodities_df,"COMMODITIES"), Paragraph("", styles["BodyText"]), _panel(bonds_df,"BONDS & CRYPTO")]],
         colWidths=[(UW/2)*cm, GAP, (UW/2)*cm],
     )
     row2.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))

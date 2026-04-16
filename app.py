@@ -304,34 +304,20 @@ def load_news_marketaux(count):
 
 @st.cache_data(ttl=900)
 def load_news(count):
-    placeholder_df = pd.DataFrame(
-        [
-            {
-                "headline": "Oil remains central as geopolitical tension stays elevated",
-                "source": "Placeholder",
-                "published_at": "",
-                "url": "",
-                "why_it_matters": "Higher oil prices can support inflation concerns and affect rates, equities and currencies.",
-                "provider": "Placeholder",
-            },
-            {
-                "headline": "Markets remain sensitive to higher-for-longer rate expectations",
-                "source": "Placeholder",
-                "published_at": "",
-                "url": "",
-                "why_it_matters": "If rates stay elevated for longer, bonds and equities may both face valuation pressure.",
-                "provider": "Placeholder",
-            },
-            {
-                "headline": "Risk sentiment mixed across regions",
-                "source": "Placeholder",
-                "published_at": "",
-                "url": "",
-                "why_it_matters": "Regional leadership remains uneven, which supports diversification.",
-                "provider": "Placeholder",
-            },
-        ][:count]
-    )
+    placeholder_items = [
+        {"headline": "Oil remains central as geopolitical tension stays elevated",       "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Higher oil prices support inflation concerns and affect rates, equities and currencies.", "provider": "Placeholder"},
+        {"headline": "Markets remain sensitive to higher-for-longer rate expectations",   "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "If rates stay elevated, bonds and equities may both face valuation pressure.",            "provider": "Placeholder"},
+        {"headline": "Risk sentiment mixed across regions",                               "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Regional leadership remains uneven, which supports diversification.",                     "provider": "Placeholder"},
+        {"headline": "Dollar strength weighs on emerging-market assets",                  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "A strong USD tightens financial conditions in EM economies.",                             "provider": "Placeholder"},
+        {"headline": "Gold holds near highs amid central bank demand",                    "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Central bank buying underpins gold as a reserve diversification tool.",                   "provider": "Placeholder"},
+        {"headline": "China stimulus expectations support commodity demand",              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Chinese policy stimulus could lift industrial metals and energy prices.",                  "provider": "Placeholder"},
+        {"headline": "European equities outperform on valuation re-rating",              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Cheaper valuations attract flows when US growth expectations moderate.",                   "provider": "Placeholder"},
+        {"headline": "Credit spreads stable; no systemic stress signals",                "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Tight spreads suggest credit markets are not pricing in near-term recession risk.",        "provider": "Placeholder"},
+        {"headline": "Crypto volatility elevated; Bitcoin tests key resistance",         "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Bitcoin remains a high-beta risk asset, often amplifying broader sentiment moves.",       "provider": "Placeholder"},
+        {"headline": "Swiss franc holds safe-haven bid; EUR/CHF under pressure",         "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "CHF strength can compress Swiss equity earnings and affects EUR-denominated portfolios.", "provider": "Placeholder"},
+    ]
+    placeholder_df = pd.DataFrame(placeholder_items[:max(count, 10)])
+    placeholder_df["category"] = "Other"
 
     if not MARKETAUX_API_TOKEN:
         return placeholder_df, {
@@ -390,13 +376,20 @@ def load_news(count):
 
     final_rows = []
     seen = set()
+    # First pass: up to 3 per category to ensure variety
     for category in ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]:
-        sub = df[df["category"] == category].head(2)
+        sub = df[df["category"] == category].head(3)
         for _, row in sub.iterrows():
             hk = row["headline"]
             if hk not in seen:
                 seen.add(hk)
                 final_rows.append(row)
+    # If still under count, fill from remaining scored articles
+    remaining = df[~df["headline"].isin(seen)].head(count)
+    for _, row in remaining.iterrows():
+        if len(final_rows) >= count:
+            break
+        final_rows.append(row)
 
     final_df = pd.DataFrame(final_rows).head(count) if final_rows else df.head(count)
 
@@ -881,6 +874,73 @@ def render_combined_card(item, snapshot_row, history, chart_key):
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
 
+
+
+def render_ticker_strip(snapshot):
+    """One-line compact ticker: name + value + coloured daily change for 10 key instruments."""
+    KEYS = [
+        ("sp500",     "S&P 500",   "asset"),
+        ("nasdaq100", "Nasdaq",    "asset"),
+        ("stoxx600",  "Stoxx 600", "asset"),
+        ("smi",       "SMI",       "asset"),
+        ("gold",      "Gold",      "asset"),
+        ("wti",       "Oil",       "asset"),
+        ("us10y",     "US 10Y",    "yield"),
+        ("vix",       "VIX",       "fear"),
+        ("bitcoin",   "Bitcoin",   "asset"),
+        ("eurchf",    "EUR/CHF",   "asset"),
+    ]
+    cells = []
+    for key, label, typ in KEYS:
+        row = snapshot[snapshot["key"] == key]
+        if row.empty:
+            cells.append(
+                f"<td style='padding:4px 10px;text-align:center;border-right:1px solid #E4EDF6;'>"
+                f"<div style='font-size:9px;color:#9AA8B7;font-weight:600;'>{label}</div>"
+                f"<div style='font-size:13px;color:#9AA8B7;'>N/A</div></td>"
+            )
+            continue
+        r = row.iloc[0]
+        level, d1 = r["level"], r["d1"]
+
+        if typ == "yield":
+            prev = level / (1 + d1 / 100) if level is not None and d1 not in (None, 0) and not pd.isna(d1) else None
+            d1v  = bps_change(level, prev) if prev is not None else None
+            val_str   = f"{float(level):.2f}%" if level is not None else "N/A"
+            delta_str = f"{d1v:+.0f} bps" if d1v is not None else "N/A"
+            up_bad = True; move = d1v
+        elif typ == "fear":
+            val_str   = fmt_num(level)
+            delta_str = fmt_pct(d1)
+            up_bad = True; move = d1
+        else:
+            val_str   = fmt_num(level)
+            delta_str = fmt_pct(d1)
+            up_bad = False; move = d1
+
+        if move is not None and not pd.isna(move):
+            pos = (move > 0 and not up_bad) or (move < 0 and up_bad)
+            neg = (move < 0 and not up_bad) or (move > 0 and up_bad)
+            col = "#16A34A" if pos else "#DC2626" if neg else "#64748B"
+        else:
+            col = "#64748B"
+
+        cells.append(
+            f"<td style='padding:5px 10px;text-align:center;border-right:1px solid #E4EDF6;'>"
+            f"<div style='font-size:9px;color:#64748B;font-weight:600;white-space:nowrap;'>{label}</div>"
+            f"<div style='font-size:14px;font-weight:800;color:#0F2D52;line-height:1.2;'>{val_str}</div>"
+            f"<div style='font-size:11px;font-weight:700;color:{col};'>{delta_str}</div>"
+            f"</td>"
+        )
+
+    st.markdown(
+        "<div style='background:white;border:1px solid #D6E4F2;border-radius:12px;"
+        "overflow:hidden;margin-bottom:10px;'>"
+        "<table style='width:100%;border-collapse:collapse;'><tr>"
+        + "".join(cells) +
+        "</tr></table></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_card_strip(snapshot, history, strip, title, caption, strip_name):
@@ -1511,106 +1571,97 @@ if generate:
 if "snapshot" not in st.session_state:
     st.info("▶  Press **Generate Daily Brief** in the sidebar to load market data.")
 else:
-    st.caption(st.session_state.get("snapshot_mode_note", ""))
+    snap    = st.session_state["snapshot"]
+    hist    = st.session_state["history"]
+    writing = st.session_state["writing"]
+    status  = st.session_state["status"]
 
-    # ── Status bar ────────────────────────────────────────────────────────────
-    status = st.session_state["status"]
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        gemini_on = status["gemini_used"]
-        colour = "green" if gemini_on else "orange"
-        st.markdown(f"Gemini commentary: **:{colour}[{'ON' if gemini_on else 'OFF'}]**")
-        st.caption(f"Requested: {'ON' if status.get('gemini_requested') else 'OFF'} | {status['gemini_reason']}")
-    with s2:
-        live_on = status["live_news"]
-        colour2 = "green" if live_on else "orange"
-        st.markdown(f"Live news: **:{colour2}[{'ON' if live_on else 'OFF'}]**")
-        st.caption(status["news_reason"])
-    with s3:
-        st.markdown(f"Articles: **{status['article_count']}** | URLs: **{status['url_count']}**")
-
-    st.markdown("---")
-
-    # ── Macro events calendar ─────────────────────────────────────────────────
-    st.subheader("📅 Upcoming Macro Events")
-    render_macro_calendar()
-    st.markdown("---")
-
-    # ── Indicator cards ───────────────────────────────────────────────────────
-    render_card_strip(
-        st.session_state["snapshot"],
-        st.session_state["history"],
-        INDICATOR_STRIP,
-        "Market Indicators",
-        "Major equity indices + VIX fear gauge + DXY. Green = up today, Red = down today. VIX colours are inverted (red = more fear).",
-        "market_indicators",
+    # ── 1. Compact status line ────────────────────────────────────────────────
+    mode_note = st.session_state.get("snapshot_mode_note", "")
+    g_col  = "🟢" if status["gemini_used"]  else "🟡"
+    n_col  = "🟢" if status["live_news"]    else "🟡"
+    st.caption(
+        f"{mode_note}   |   {g_col} Gemini {'ON' if status['gemini_used'] else 'OFF'}  "
+        f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
+        f"·  {status['article_count']} articles"
     )
 
-    render_card_strip(
-        st.session_state["snapshot"],
-        st.session_state["history"],
-        ASSET_CLASS_STRIP,
-        "Asset Class Performance",
-        "Cross-asset view. Yields show basis-point moves. All other cards show % moves.",
-        "asset_classes",
-    )
+    # ── 2. Compact ticker strip ───────────────────────────────────────────────
+    render_ticker_strip(snap)
 
-    st.markdown("---")
+    # ── 3. Narrative: news bullets + what matters + next events ──────────────
+    col_news, col_right = st.columns([3, 2], gap="medium")
 
-    # ── Main chart + right panel ──────────────────────────────────────────────
-    left, right = st.columns([2, 1])
+    with col_news:
+        gemini_tag = "" if status["gemini_used"] else " *(enable Gemini for AI commentary)*"
+        st.markdown(f"**📰 What's Moving Markets**{gemini_tag}")
+        render_news_bullets(writing, st.session_state["news_df"])
 
-    with left:
-        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-        st.subheader(st.session_state["writing"]["headline"])
-        st.caption(st.session_state["writing"]["subheadline"])
-        if st.session_state["fig"] is not None:
-            st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
-        else:
-            st.info("No chart data available.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    with col_right:
+        st.markdown("**🎯 What Matters**")
+        for b in writing.get("what_matters", []):
+            st.markdown(f"- {b}")
 
-    with right:
-        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-        st.subheader("What Matters")
-        for bullet in st.session_state["writing"]["what_matters"]:
-            st.markdown(f"- {bullet}")
+        st.markdown("**📅 Upcoming Events**")
+        today = pd.Timestamp.today().normalize()
+        upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:5]
+        for ev in upcoming:
+            dt = pd.Timestamp(ev["date"])
+            days = (dt - today).days
+            day_label = "TODAY" if days == 0 else f"in {days}d"
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;padding:3px 0;"
+                f"border-bottom:1px solid #F0F4F8;font-size:12px;'>"
+                f"<span style='color:#0F2D52;'>{ev['event']}</span>"
+                f"<span style='color:#64748B;white-space:nowrap;margin-left:8px;'>"
+                f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days==0 else '#475467'};'>{day_label}</b></span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
-        st.subheader("News Summary")
-        st.info(st.session_state["writing"]["news_summary"])
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown("---")
+    # ── 4. Main cross-asset chart ─────────────────────────────────────────────
+    if st.session_state["fig"] is not None:
+        st.markdown(f"**{writing['headline']}**")
+        st.caption(writing["subheadline"])
+        st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
+    else:
+        st.info("No chart data — market data fetch may have failed.")
 
-    # ── News section ──────────────────────────────────────────────────────────
-    st.subheader("📰 What's Moving Markets")
-    gemini_note = "Gemini-written, based on today's headlines + market moves." if st.session_state["status"]["gemini_used"] else "Headline list (enable Gemini for cause-and-effect commentary)."
-    st.caption(gemini_note)
-    render_news_bullets(st.session_state["writing"], st.session_state["news_df"])
+    # ── 5. Detailed cards (collapsed by default) ──────────────────────────────
+    with st.expander("📊 Detailed Indicators & Sparklines", expanded=False):
+        render_card_strip(snap, hist, INDICATOR_STRIP,
+                          "Market Indicators",
+                          "Equity indices + VIX + DXY. VIX red = fear rising.",
+                          "market_indicators")
+        render_card_strip(snap, hist, ASSET_CLASS_STRIP,
+                          "Asset Class Performance",
+                          "Cross-asset. Yields in bps, all others in %.",
+                          "asset_classes")
 
-    st.markdown("---")
+    # ── 6. Data tables ────────────────────────────────────────────────────────
+    with st.expander("📋 Full Data Tables", expanded=False):
+        tabs = st.tabs(["Equities", "Rates", "Commodities / Bonds", "Definitions", "History"])
+        with tabs[0]:
+            st.dataframe(compact_table(st.session_state["equities_df"]),   use_container_width=True, height=380)
+        with tabs[1]:
+            st.dataframe(compact_table(st.session_state["rates_df"]),      use_container_width=True, height=220)
+        with tabs[2]:
+            st.dataframe(compact_table(st.session_state["commodities_df"]),use_container_width=True, height=380)
+        with tabs[3]:
+            if show_definitions:
+                st.dataframe(definitions_table(st.session_state["equities_df"]),    use_container_width=True, height=220)
+                st.dataframe(definitions_table(st.session_state["rates_df"]),       use_container_width=True, height=130)
+                st.dataframe(definitions_table(st.session_state["commodities_df"]), use_container_width=True, height=220)
+            else:
+                st.info("Enable 'Show definitions' in the sidebar.")
+        with tabs[4]:
+            st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── Data tables ───────────────────────────────────────────────────────────
-    tabs = st.tabs(["Equities", "Rates", "Commodities / Bonds", "Definitions", "History"])
-    with tabs[0]:
-        st.dataframe(compact_table(st.session_state["equities_df"]), use_container_width=True, height=420)
-    with tabs[1]:
-        st.dataframe(compact_table(st.session_state["rates_df"]), use_container_width=True, height=240)
-    with tabs[2]:
-        st.dataframe(compact_table(st.session_state["commodities_df"]), use_container_width=True, height=420)
-    with tabs[3]:
-        if show_definitions:
-            st.dataframe(definitions_table(st.session_state["equities_df"]), use_container_width=True, height=260)
-            st.dataframe(definitions_table(st.session_state["rates_df"]), use_container_width=True, height=150)
-            st.dataframe(definitions_table(st.session_state["commodities_df"]), use_container_width=True, height=260)
-        else:
-            st.info("Turn on 'Show definitions tables' in the sidebar.")
-    with tabs[4]:
-        st.dataframe(st.session_state["history"], use_container_width=True, height=520)
-
-    st.markdown("---")
+    # ── 7. PDF download ───────────────────────────────────────────────────────
     st.download_button(
-        "⬇  Download one-page PDF",
+        "⬇  Download one-page PDF newsletter",
         st.session_state["pdf_bytes"],
         file_name=f"nxman_daily_brief_{pd.Timestamp.today().date()}.pdf",
         mime="application/pdf",

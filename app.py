@@ -689,9 +689,8 @@ def build_writing(news_df, snapshot, use_gemini):
         payload = _safe_json_dumps({
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
-                "Keys required: headline, subheadline, news_summary, what_matters, news_bullets. "
-                "what_matters: exactly 4 concise bullet strings about key investment themes. "
-                "news_bullets: 5 to 8 plain-English bullets summarising what happened since yesterday "
+                "Keys required: headline, subheadline, news_summary, news_bullets. "
+                "news_bullets: 6 to 9 plain-English bullets summarising what happened since yesterday "
                 "and what it means for markets. "
                 "Each bullet must link the event to the market impact — for example: "
                 "'US-Iran talks progressed — equities rallied while Treasury yields fell as risk appetite improved'. "
@@ -704,13 +703,13 @@ def build_writing(news_df, snapshot, use_gemini):
         return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
 
     out, reason = ai_generate_json(payload)
-    if isinstance(out, dict) and isinstance(out.get("what_matters"), list) and len(out["what_matters"]) >= 4:
+    if isinstance(out, dict) and isinstance(out.get("news_bullets"), list) and len(out["news_bullets"]) >= 3:
         return (
             {
                 "headline":       out.get("headline")    or fallback["headline"],
                 "subheadline":    out.get("subheadline") or fallback["subheadline"],
                 "news_summary":   out.get("news_summary") or fallback["news_summary"],
-                "what_matters":   out["what_matters"][:4],
+                "what_matters":   [],
                 "news_bullets":   out.get("news_bullets") or [],
                 "article_angles": out.get("article_angles") or [],
             },
@@ -1492,19 +1491,10 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         body,
     )
 
-    wm_rows = [[Paragraph(f"• {x}", small)] for x in writing["what_matters"][:4]]
-    wm_tbl  = Table(wm_rows, colWidths=[9.5*cm])
-    wm_tbl.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,-1), colors.white),
-        ("BOX",       (0,0),(-1,-1), 0.25, colors.HexColor("#D6E4F2")),
-        ("LEFTPADDING",(0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
-        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
-    ]))
-
     bullets = writing.get("news_bullets") or []
     if not bullets and not news_df.empty:
-        bullets = [r.get("headline","") for _,r in news_df.head(6).iterrows()]
-    bul_rows = [[Paragraph(f"→ {b}", small)] for b in bullets[:7]]
+        bullets = [r.get("headline","") for _,r in news_df.head(9).iterrows()]
+    bul_rows = [[Paragraph(f"→ {b}", small)] for b in bullets[:9]]
     bul_tbl  = Table(bul_rows, colWidths=[9.5*cm])
     bul_tbl.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,-1), colors.white),
@@ -1515,7 +1505,6 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
 
     left_narr = Table(
         [[headline_para], [Spacer(1,0.04*cm)],
-         [Paragraph("What Matters", h)], [wm_tbl], [Spacer(1,0.04*cm)],
          [Paragraph("What's Moving Markets", h)], [bul_tbl]],
         colWidths=[9.7*cm],
     )
@@ -1599,6 +1588,26 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                      colWidths=[SW*cm, SW*cm, SW*cm, SW*cm, NW*cm])
     data_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
     story += [data_row]
+
+    # ── Disclaimer footer ────────────────────────────────────────────────────
+    disclaimer_text = (
+        "Disclaimer: This briefing is produced for informational purposes only and does not constitute "
+        "investment advice, a solicitation, or a recommendation to buy or sell any financial instrument or security. "
+        "The information is believed to be from reliable sources but its accuracy and completeness cannot be guaranteed. "
+        "Past performance is not indicative of future results. Market data may be delayed. "
+        "Always consult a qualified and authorised financial adviser before making any investment decisions."
+    )
+    disc_style = ParagraphStyle("disc", parent=styles["BodyText"], fontName="Helvetica",
+                                 fontSize=5.0, leading=6.2, textColor=colors.HexColor("#94A3B8"))
+    disc_tbl = Table([[Paragraph(disclaimer_text, disc_style)]], colWidths=[PAGE_W_CM * cm])
+    disc_tbl.setStyle(TableStyle([
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 2),
+        ("LEFTPADDING",   (0,0),(-1,-1), 0),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 0),
+        ("LINEABOVE",     (0,0),(-1,0),  0.25, colors.HexColor("#D6E4F2")),
+    ]))
+    story += [Spacer(1, 0.05*cm), disc_tbl]
 
     doc.build(story)
     return buffer.getvalue()
@@ -1720,66 +1729,6 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     )
     left_col = Table([[summary], [Spacer(1, 0.04 * cm)], [metrics_tbl]], colWidths=[10.4 * cm])
     left_col.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
-
-    # What Matters bullets
-    wm_rows = [[Paragraph(f"• {x}", body_small)] for x in writing["what_matters"][:4]]
-    what_tbl = Table(wm_rows, colWidths=[7.0 * cm])
-    what_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0),(-1,-1), colors.white),
-        ("BOX",        (0,0),(-1,-1), 0.30, colors.HexColor("#D6E4F2")),
-        ("LEFTPADDING",(0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
-        ("TOPPADDING", (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
-    ]))
-
-    # News bullets (Gemini or fallback)
-    bullets = writing.get("news_bullets") or []
-    if not bullets:
-        bullets = [r.get("headline","") for _, r in news_df.head(5).iterrows()] if not news_df.empty else ["No headlines available"]
-    bullet_rows = [[Paragraph(f"→ {b}", body_small)] for b in bullets[:6]]
-    news_bul_tbl = Table(bullet_rows, colWidths=[7.0 * cm])
-    news_bul_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0),(-1,-1), colors.white),
-        ("BOX",        (0,0),(-1,-1), 0.30, colors.HexColor("#D6E4F2")),
-        ("LEFTPADDING",(0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
-        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
-    ]))
-
-    mid_col = Table(
-        [[Paragraph("What Matters", h)], [what_tbl],
-         [Spacer(1, 0.03 * cm)],
-         [Paragraph("What's Moving Markets", h)], [news_bul_tbl]],
-        colWidths=[7.2 * cm],
-    )
-    mid_col.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
-
-    chart_box = Table(
-        [[Image(BytesIO(chart_png), width=9.0 * cm, height=4.9 * cm)]] if chart_png else [[Paragraph("No chart available", body)]],
-        colWidths=[9.2 * cm],
-    )
-    chart_box.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.30, colors.HexColor("#D6E4F2")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 3),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
-
-    outer_tbl = Table([[left_col, mid_col, chart_box]], colWidths=[10.5 * cm, 7.3 * cm, 9.3 * cm])
-    outer_tbl.setStyle(TableStyle([
-        ("VALIGN",       (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING",  (0,0), (-1,-1), 4),
-        ("RIGHTPADDING", (0,0), (-1,-1), 4),
-    ]))
-    story += [outer_tbl, Spacer(1, 0.06 * cm)]
-
-    # ── Available width on landscape A4 with 0.45cm margins each side ──────────
-    # 29.7cm - 0.9cm margins = 28.8cm usable. Use 28.6cm to be safe.
-    PAGE_W = 28.6  # cm
 
 
 def serialize_state(state):
@@ -2218,13 +2167,9 @@ else:
         render_news_bullets(writing, st.session_state["news_df"])
 
     with col_right:
-        st.markdown("**🎯 What Matters**")
-        for b in writing.get("what_matters", []):
-            st.markdown(f"- {b}")
-
         st.markdown("**📅 Upcoming Events**")
         today = pd.Timestamp.today().normalize()
-        upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:5]
+        upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:6]
         for ev in upcoming:
             dt = pd.Timestamp(ev["date"])
             days = (dt - today).days
@@ -2238,6 +2183,18 @@ else:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='background:#FFF8E1;border:1px solid #FFD54F;border-radius:8px;"
+            "padding:8px 10px;font-size:11px;color:#5D4037;'>"
+            "⚠️ <b>Disclaimer:</b> This briefing is for informational purposes only and does not "
+            "constitute investment advice, a solicitation, or a recommendation to buy or sell any "
+            "financial instrument. Past performance is not indicative of future results. Always "
+            "consult a qualified financial adviser before making investment decisions."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 

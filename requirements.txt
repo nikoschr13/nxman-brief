@@ -4,7 +4,7 @@ plotly>=5.22
 python-dotenv>=1.0
 requests>=2.31
 reportlab>=4.2
-kaleido>=0.2.1
+kaleido==0.2.1
 yfinance>=0.2.54
 streamlit-autorefresh>=1.0.1
 feedparser>=6.0

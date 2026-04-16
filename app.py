@@ -1312,13 +1312,39 @@ def render_macro_calendar():
             )
 
 
+def _match_bullet_to_article(bullet: str, news_df) -> dict | None:
+    """Return the news_df row most relevant to a bullet via word overlap."""
+    if news_df is None or news_df.empty:
+        return None
+    b_words = set(bullet.lower().split())
+    best, best_score = None, 0
+    for _, r in news_df.iterrows():
+        h_words = set((r.get("headline","") or "").lower().split())
+        score = len(b_words & h_words)
+        if score > best_score:
+            best_score, best = score, r
+    return best.to_dict() if best is not None and best_score >= 2 else None
+
+
 def render_news_bullets(writing, news_df):
-    """AI-written cause-and-effect bullets (Gemini/Groq), with source articles below."""
+    """AI bullets with inline source links after each one; source list below."""
     bullets = writing.get("news_bullets") or []
 
     if bullets:
         for b in bullets:
-            st.markdown(f"- {b}")
+            match = _match_bullet_to_article(b, news_df)
+            if match and match.get("url"):
+                src = match.get("source","") or ""
+                pub = match.get("published_at","") or ""
+                dt_str = ""
+                if pub:
+                    try: dt_str = pd.Timestamp(pub).strftime("%d %b")
+                    except Exception: pass
+                meta = " · ".join([x for x in [src, dt_str] if x])
+                link = f" <a href='{match['url']}' target='_blank' style='font-size:11px;color:#1E88E5;text-decoration:none;'>↗ {meta}</a>" if meta else f" <a href='{match['url']}' target='_blank' style='font-size:11px;color:#1E88E5;'>↗</a>"
+                st.markdown(f"- {b}{link}", unsafe_allow_html=True)
+            else:
+                st.markdown(f"- {b}")
     else:
         if news_df is None or news_df.empty:
             st.caption("No news available.")
@@ -1326,35 +1352,32 @@ def render_news_bullets(writing, news_df):
         for _, r in news_df.head(10).iterrows():
             cat = r.get("category","")
             headline = r.get("headline","")
+            url = r.get("url","")
             prefix = f"**{cat}** — " if cat and cat != "Other" else ""
-            st.markdown(f"- {prefix}{headline}")
+            link = f" [↗]({url})" if url else ""
+            st.markdown(f"- {prefix}{headline}{link}")
 
-    # Always show source articles with link + date underneath
+    # Unmatched sources listed below
     if news_df is not None and not news_df.empty:
-        st.markdown("<div style='margin-top:10px;'>", unsafe_allow_html=True)
-        st.caption("**Source articles**")
-        for _, r in news_df.head(NEWS_COUNT).iterrows():
-            headline = r.get("headline","") or ""
-            url      = r.get("url","")      or ""
-            source   = r.get("source","")   or ""
-            pub      = r.get("published_at","") or ""
-            dt_str   = ""
-            if pub:
-                try:
-                    dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
-                except Exception:
-                    dt_str = str(pub)[:10]
-
-            meta = " · ".join([x for x in [source, dt_str] if x])
-            link_part = f"[{headline}]({url})" if url else headline
-            st.markdown(
-                f"<div style='padding:4px 0;border-bottom:1px solid #F0F4F8;font-size:12px;'>"
-                f"<span style='color:#0F2D52;'>{('📎 ' if url else '') + link_part}</span>"
-                f"{'  <span style=\"color:#9AA8B7;font-size:11px;\">— ' + meta + '</span>' if meta else ''}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.expander("📎 All source articles", expanded=False):
+            for _, r in news_df.head(NEWS_COUNT).iterrows():
+                headline = r.get("headline","") or ""
+                url      = r.get("url","")      or ""
+                source   = r.get("source","")   or ""
+                pub      = r.get("published_at","") or ""
+                dt_str   = ""
+                if pub:
+                    try: dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
+                    except Exception: dt_str = str(pub)[:10]
+                meta = " · ".join([x for x in [source, dt_str] if x])
+                link_md = f"[{headline}]({url})" if url else headline
+                st.markdown(
+                    f"<div style='padding:3px 0;border-bottom:1px solid #F0F4F8;font-size:12px;'>"
+                    f"{link_md}"
+                    f"{'  <span style=\"color:#9AA8B7;font-size:11px;\"> — ' + meta + '</span>' if meta else ''}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
@@ -2042,15 +2065,15 @@ def add_render_outputs(base_state, chart_window="YTD"):
             add_event_marker(pdf_fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 10)
             pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
             pdf_chart_png = None
-            for _scale in (1.5, 1, None):
-                if _scale is None:
-                    break
+            try:
+                import plotly.io as pio
+                pio.kaleido.scope.mathjax = None   # avoids MathJax download timeout on cloud
+                pdf_chart_png = pio.to_image(pdf_fig, format="png", scale=1.5, width=900, height=380)
+            except Exception:
                 try:
-                    pdf_chart_png = pdf_fig.to_image(format="png", scale=_scale, engine="kaleido")
-                    if pdf_chart_png:
-                        break
+                    pdf_chart_png = pdf_fig.to_image(format="png", scale=1)
                 except Exception:
-                    continue
+                    pdf_chart_png = None
 
     pdf_bytes = build_pdf(
         "Daily Market Brief",
@@ -2071,6 +2094,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
     state = dict(base_state)
     state["fig"]           = fig
     state["pdf_bytes"]     = pdf_bytes
+    state["pdf_chart_png"] = pdf_chart_png
     state["chart_of_day"]  = cotd
     return state
 
@@ -2275,11 +2299,45 @@ else:
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── 7. PDF download ───────────────────────────────────────────────────────
+    # ── 7. PDF news selection + download ─────────────────────────────────────
+    st.markdown("---")
+    with st.expander("🗞️ Choose which articles to include in PDF", expanded=False):
+        all_headlines = []
+        if not st.session_state["news_df"].empty:
+            all_headlines = st.session_state["news_df"]["headline"].fillna("").tolist()
+
+        if all_headlines:
+            selected = st.multiselect(
+                "Select articles for the PDF (order is preserved):",
+                options=all_headlines,
+                default=all_headlines[:8],
+                key="pdf_news_selection",
+            )
+            if st.button("🔄 Regenerate PDF with selected articles", use_container_width=True):
+                filtered_news = st.session_state["news_df"][
+                    st.session_state["news_df"]["headline"].isin(selected)
+                ].copy()
+                pdf_bytes = build_pdf(
+                    "Daily Market Brief",
+                    st.session_state.get("pdf_chart_png"),
+                    st.session_state["equities_df"],
+                    st.session_state["rates_df"],
+                    st.session_state["commodities_df"],
+                    st.session_state.get("bonds_df", st.session_state["commodities_df"]),
+                    st.session_state["metrics"],
+                    st.session_state["writing"],
+                    filtered_news,
+                    st.session_state["status"],
+                )
+                st.session_state["pdf_bytes"] = pdf_bytes
+                st.success("PDF regenerated.")
+        else:
+            st.caption("No articles loaded yet — generate the brief first.")
+
     st.download_button(
-        "⬇  Download one-page PDF newsletter",
+        "⬇  Download PDF newsletter",
         st.session_state["pdf_bytes"],
-        file_name=f"nxman_daily_brief_{pd.Timestamp.today().date()}.pdf",
+        file_name=f"daily_brief_{pd.Timestamp.today().date()}.pdf",
         mime="application/pdf",
         use_container_width=True,
     )

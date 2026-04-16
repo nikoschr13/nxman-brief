@@ -676,12 +676,20 @@ def build_writing(news_df, snapshot, use_gemini):
         return fallback, {"gemini_used": False, "reason": "Checkbox off"}
 
     try:
-        snap_rows = (
-            snapshot[["label", "group", "d1", "ytd"]]
-            .fillna(0)
-            .round(2)
-            .to_dict(orient="records")[:15]
-        )
+        # Build a readable market snapshot keyed by asset name with d1 moves
+        snap_rows = []
+        for _, row in snapshot.iterrows():
+            d1 = row.get("d1")
+            ytd = row.get("ytd")
+            if d1 is not None and not pd.isna(d1):
+                snap_rows.append({
+                    "asset":  str(row.get("label","")),
+                    "group":  str(row.get("group","")),
+                    "d1_pct": round(float(d1), 2),
+                    "ytd_pct": round(float(ytd), 2) if ytd is not None and not pd.isna(ytd) else None,
+                })
+        snap_rows = snap_rows[:20]
+
         head_rows = (
             news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records")
             if news_df is not None and not news_df.empty else []
@@ -690,14 +698,18 @@ def build_writing(news_df, snapshot, use_gemini):
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
                 "Keys required: headline, subheadline, news_summary, news_bullets. "
-                "news_bullets: 6 to 9 plain-English bullets summarising what happened since yesterday "
-                "and what it means for markets. "
-                "Each bullet must link the event to the market impact — for example: "
-                "'US-Iran talks progressed — equities rallied while Treasury yields fell as risk appetite improved'. "
-                "Be specific, factual, cause-and-effect. No jargon. No preamble."
+                "news_bullets: 6 to 9 plain-English bullets. Each bullet MUST: "
+                "(1) name the event, "
+                "(2) state the market impact using ACTUAL numbers from market_snapshot (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
+                "(3) explain why in plain English, adding a parenthetical clarification for any jargon "
+                "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE) as'). "
+                "Example of the required style: "
+                "'US-Iran peace talks progressed — equities rallied (S&P 500 +0.80%, Nasdaq +1.40%) "
+                "while Treasury yields fell (meaning existing bond PRICES ROSE) as risk appetite improved.' "
+                "Use the actual d1_pct figures from market_snapshot. Be factual and concise. No preamble."
             ),
-            "headlines":        head_rows,
-            "market_snapshot":  snap_rows,
+            "headlines":       head_rows,
+            "market_snapshot": snap_rows,
         })
     except Exception as e:
         return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
@@ -1356,10 +1368,13 @@ def render_news_bullets(writing, news_df):
             link = f" [↗]({url})" if url else ""
             st.markdown(f"- {prefix}{headline}{link}")
 
-    # Unmatched sources listed below
+    # Unmatched sources with inline checkboxes for PDF inclusion
     if news_df is not None and not news_df.empty:
-        with st.expander("📎 All source articles", expanded=False):
-            for _, r in news_df.head(NEWS_COUNT).iterrows():
+        with st.expander("📎 Source articles — tick to include in PDF", expanded=True):
+            st.caption("Checked articles appear in the PDF news table. Changes take effect when you click **Update PDF**.")
+
+            selections = {}
+            for i, (_, r) in enumerate(news_df.head(NEWS_COUNT).iterrows()):
                 headline = r.get("headline","") or ""
                 url      = r.get("url","")      or ""
                 source   = r.get("source","")   or ""
@@ -1369,14 +1384,42 @@ def render_news_bullets(writing, news_df):
                     try: dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
                     except Exception: dt_str = str(pub)[:10]
                 meta = " · ".join([x for x in [source, dt_str] if x])
-                link_md = f"[{headline}]({url})" if url else headline
-                st.markdown(
-                    f"<div style='padding:3px 0;border-bottom:1px solid #F0F4F8;font-size:12px;'>"
-                    f"{link_md}"
-                    f"{'  <span style=\"color:#9AA8B7;font-size:11px;\"> — ' + meta + '</span>' if meta else ''}"
-                    f"</div>",
-                    unsafe_allow_html=True,
+
+                c1, c2 = st.columns([0.05, 0.95])
+                with c1:
+                    checked = st.checkbox(
+                        "", value=True,
+                        key=f"pdf_inc_{i}_{headline[:20]}",
+                        label_visibility="collapsed",
+                    )
+                with c2:
+                    link_md = f"[{headline}]({url})" if url else headline
+                    st.markdown(
+                        f"<div style='padding:2px 0;font-size:12px;line-height:1.4;'>"
+                        f"{link_md}"
+                        f"{'  <span style=\"color:#9AA8B7;font-size:11px;\"> — ' + meta + '</span>' if meta else ''}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                selections[headline] = checked
+
+            if st.button("🔄 Update PDF with ticked articles", use_container_width=True, type="secondary"):
+                keep = [h for h, v in selections.items() if v]
+                filtered = news_df[news_df["headline"].isin(keep)].copy()
+                new_pdf = build_pdf(
+                    "Daily Market Brief",
+                    st.session_state.get("pdf_chart_png"),
+                    st.session_state["equities_df"],
+                    st.session_state["rates_df"],
+                    st.session_state["commodities_df"],
+                    st.session_state.get("bonds_df", st.session_state["commodities_df"]),
+                    st.session_state["metrics"],
+                    st.session_state["writing"],
+                    filtered,
+                    st.session_state["status"],
                 )
+                st.session_state["pdf_bytes"] = new_pdf
+                st.success(f"PDF updated with {len(keep)} articles.")
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
@@ -2256,40 +2299,8 @@ else:
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── 7. PDF news selection + download ─────────────────────────────────────
+    # ── 7. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")
-    with st.expander("🗞️ Choose which articles to include in PDF", expanded=False):
-        all_headlines = []
-        if not st.session_state["news_df"].empty:
-            all_headlines = st.session_state["news_df"]["headline"].fillna("").tolist()
-
-        if all_headlines:
-            selected = st.multiselect(
-                "Select articles for the PDF (order is preserved):",
-                options=all_headlines,
-                default=all_headlines[:8],
-                key="pdf_news_selection",
-            )
-            if st.button("🔄 Regenerate PDF with selected articles", use_container_width=True):
-                filtered_news = st.session_state["news_df"][
-                    st.session_state["news_df"]["headline"].isin(selected)
-                ].copy()
-                pdf_bytes = build_pdf(
-                    "Daily Market Brief",
-                    st.session_state.get("pdf_chart_png"),
-                    st.session_state["equities_df"],
-                    st.session_state["rates_df"],
-                    st.session_state["commodities_df"],
-                    st.session_state.get("bonds_df", st.session_state["commodities_df"]),
-                    st.session_state["metrics"],
-                    st.session_state["writing"],
-                    filtered_news,
-                    st.session_state["status"],
-                )
-                st.session_state["pdf_bytes"] = pdf_bytes
-                st.success("PDF regenerated.")
-        else:
-            st.caption("No articles loaded yet — generate the brief first.")
 
     st.download_button(
         "⬇  Download PDF newsletter",

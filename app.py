@@ -1673,6 +1673,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
         cotd_reason = cotd.get("reason", "")
+        tf          = int(cotd.get("timeframe_days", 60))
         reason_text = cotd_reason
 
         cotd_header = Paragraph(

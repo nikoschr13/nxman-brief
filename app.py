@@ -57,30 +57,37 @@ GEMINI_FALLBACK_MODELS = [
     if m.strip()
 ]
 MANUAL_BUND_10Y = get_secret("MANUAL_BUND_10Y")
-MANUAL_CH_10Y = get_secret("MANUAL_CH_10Y")
+MANUAL_CH_10Y   = get_secret("MANUAL_CH_10Y")
+
+# GitHub Gist persistence for morning snapshots
+GITHUB_TOKEN   = get_secret("GITHUB_TOKEN")
+GITHUB_GIST_ID = get_secret("GITHUB_GIST_ID")
+GIST_FILENAME  = "nxman_snapshots.json"
 
 ASSETS = [
-    ("equities", "sp500", "S&P 500", "Actual S&P 500 index level", "^GSPC", True),
-    ("equities", "nasdaq100", "Nasdaq 100", "Actual Nasdaq 100 index level", "^NDX", True),
-    ("equities", "stoxx600", "Stoxx Europe 600", "Actual STOXX Europe 600 index level", "^STOXX", True),
-    ("equities", "msci_world", "MSCI World", "Actual MSCI World index level", "^990100-USD-STRD", True),
-    ("equities", "msci_em", "MSCI Emerging Markets", "Actual MSCI Emerging Markets index level", "^891800-USD-STRD", False),
-    ("equities", "nikkei225", "Nikkei 225", "Actual Nikkei 225 index level", "^N225", False),
-    ("equities", "smi", "Swiss Market Index (SMI)", "Actual Swiss Market Index level", "^SSMI", True),
-    ("fx", "eurusd", "EUR/USD", "How many US dollars one euro buys", "EURUSD=X", False),
-    ("fx", "usdchf", "USD/CHF", "How many Swiss francs one US dollar buys", "USDCHF=X", False),
-    ("fx", "eurchf", "EUR/CHF", "How many Swiss francs one euro buys", "EURCHF=X", True),
-    ("fx", "dxy", "DXY", "US Dollar Index", "DX-Y.NYB", False),
-    ("commodities", "gold", "Gold", "Gold futures / spot proxy", "GC=F", True),
-    ("commodities", "silver", "Silver", "Silver futures / spot proxy", "SI=F", False),
-    ("commodities", "wti", "WTI Crude", "WTI crude oil futures", "CL=F", True),
-    ("commodities", "brent", "Brent Crude", "Brent crude oil futures", "BZ=F", False),
-    ("commodities", "copper", "Copper", "Copper futures", "HG=F", False),
-    ("alternatives", "bitcoin", "Bitcoin", "Largest cryptocurrency", "BTC-USD", True),
-    ("alternatives", "ethereum", "Ethereum", "Second-largest cryptocurrency", "ETH-USD", False),
-    ("sentiment", "vix", "VIX", "CBOE Volatility Index — measures expected S&P 500 volatility; above 20 = elevated fear", "^VIX", False),
-    ("fx", "dxy", "DXY", "US Dollar Index — basket of major currencies vs USD", "DX-Y.NYB", False),
+    ("equities", "sp500",      "S&P 500",               "S&P 500 large-cap US equity index",                  "^GSPC",           True),
+    ("equities", "nasdaq100",  "Nasdaq 100",             "Top 100 non-financial Nasdaq companies",             "^NDX",            True),
+    ("equities", "stoxx600",   "Stoxx Europe 600",       "Broad European equity benchmark",                    "^STOXX",          True),
+    ("equities", "msci_world", "MSCI World",             "Global developed-market equity index",               "^990100-USD-STRD",True),  # fallback: ^MXWO, URTH
+    ("equities", "msci_em",    "MSCI Emerging Markets",  "Emerging-market equity index",                       "^891800-USD-STRD",False),
+    ("equities", "nikkei225",  "Nikkei 225",             "Japanese large-cap equity index",                    "^N225",           False),
+    ("equities", "smi",        "SMI (Switzerland)",      "Swiss large-cap equity index",                       "^SSMI",           True),
+    ("fx",       "eurusd",     "EUR/USD",                "Euros per US dollar — key global FX pair",           "EURUSD=X",        False),
+    ("fx",       "usdchf",     "USD/CHF",                "US dollars per Swiss franc",                         "USDCHF=X",        False),
+    ("fx",       "eurchf",     "EUR/CHF",                "Euros per Swiss franc — key for Swiss investors",    "EURCHF=X",        True),
+    ("fx",       "dxy",        "DXY (USD Index)",        "US Dollar basket index vs major currencies",         "DX-Y.NYB",        False),
+    ("commodities","gold",     "Gold",                   "Gold spot / front-month futures",                    "GC=F",            True),
+    ("commodities","silver",   "Silver",                 "Silver spot / front-month futures",                  "SI=F",            False),
+    ("commodities","wti",      "WTI Crude",              "WTI crude oil front-month futures",                  "CL=F",            True),
+    ("commodities","brent",    "Brent Crude",            "Brent crude oil front-month futures",                "BZ=F",            False),
+    ("commodities","copper",   "Copper",                 "Copper front-month futures",                         "HG=F",            False),
+    ("alternatives","bitcoin", "Bitcoin",                "Largest cryptocurrency by market cap",               "BTC-USD",         True),
+    ("alternatives","ethereum","Ethereum",               "Second-largest cryptocurrency by market cap",        "ETH-USD",         False),
+    ("sentiment",  "vix",      "VIX",                    "CBOE Volatility Index — S&P 500 implied vol, fear gauge", "^VIX",       False),
 ]
+
+# Multiple tickers to try for MSCI World (in order of preference)
+MSCI_WORLD_TICKERS = ["^990100-USD-STRD", "^MXWO", "URTH"]
 
 RATES = [
     ("rates", "us10y", "US 10Y Treasury", "Yield on 10-year US government bonds; key global benchmark", "DGS10", True),
@@ -89,14 +96,14 @@ RATES = [
 ]
 
 INDICATOR_STRIP = [
-    {"type": "asset", "key": "sp500", "label": "S&P 500"},
+    {"type": "asset", "key": "sp500",     "label": "S&P 500"},
     {"type": "asset", "key": "nasdaq100", "label": "Nasdaq 100"},
-    {"type": "asset", "key": "stoxx600", "label": "Stoxx Europe 600"},
-    {"type": "asset", "key": "msci_world", "label": "MSCI World"},
-    {"type": "asset", "key": "smi", "label": "SMI (Switzerland)"},
+    {"type": "asset", "key": "stoxx600",  "label": "Stoxx Europe 600"},
+    {"type": "asset", "key": "msci_world","label": "MSCI World"},
+    {"type": "asset", "key": "smi",       "label": "SMI"},
     {"type": "asset", "key": "nikkei225", "label": "Nikkei 225"},
-    {"type": "fear",  "key": "vix",     "label": "VIX (Fear Gauge)"},
-    {"type": "asset", "key": "dxy",     "label": "DXY (USD Index)"},
+    {"type": "fear",  "key": "vix",       "label": "VIX (Fear Gauge)"},
+    {"type": "asset", "key": "dxy",       "label": "DXY (USD Index)"},
 ]
 
 ASSET_CLASS_STRIP = [
@@ -108,7 +115,15 @@ ASSET_CLASS_STRIP = [
     {"type": "asset", "key": "bitcoin",      "label": "Bitcoin"},
     {"type": "asset", "key": "wti",          "label": "WTI Oil"},
     {"type": "yield", "key": "us10y",        "label": "US 10Y Yield"},
-    {"type": "asset", "key": "eurchf",       "label": "EUR/CHF"},
+]
+
+FX_STRIP = [
+    {"type": "asset", "key": "eurusd",  "label": "EUR/USD"},
+    {"type": "asset", "key": "usdchf",  "label": "USD/CHF"},
+    {"type": "asset", "key": "eurchf",  "label": "EUR/CHF"},
+    {"type": "asset", "key": "dxy",     "label": "DXY (USD Index)"},
+    {"type": "asset", "key": "gold",    "label": "Gold"},
+    {"type": "asset", "key": "wti",     "label": "WTI Oil"},
 ]
 
 # ── Macro events calendar (update as needed) ─────────────────────────────────
@@ -238,6 +253,19 @@ def fetch_yf_series(ticker):
     if series.empty:
         raise ValueError(ticker)
     return series
+
+
+@st.cache_data(ttl=900)
+def fetch_yf_series_with_fallback(tickers: list, label: str):
+    """Try each ticker in order; return (series, ticker_used) or raise."""
+    for t in tickers:
+        try:
+            s = fetch_yf_series(t)
+            if len(s) >= 20:
+                return s, t
+        except Exception:
+            continue
+    raise ValueError(f"All tickers failed for {label}: {tickers}")
 
 
 @st.cache_data(ttl=900)
@@ -544,19 +572,19 @@ def build_bundle():
         if chart_include:
             chart_allowed_keys.append(key)
         try:
-            s = fetch_yf_series(ticker)
-            history_frames.append(
-                pd.DataFrame(
-                    {
-                        "date": pd.to_datetime(s.index),
-                        "key": key,
-                        "label": label,
-                        "group": group,
-                        "value": s.values,
-                        "source_type": "live",
-                    }
-                )
-            )
+            # MSCI World: try multiple tickers in order
+            if key == "msci_world":
+                s, _ = fetch_yf_series_with_fallback(MSCI_WORLD_TICKERS, "MSCI World")
+            else:
+                s = fetch_yf_series(ticker)
+            history_frames.append(pd.DataFrame({
+                "date":        pd.to_datetime(s.index),
+                "key":         key,
+                "label":       label,
+                "group":       group,
+                "value":       s.values,
+                "source_type": "live",
+            }))
         except Exception:
             pass
 
@@ -715,7 +743,123 @@ def build_weekly_chart_df(history, allowed, include_crypto_flag, start_date=None
     )
 
 
-def add_event_marker(fig, event_date, label, line_color, fill_opacity=0.10, font_size=11):
+def pick_chart_of_day(history, news_df):
+    """Ask Gemini to nominate the most interesting chart given:
+    - The asset with the biggest z-score move vs its 30-day range
+    - The most-mentioned keyword across today's headlines
+    Returns dict: {key, label, reason, timeframe_days} or None.
+    """
+    if not GEMINI_API_KEY or history.empty:
+        return None
+
+    # Find biggest movers (z-score of latest value vs 30-day rolling)
+    today = pd.Timestamp.today().normalize()
+    movers = []
+    for key, g in history.groupby("key"):
+        g = g.sort_values("date").set_index("date")
+        recent = g["value"].last("30D").dropna()
+        if len(recent) < 5:
+            continue
+        mean, std = recent.mean(), recent.std()
+        if std == 0:
+            continue
+        latest = float(recent.iloc[-1])
+        z = abs((latest - mean) / std)
+        lbl = g["label"].iloc[0] if "label" in g.columns else key
+        movers.append({"key": key, "label": lbl, "zscore": round(z, 2), "latest": round(latest, 4)})
+
+    movers = sorted(movers, key=lambda x: x["zscore"], reverse=True)[:6]
+
+    # Count most-mentioned keywords in news
+    kw_counts: dict = {}
+    if news_df is not None and not news_df.empty:
+        all_headlines = " ".join(news_df["headline"].fillna("").str.lower().tolist())
+        for kw in ["iran", "fed", "ecb", "china", "tariff", "oil", "gold", "dollar",
+                   "inflation", "rate", "war", "ceasefire", "bitcoin", "recession"]:
+            cnt = all_headlines.count(kw)
+            if cnt > 0:
+                kw_counts[kw] = cnt
+    top_kws = sorted(kw_counts.items(), key=lambda x: x[1], reverse=True)[:4]
+
+    payload = json.dumps({
+        "instruction": (
+            "You are a financial analyst. Pick ONE chart of the day from the candidates below. "
+            "Choose the most interesting for an investor to see right now — biggest unusual move, "
+            "or most relevant to the top news themes. "
+            "Return strict JSON only: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
+            "\"reason\": \"<one concise sentence explaining why this chart matters today>\", "
+            "\"timeframe_days\": <30|60|90|180>}"
+        ),
+        "top_movers_by_zscore": movers,
+        "top_news_keywords": [{"keyword": k, "mentions": v} for k, v in top_kws],
+    })
+
+    try:
+        out, _ = gemini_generate_json(payload)
+        if isinstance(out, dict) and out.get("key") and out.get("reason"):
+            return out
+    except Exception:
+        pass
+
+    # Fallback: just use the top mover
+    if movers:
+        m = movers[0]
+        return {"key": m["key"], "label": m["label"],
+                "reason": f"{m['label']} showing an unusual move today (z-score {m['zscore']:.1f}).",
+                "timeframe_days": 60}
+    return None
+
+
+def render_chart_of_day(cotd, history):
+    """Render the Chart of the Day: focused line chart of nominated asset."""
+    if cotd is None:
+        return
+    key      = cotd.get("key", "")
+    label    = cotd.get("label", key)
+    reason   = cotd.get("reason", "")
+    tf_days  = int(cotd.get("timeframe_days", 60))
+
+    g = history[history["key"] == key].sort_values("date")
+    if g.empty:
+        st.caption(f"No data for chart of the day ({key})")
+        return
+
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=tf_days)
+    g = g[g["date"] >= cutoff]
+    if g.empty:
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=g["date"], y=g["value"],
+        mode="lines",
+        line=dict(width=2.5, color=PRIMARY),
+        fill="tozeroy",
+        fillcolor="rgba(16,59,115,0.07)",
+        hovertemplate="%{x|%d %b %Y}<br><b>%{y:.2f}</b><extra></extra>",
+        name=label,
+    ))
+    fig.add_hline(y=float(g["value"].iloc[0]), line_dash="dot",
+                  line_color="#94A3B8", line_width=1,
+                  annotation_text=f"Start ({tf_days}d ago)",
+                  annotation_position="bottom left",
+                  annotation_font_size=9)
+    fig.update_layout(
+        height=280,
+        margin=dict(l=10, r=10, t=10, b=30),
+        plot_bgcolor="white", paper_bgcolor="white",
+        showlegend=False,
+        xaxis=dict(showgrid=False, tickformat="%d %b", tickfont=dict(size=9)),
+        yaxis=dict(showgrid=True, gridcolor="#F0F4F8", tickfont=dict(size=9)),
+    )
+    add_event_marker(fig, IRAN_WAR_START_DATE,   "Iran conflict", "#C62828", 0.10, 9)
+    add_event_marker(fig, IRAN_CEASEFIRE_DATE,   "Ceasefire",     "#12B76A", 0.08, 9)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
+                    key="chart_of_day_fig")
+    st.caption(f"🔍 {reason}")
+
+
+
     if not event_date:
         return
     dt = pd.Timestamp(event_date)
@@ -1148,36 +1292,33 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
     )
     left_col = Table([[summary], [Spacer(1, 0.04 * cm)], [metrics_tbl]], colWidths=[10.4 * cm])
 
+    # What Matters bullets
     wm_rows = [[Paragraph(f"• {x}", body_small)] for x in writing["what_matters"][:4]]
     what_tbl = Table(wm_rows, colWidths=[7.0 * cm])
-    what_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.30, colors.HexColor("#D6E4F2")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
+    what_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0),(-1,-1), colors.white),
+        ("BOX",        (0,0),(-1,-1), 0.30, colors.HexColor("#D6E4F2")),
+        ("LEFTPADDING",(0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
+        ("TOPPADDING", (0,0),(-1,-1), 3), ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+    ]))
 
-    news_sum_tbl = Table([[Paragraph(writing["news_summary"], body_small)]], colWidths=[7.0 * cm])
-    news_sum_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.30, colors.HexColor("#D6E4F2")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
+    # News bullets (Gemini or fallback)
+    bullets = writing.get("news_bullets") or []
+    if not bullets:
+        bullets = [r.get("headline","") for _, r in news_df.head(5).iterrows()] if not news_df.empty else ["No headlines available"]
+    bullet_rows = [[Paragraph(f"→ {b}", body_small)] for b in bullets[:6]]
+    news_bul_tbl = Table(bullet_rows, colWidths=[7.0 * cm])
+    news_bul_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0),(-1,-1), colors.white),
+        ("BOX",        (0,0),(-1,-1), 0.30, colors.HexColor("#D6E4F2")),
+        ("LEFTPADDING",(0,0),(-1,-1), 5), ("RIGHTPADDING",(0,0),(-1,-1), 5),
+        ("TOPPADDING", (0,0),(-1,-1), 2), ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+    ]))
+
     mid_col = Table(
-        [[Paragraph("What Matters", h)], [what_tbl], [Spacer(1, 0.03 * cm)], [Paragraph("News Summary", h)], [news_sum_tbl]],
+        [[Paragraph("What Matters", h)], [what_tbl],
+         [Spacer(1, 0.03 * cm)],
+         [Paragraph("What's Moving Markets", h)], [news_bul_tbl]],
         colWidths=[7.2 * cm],
     )
 
@@ -1248,12 +1389,28 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, metrics, 
 
 
 def serialize_state(state):
+    """Serialise state to JSON-safe dict. History is excluded — always re-fetched."""
     out = {}
+    skip = {"history"}   # too large; re-fetched fresh on load
     for k, v in state.items():
+        if k in skip:
+            continue
         if isinstance(v, pd.DataFrame):
             out[k] = {"__type__": "dataframe", "value": v.to_json(orient="records", date_format="iso")}
-        else:
+        elif isinstance(v, list):
+            try:
+                json.dumps(v)
+                out[k] = v
+            except Exception:
+                pass
+        elif isinstance(v, (str, int, float, bool, type(None))):
             out[k] = v
+        elif isinstance(v, dict):
+            try:
+                json.dumps(v)
+                out[k] = v
+            except Exception:
+                pass
     return out
 
 
@@ -1261,34 +1418,97 @@ def deserialize_state(data):
     out = {}
     for k, v in data.items():
         if isinstance(v, dict) and v.get("__type__") == "dataframe":
-            out[k] = pd.read_json(BytesIO(v["value"].encode()), orient="records")
+            try:
+                out[k] = pd.read_json(BytesIO(v["value"].encode()), orient="records")
+            except Exception:
+                pass
         else:
             out[k] = v
     return out
 
 
+# ── GitHub Gist persistence ───────────────────────────────────────────────────
+def _gist_headers():
+    return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+
+
+def _load_gist_all() -> dict:
+    """Return the full snapshots dict from the Gist file, or {} on any error."""
+    if not GITHUB_TOKEN or not GITHUB_GIST_ID:
+        return {}
+    try:
+        r = requests.get(f"https://api.github.com/gists/{GITHUB_GIST_ID}",
+                         headers=_gist_headers(), timeout=15)
+        if not r.ok:
+            return {}
+        files = r.json().get("files", {})
+        raw = files.get(GIST_FILENAME, {}).get("content", "{}")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _save_gist_all(all_snaps: dict) -> bool:
+    """Write the full snapshots dict back to the Gist file."""
+    if not GITHUB_TOKEN or not GITHUB_GIST_ID:
+        return False
+    try:
+        payload = {"files": {GIST_FILENAME: {"content": json.dumps(all_snaps)}}}
+        r = requests.patch(f"https://api.github.com/gists/{GITHUB_GIST_ID}",
+                           headers=_gist_headers(), json=payload, timeout=20)
+        return r.ok
+    except Exception:
+        return False
+
+
 def save_snapshot(base_state, snapshot_date):
-    path = snapshot_path_for_date(snapshot_date)
     payload = serialize_state(base_state)
-    payload["snapshot_date"] = snapshot_date
+    payload["snapshot_date"]     = snapshot_date
     payload["snapshot_saved_at"] = now_zurich().isoformat()
-    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    if GITHUB_TOKEN and GITHUB_GIST_ID:
+        all_snaps = _load_gist_all()
+        all_snaps[snapshot_date] = payload
+        # Keep only last 10 snapshots to stay well under Gist size limits
+        if len(all_snaps) > 10:
+            for old_key in sorted(all_snaps.keys())[:-10]:
+                del all_snaps[old_key]
+        _save_gist_all(all_snaps)
+    else:
+        # Fallback: local file (works locally, not on Streamlit Cloud)
+        SNAPSHOT_DIR.mkdir(exist_ok=True)
+        snapshot_path_for_date(snapshot_date).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
 
 
 def load_snapshot(snapshot_date):
-    path = snapshot_path_for_date(snapshot_date)
-    if not path.exists():
-        return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return deserialize_state(payload)
+    if GITHUB_TOKEN and GITHUB_GIST_ID:
+        all_snaps = _load_gist_all()
+        payload   = all_snaps.get(snapshot_date)
+        if payload is None:
+            return None
+        return deserialize_state(payload)
+    else:
+        path = snapshot_path_for_date(snapshot_date)
+        if not path.exists():
+            return None
+        return deserialize_state(json.loads(path.read_text(encoding="utf-8")))
 
 
 def latest_available_snapshot():
-    files = sorted(SNAPSHOT_DIR.glob("*.json"))
-    if not files:
-        return None, None
-    latest = files[-1]
-    return latest.stem, load_snapshot(latest.stem)
+    if GITHUB_TOKEN and GITHUB_GIST_ID:
+        all_snaps = _load_gist_all()
+        if not all_snaps:
+            return None, None
+        latest_date = sorted(all_snaps.keys())[-1]
+        return latest_date, deserialize_state(all_snaps[latest_date])
+    else:
+        files = sorted(SNAPSHOT_DIR.glob("*.json"))
+        if not files:
+            return None, None
+        latest = files[-1]
+        return latest.stem, load_snapshot(latest.stem)
 
 
 def build_base_state(include_crypto_flag, news_count_value, use_gemini_flag):
@@ -1465,9 +1685,13 @@ def add_render_outputs(base_state, chart_window="YTD"):
         base_state["status"],
     )
 
+    # Chart of the Day — Gemini picks the most interesting move + news theme
+    cotd = pick_chart_of_day(history, base_state.get("news_df"))
+
     state = dict(base_state)
-    state["fig"] = fig
-    state["pdf_bytes"] = pdf_bytes
+    state["fig"]           = fig
+    state["pdf_bytes"]     = pdf_bytes
+    state["chart_of_day"]  = cotd
     return state
 
 
@@ -1621,16 +1845,34 @@ else:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── 4. Main cross-asset chart ─────────────────────────────────────────────
-    if st.session_state["fig"] is not None:
-        st.markdown(f"**{writing['headline']}**")
-        st.caption(writing["subheadline"])
-        st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
-    else:
-        st.info("No chart data — market data fetch may have failed.")
+    # ── 4. Main cross-asset chart + Chart of the Day ─────────────────────────
+    chart_col, cotd_col = st.columns([3, 2], gap="medium")
 
-    # ── 5. Detailed cards (collapsed by default) ──────────────────────────────
-    with st.expander("📊 Detailed Indicators & Sparklines", expanded=False):
+    with chart_col:
+        if st.session_state["fig"] is not None:
+            st.markdown(f"**{writing['headline']}**")
+            st.caption(writing["subheadline"])
+            st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
+        else:
+            st.info("No chart data — market data fetch may have failed.")
+
+    with cotd_col:
+        cotd = st.session_state.get("chart_of_day")
+        cotd_label = cotd["label"] if cotd else "Chart of the Day"
+        st.markdown(f"**📈 Chart of the Day — {cotd_label}**")
+        render_chart_of_day(cotd, hist)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 5. FX section ─────────────────────────────────────────────────────────
+    with st.expander("💱 FX & Commodities", expanded=True):
+        render_card_strip(snap, hist, FX_STRIP,
+                          "FX & Key Commodities",
+                          "EUR/USD · USD/CHF · EUR/CHF · DXY · Gold · Oil",
+                          "fx_section")
+
+    # ── 6. Detailed cards (collapsed) ─────────────────────────────────────────
+    with st.expander("📊 Equities & Asset Class Detail", expanded=False):
         render_card_strip(snap, hist, INDICATOR_STRIP,
                           "Market Indicators",
                           "Equity indices + VIX + DXY. VIX red = fear rising.",

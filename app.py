@@ -527,8 +527,14 @@ def load_news_gmail(max_emails: int = 20, lookback_hours: int = 36) -> pd.DataFr
                     source_name = "The Economist"
                 elif "reuters" in sender_lower:
                     source_name = "Reuters (Email)"
+                elif "therundown" in sender_lower or "rundown.ai" in sender_lower:
+                    source_name = "The Rundown AI"
+                elif "morningbrew" in sender_lower or "morning brew" in sender_lower:
+                    source_name = "Morning Brew"
+                elif "axios" in sender_lower:
+                    source_name = "Axios"
                 else:
-                    source_name = "Email"
+                    continue  # skip unrecognised senders (EuroMillions, spam, etc.) (EuroMillions, spam, etc.)
 
                 # Parse date
                 date_str = msg.get("Date", "")

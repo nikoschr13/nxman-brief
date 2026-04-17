@@ -1770,7 +1770,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ("BOTTOMPADDING",(0,0),(-1,-1), 1.5),
         ("ALIGN",        (1,0),(1,-1),  "RIGHT"),
     ]
-    for ri, b in enumerate(bullets[:9]):
+    for ri, b in enumerate(bullets[:7]):
         match = _match_bullet_to_article(b, news_df) if not news_df.empty else None
         meta  = ""
         if match:
@@ -1791,58 +1791,79 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     bul_tbl = Table(bul_rows or [[P(""),P("")]], colWidths=[(NAR_W-1.55)*cm, 1.55*cm])
     bul_tbl.setStyle(TableStyle(bul_cmds))
 
-    # Narrative cell = list of flowables (no wrapping table)
-    nar_title = P("Market Recap", fn="Helvetica-Bold", sz=8, col=NAV, lead=10)
-    nar_head  = P(writing.get("headline",""), fn="Helvetica-Bold", sz=6.8, col=TXT, lead=8.5)
+    # Narrative cell — "Market Recap" title + 1-sentence AI summary
+    nar_title = P("Market Recap", fn="Helvetica-Bold", sz=7.5, col=NAV, lead=9)
     _summ_txt = (writing.get("news_summary","") or writing.get("subheadline","")).strip()
-    nar_summ  = P(_summ_txt[:260], sz=5.6, col=GRY, lead=7.2) if _summ_txt else None
+    nar_summ  = P(_summ_txt[:200], sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
     nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
     nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
-    # Chart cell
+    # Chart cell — no box border (avoids misalignment when left column is taller)
     if chart_png:
-        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=7.4*cm)
+        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=6.5*cm)
     else:
         chart_cell = P("<i>Chart unavailable</i>", sz=6, col=GRY)
 
-    # CotD cell content
-    if cotd and isinstance(cotd, dict):
-        cotd_label  = cotd.get("label","Notable Move")
-        tf          = int(cotd.get("timeframe_days", 60))
-        reason_text = cotd.get("reason","")
-        cotd_head   = P(f"CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
-        cotd_name   = P(f"<b>{_t(cotd_label,24)}</b>  \u00b7 {tf} days", sz=7.5, col=NAV, lead=9)
-        cotd_why    = P(reason_text, sz=5.4, col=TXT, lead=6.8)
-        if cotd_png:
-            cotd_img  = Image(BytesIO(cotd_png), width=(COTD_W-0.5)*cm, height=3.6*cm)
-            cotd_cell = [cotd_head, Spacer(1,0.05*cm), cotd_name,
-                         Spacer(1,0.08*cm), cotd_img,
-                         Spacer(1,0.06*cm), cotd_why]
-        else:
-            cotd_cell = [cotd_head, Spacer(1,0.05*cm), cotd_name,
-                         Spacer(1,0.08*cm), cotd_why]
-    else:
-        cotd_cell = [P("")]
+    # CotD cell — chart + reason + compact upcoming events below
+    _today_d = datetime.now().date()
+    _cutoff_d = _today_d + timedelta(days=31)
+    _upcoming = [
+        e for e in MACRO_EVENTS
+        if _today_d <= datetime.strptime(e["date"], "%Y-%m-%d").date() <= _cutoff_d
+    ]
 
-    # Build narrative flowables list dynamically
-    _nar_flows = [nar_title, Spacer(1,0.03*cm), nar_head]
+    cotd_flows = []
+    if cotd and isinstance(cotd, dict):
+        cotd_label  = cotd.get("label", "Notable Move")
+        tf          = int(cotd.get("timeframe_days", 60))
+        reason_text = (cotd.get("reason","") or "")[:160]
+        cotd_flows += [
+            P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
+            Spacer(1, 0.04*cm),
+            P(f"<b>{_t(cotd_label,24)}</b>  \u00b7 {tf} days", sz=7, col=NAV, lead=8.5),
+            Spacer(1, 0.04*cm),
+        ]
+        if cotd_png:
+            cotd_flows.append(Image(BytesIO(cotd_png), width=(COTD_W-0.5)*cm, height=2.4*cm))
+            cotd_flows.append(Spacer(1, 0.04*cm))
+        cotd_flows.append(P(reason_text, sz=5.0, col=TXT, lead=6.3))
+    else:
+        cotd_flows.append(P(""))
+
+    # Upcoming events — compact list below CotD
+    if _upcoming:
+        cotd_flows += [
+            Spacer(1, 0.08*cm),
+            HRFlowable(width=(COTD_W-0.6)*cm, thickness=0.4, color=RUL),
+            Spacer(1, 0.06*cm),
+            P("UPCOMING EVENTS — NEXT 30 DAYS", fn="Helvetica-Bold", sz=5.5, col=BLU, lead=7),
+            Spacer(1, 0.04*cm),
+        ]
+        for e in _upcoming[:5]:
+            try:
+                date_str = datetime.strptime(e["date"], "%Y-%m-%d").strftime("%d %b")
+            except Exception:
+                date_str = e["date"]
+            cotd_flows.append(
+                P(f"<b>{date_str}</b>  {e['event']}", sz=5.2, col=TXT, lead=6.5)
+            )
+            cotd_flows.append(Spacer(1, 0.025*cm))
+
+    # Build narrative flowables
+    _nar_flows = [nar_title]
     if nar_summ:
         _nar_flows += [Spacer(1,0.04*cm), nar_summ]
     _nar_flows += [Spacer(1,0.06*cm), nar_sec, Spacer(1,0.03*cm), nar_rule, Spacer(1,0.04*cm), bul_tbl]
 
     # Single-level outer table: each cell holds a list of flowables
     main_tbl = Table(
-        [[
-            _nar_flows,
-            chart_cell,
-            cotd_cell,
-        ]],
+        [[_nar_flows, chart_cell, cotd_flows]],
         colWidths=[NAR_W*cm, CHART_W*cm, COTD_W*cm],
     )
     main_tbl.setStyle(TableStyle([
         ("VALIGN",       (0,0),(-1,-1), "TOP"),
         ("BOX",          (0,0),(0,0),   0.4, RUL),
-        ("BOX",          (1,0),(1,0),   0.4, RUL),
+        # no box on chart cell (col 1) — avoids border misalignment when text column is taller
         ("BOX",          (2,0),(2,0),   0.8, BLU),
         ("BACKGROUND",   (0,0),(0,0),   WHT),
         ("BACKGROUND",   (1,0),(1,0),   WHT),
@@ -1852,7 +1873,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ("TOPPADDING",   (0,0),(-1,-1), 5),
         ("BOTTOMPADDING",(0,0),(-1,-1), 5),
     ]))
-    story += [main_tbl, Spacer(1, 0.14*cm)]
+    story += [main_tbl, Spacer(1, 0.10*cm)]
 
     # ── 4. DATA TABLES — max 2 levels deep ────────────────────────────────────
     def _dtbl(df, sec_title):
@@ -1875,8 +1896,8 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             ("BACKGROUND",   (0,0),(-1,0),  NAV),
             ("BACKGROUND",   (0,1),(-1,1),  MID),
             ("SPAN",         (0,0),(-1,0)),
-            ("TOPPADDING",   (0,0),(-1,0),  3),("BOTTOMPADDING",(0,0),(-1,0), 3),
-            ("TOPPADDING",   (0,1),(-1,-1), 2),("BOTTOMPADDING",(0,1),(-1,-1), 2),
+            ("TOPPADDING",   (0,0),(-1,0),  2.5),("BOTTOMPADDING",(0,0),(-1,0), 2.5),
+            ("TOPPADDING",   (0,1),(-1,-1), 1.5),("BOTTOMPADDING",(0,1),(-1,-1), 1.5),
             ("LEFTPADDING",  (0,0),(-1,-1), 4),("RIGHTPADDING",(0,0),(-1,-1), 4),
             ("ALIGN",        (1,1),(-1,-1), "RIGHT"),
             ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
@@ -1925,60 +1946,6 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         fx_pdf_df = fx_df[fx_df["label"].isin(_fx_want)].copy()
     else:
         fx_pdf_df = pd.DataFrame()
-
-    # ── Macro events strip — next 30 days ─────────────────────────────────────
-    _today = datetime.now().date()
-    _cutoff = _today + timedelta(days=31)
-    _upcoming = [
-        e for e in MACRO_EVENTS
-        if _today <= datetime.strptime(e["date"], "%Y-%m-%d").date() <= _cutoff
-    ]
-    if _upcoming:
-        evt_rows  = [[
-            P("UPCOMING EVENTS — NEXT 30 DAYS", fn="Helvetica-Bold", sz=5.8, col=WHT, lead=7),
-            P(""), P(""), P(""), P(""), P(""),
-        ]]
-        evt_cmds  = [
-            ("BACKGROUND",   (0,0),(-1,0),  NAV),
-            ("SPAN",         (0,0),(-1,0)),
-            ("TOPPADDING",   (0,0),(-1,0),  3), ("BOTTOMPADDING",(0,0),(-1,0), 3),
-            ("LEFTPADDING",  (0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
-            ("LINEBELOW",    (0,0),(-1,0),  1.5, BLU),
-            ("BOX",          (0,0),(-1,-1), 0.4, RUL),
-        ]
-        # Add event cells in row 1 (up to 6 events in a single horizontal strip)
-        evt_cells = []
-        for e in _upcoming[:6]:
-            try:
-                dt = datetime.strptime(e["date"], "%Y-%m-%d")
-                date_str = dt.strftime("%d %b")
-            except Exception:
-                date_str = e["date"]
-            evt_cells.append(
-                [P(date_str, fn="Helvetica-Bold", sz=5.5, col=BLU, lead=7),
-                 P(e["event"], sz=5.2, col=TXT, lead=6.5)]
-            )
-        # Pad to 6 columns
-        while len(evt_cells) < 6:
-            evt_cells.append([P(""), P("")])
-        # Flatten each cell into a small nested paragraph pair
-        evt_data_row = []
-        for pair in evt_cells:
-            evt_data_row.append([pair[0], Spacer(1,0.02*cm), pair[1]])
-        evt_rows.append(evt_data_row)
-        evt_cmds += [
-            ("VALIGN",       (0,1),(-1,-1), "TOP"),
-            ("TOPPADDING",   (0,1),(-1,-1), 3),("BOTTOMPADDING",(0,1),(-1,-1), 3),
-            ("BACKGROUND",   (0,1),(-1,-1), LIT),
-        ]
-        # Add vertical separators between event cells
-        for ci in range(1,6):
-            evt_cmds.append(("LINEAFTER",(ci-1,1),(ci-1,1), 0.3, RUL))
-
-        col6 = (PW/6)*cm
-        evt_tbl = Table(evt_rows, colWidths=[col6]*6)
-        evt_tbl.setStyle(TableStyle(evt_cmds))
-        story += [evt_tbl, Spacer(1, 0.12*cm)]
 
     # Row 1: Equities | Rates & Bonds
     data_r1 = Table(

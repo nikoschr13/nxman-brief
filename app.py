@@ -70,6 +70,10 @@ GITHUB_TOKEN   = get_secret("GITHUB_TOKEN")
 GITHUB_GIST_ID = get_secret("GITHUB_GIST_ID")
 GIST_FILENAME  = "nxman_snapshots.json"
 
+# Gmail — for forwarded FT/Bloomberg/work emails as extra news source
+GMAIL_EMAIL        = get_secret("GMAIL_EMAIL")
+GMAIL_APP_PASSWORD = get_secret("GMAIL_APP_PASSWORD")
+
 ASSETS = [
     ("equities", "sp500",      "S&P 500",
      "Index of 500 large US companies. When it goes UP, US equity prices are rising — good for stock holders. When it goes DOWN, US stocks are losing value.",
@@ -450,6 +454,138 @@ def load_news_rss(max_per_feed: int = 8) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+@st.cache_data(ttl=900)
+def load_news_gmail(max_emails: int = 20, lookback_hours: int = 36) -> pd.DataFrame:
+    """Read forwarded FT/Bloomberg/work emails from Gmail via IMAP.
+    Requires GMAIL_EMAIL and GMAIL_APP_PASSWORD secrets (Gmail App Password, not main password).
+    Returns DataFrame with same columns as load_news_rss().
+    """
+    if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
+        return pd.DataFrame()
+
+    import imaplib
+    import email as email_lib
+    import email.header as email_header
+    from email.utils import parsedate_to_datetime
+
+    rows = []
+    cutoff = datetime.utcnow() - timedelta(hours=lookback_hours)
+
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+        mail.select("INBOX")
+
+        # Search last lookback_hours worth of emails
+        since_date = cutoff.strftime("%d-%b-%Y")
+        status, uids = mail.search(None, f'SINCE "{since_date}"')
+        if status != "OK":
+            return pd.DataFrame()
+
+        uid_list = uids[0].split()
+        # Process most recent first, limit to max_emails
+        for uid in reversed(uid_list[-max_emails:]):
+            try:
+                status, msg_data = mail.fetch(uid, "(RFC822)")
+                if status != "OK":
+                    continue
+                raw = msg_data[0][1]
+                msg = email_lib.message_from_bytes(raw)
+
+                # Decode subject
+                subj_parts = email_header.decode_header(msg.get("Subject", ""))
+                subject = ""
+                for part, enc in subj_parts:
+                    if isinstance(part, bytes):
+                        subject += part.decode(enc or "utf-8", errors="replace")
+                    else:
+                        subject += str(part)
+                subject = subject.strip()
+                if not subject or len(subject) < 10:
+                    continue
+
+                # Decode sender
+                from_raw = msg.get("From", "")
+                from_parts = email_header.decode_header(from_raw)
+                sender = ""
+                for part, enc in from_parts:
+                    if isinstance(part, bytes):
+                        sender += part.decode(enc or "utf-8", errors="replace")
+                    else:
+                        sender += str(part)
+                sender = sender.strip()
+
+                # Determine readable source name from sender domain
+                sender_lower = sender.lower()
+                if "ft.com" in sender_lower or "financialtimes" in sender_lower:
+                    source_name = "Financial Times"
+                elif "bloomberg" in sender_lower:
+                    source_name = "Bloomberg"
+                elif "wsj.com" in sender_lower or "wsj" in sender_lower:
+                    source_name = "WSJ"
+                elif "economist" in sender_lower:
+                    source_name = "The Economist"
+                elif "reuters" in sender_lower:
+                    source_name = "Reuters (Email)"
+                else:
+                    source_name = "Email"
+
+                # Parse date
+                date_str = msg.get("Date", "")
+                ts = None
+                pub = ""
+                try:
+                    ts = parsedate_to_datetime(date_str).replace(tzinfo=None)
+                    if ts < cutoff:
+                        continue
+                    pub = ts.strftime("%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    pass  # keep email even if date parse fails
+
+                # Extract a short snippet from the body as context
+                body_snippet = ""
+                try:
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            ct = part.get_content_type()
+                            if ct == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body_snippet = payload.decode("utf-8", errors="replace")[:400]
+                                    break
+                    else:
+                        payload = msg.get_payload(decode=True)
+                        if payload:
+                            body_snippet = payload.decode("utf-8", errors="replace")[:400]
+                    # Strip obvious junk
+                    body_snippet = " ".join(body_snippet.split())[:200]
+                except Exception:
+                    body_snippet = ""
+
+                # Use Message-ID as a proxy URL (no real URL in email)
+                msg_id = msg.get("Message-ID", "").strip()
+
+                rows.append({
+                    "headline":       subject,
+                    "source":         source_name,
+                    "published_at":   pub,
+                    "url":            "",        # emails have no URL
+                    "why_it_matters": body_snippet,
+                    "provider":       "Email",
+                })
+
+            except Exception:
+                continue
+
+        mail.logout()
+
+    except Exception:
+        # Silently fail — Brief works fine without Gmail
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 NEWS_COUNT = 12  # fixed — not user-selectable
 
 
@@ -510,6 +646,11 @@ def load_news(count=NEWS_COUNT):
     rdf = load_news_rss()
     if not rdf.empty:
         frames.append(rdf)
+
+    # Gmail forwarded emails (FT, Bloomberg, work) — if credentials set
+    gdf = load_news_gmail()
+    if not gdf.empty:
+        frames.append(gdf)
 
     if not frames:
         return placeholder_df.head(count), {

@@ -1641,13 +1641,14 @@ def render_news_bullets(writing, news_df):
                     st.session_state["writing"],
                     filtered,
                     st.session_state["status"],
+                    fx_df=st.session_state.get("fx_df"),
                 )
                 st.session_state["pdf_bytes"] = new_pdf
                 st.success(f"PDF updated with {len(keep)} articles.")
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
-              metrics, writing, news_df, status, cotd=None, cotd_png=None):
+              metrics, writing, news_df, status, cotd=None, cotd_png=None, fx_df=None):
     """Professional one-page landscape PDF. Max 2 levels of Table nesting."""
     from reportlab.platypus import HRFlowable
     buffer = BytesIO()
@@ -1719,14 +1720,14 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     ]))
     story += [hdr, Spacer(1, 0.12*cm)]
 
-    # ── 2. KPI STRIP — flat 2-row table, NO nested tables ─────────────────────
+    # ── 2. KPI STRIP — last trading day moves, flat 2-row table ──────────────
     kpis = [
-        ("Global Eq YTD",    metrics.get("global_equities_ytd")),
-        ("Global Bonds YTD", metrics.get("global_bonds_ytd")),
-        ("USD Bonds YTD",    metrics.get("usd_bonds_ytd")),
-        ("EUR Bonds YTD",    metrics.get("eur_bonds_ytd")),
-        ("Gold YTD",         metrics.get("gold_ytd")),
-        ("Bitcoin YTD",      metrics.get("bitcoin_ytd")),
+        ("Global Eq 1D",    metrics.get("global_equities_d1")),
+        ("Global Bonds 1D", metrics.get("global_bonds_d1")),
+        ("USD Bonds 1D",    metrics.get("usd_bonds_d1")),
+        ("EUR Bonds 1D",    metrics.get("eur_bonds_d1")),
+        ("Gold 1D",         metrics.get("gold_d1")),
+        ("Bitcoin 1D",      metrics.get("bitcoin_d1")),
     ]
     lbl_row, val_row, kpi_cmds = [], [], [
         ("BACKGROUND",   (0,0),(-1,-1), LIT),
@@ -1791,10 +1792,12 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     bul_tbl.setStyle(TableStyle(bul_cmds))
 
     # Narrative cell = list of flowables (no wrapping table)
-    nar_head = P(writing.get("headline",""), fn="Helvetica-Bold", sz=9, col=NAV, lead=11)
-    nar_sub  = P(writing.get("subheadline",""), sz=6.2, col=GRY, lead=7.6)
-    nar_sec  = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
-    nar_rule = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
+    nar_title = P("Market Recap", fn="Helvetica-Bold", sz=8, col=NAV, lead=10)
+    nar_head  = P(writing.get("headline",""), fn="Helvetica-Bold", sz=6.8, col=TXT, lead=8.5)
+    _summ_txt = (writing.get("news_summary","") or writing.get("subheadline","")).strip()
+    nar_summ  = P(_summ_txt[:260], sz=5.6, col=GRY, lead=7.2) if _summ_txt else None
+    nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
+    nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
     # Chart cell
     if chart_png:
@@ -1821,10 +1824,16 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     else:
         cotd_cell = [P("")]
 
+    # Build narrative flowables list dynamically
+    _nar_flows = [nar_title, Spacer(1,0.03*cm), nar_head]
+    if nar_summ:
+        _nar_flows += [Spacer(1,0.04*cm), nar_summ]
+    _nar_flows += [Spacer(1,0.06*cm), nar_sec, Spacer(1,0.03*cm), nar_rule, Spacer(1,0.04*cm), bul_tbl]
+
     # Single-level outer table: each cell holds a list of flowables
     main_tbl = Table(
         [[
-            [nar_head, Spacer(1,0.04*cm), nar_sub, Spacer(1,0.08*cm), nar_sec, Spacer(1,0.04*cm), nar_rule, Spacer(1,0.04*cm), bul_tbl],
+            _nar_flows,
             chart_cell,
             cotd_cell,
         ]],
@@ -1894,9 +1903,86 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
 
     GAP = 0.25*cm
     half_w = (PW/2)*cm
-    # Row 1: Equities | Rates
+
+    # ── Split bonds_df: actual bonds (BNDW/BND/IEAG) vs crypto ───────────────
+    _bond_labels = {"Global Bonds", "USD Bonds", "EUR Bonds"}
+    if bonds_df is not None and not bonds_df.empty:
+        actual_bonds_df = bonds_df[bonds_df["label"].isin(_bond_labels)].copy()
+        crypto_df       = bonds_df[~bonds_df["label"].isin(_bond_labels)].copy()
+    else:
+        actual_bonds_df = pd.DataFrame()
+        crypto_df       = pd.DataFrame()
+
+    # Rates & Bonds combined
+    rates_bonds_df = pd.concat([rates_df, actual_bonds_df], ignore_index=True) if not actual_bonds_df.empty else rates_df
+
+    # Commodities & Crypto combined
+    commodities_crypto_df = pd.concat([commodities_df, crypto_df], ignore_index=True) if not crypto_df.empty else commodities_df
+
+    # FX table: EUR/CHF, EUR/USD, USD/CHF, DXY
+    _fx_want = ["EUR/CHF", "EUR/USD", "USD/CHF", "DXY (USD Index)"]
+    if fx_df is not None and not fx_df.empty:
+        fx_pdf_df = fx_df[fx_df["label"].isin(_fx_want)].copy()
+    else:
+        fx_pdf_df = pd.DataFrame()
+
+    # ── Macro events strip — next 30 days ─────────────────────────────────────
+    _today = datetime.now().date()
+    _cutoff = _today + timedelta(days=31)
+    _upcoming = [
+        e for e in MACRO_EVENTS
+        if _today <= datetime.strptime(e["date"], "%Y-%m-%d").date() <= _cutoff
+    ]
+    if _upcoming:
+        evt_rows  = [[
+            P("UPCOMING EVENTS — NEXT 30 DAYS", fn="Helvetica-Bold", sz=5.8, col=WHT, lead=7),
+            P(""), P(""), P(""), P(""), P(""),
+        ]]
+        evt_cmds  = [
+            ("BACKGROUND",   (0,0),(-1,0),  NAV),
+            ("SPAN",         (0,0),(-1,0)),
+            ("TOPPADDING",   (0,0),(-1,0),  3), ("BOTTOMPADDING",(0,0),(-1,0), 3),
+            ("LEFTPADDING",  (0,0),(-1,-1), 4), ("RIGHTPADDING",(0,0),(-1,-1), 4),
+            ("LINEBELOW",    (0,0),(-1,0),  1.5, BLU),
+            ("BOX",          (0,0),(-1,-1), 0.4, RUL),
+        ]
+        # Add event cells in row 1 (up to 6 events in a single horizontal strip)
+        evt_cells = []
+        for e in _upcoming[:6]:
+            try:
+                dt = datetime.strptime(e["date"], "%Y-%m-%d")
+                date_str = dt.strftime("%d %b")
+            except Exception:
+                date_str = e["date"]
+            evt_cells.append(
+                [P(date_str, fn="Helvetica-Bold", sz=5.5, col=BLU, lead=7),
+                 P(e["event"], sz=5.2, col=TXT, lead=6.5)]
+            )
+        # Pad to 6 columns
+        while len(evt_cells) < 6:
+            evt_cells.append([P(""), P("")])
+        # Flatten each cell into a small nested paragraph pair
+        evt_data_row = []
+        for pair in evt_cells:
+            evt_data_row.append([pair[0], Spacer(1,0.02*cm), pair[1]])
+        evt_rows.append(evt_data_row)
+        evt_cmds += [
+            ("VALIGN",       (0,1),(-1,-1), "TOP"),
+            ("TOPPADDING",   (0,1),(-1,-1), 3),("BOTTOMPADDING",(0,1),(-1,-1), 3),
+            ("BACKGROUND",   (0,1),(-1,-1), LIT),
+        ]
+        # Add vertical separators between event cells
+        for ci in range(1,6):
+            evt_cmds.append(("LINEAFTER",(ci-1,1),(ci-1,1), 0.3, RUL))
+
+        col6 = (PW/6)*cm
+        evt_tbl = Table(evt_rows, colWidths=[col6]*6)
+        evt_tbl.setStyle(TableStyle(evt_cmds))
+        story += [evt_tbl, Spacer(1, 0.12*cm)]
+
+    # Row 1: Equities | Rates & Bonds
     data_r1 = Table(
-        [[_dtbl(equities_df,"EQUITIES"),    P(""), _dtbl(rates_df,"RATES")]],
+        [[_dtbl(equities_df,"EQUITIES"), P(""), _dtbl(rates_bonds_df,"RATES & BONDS")]],
         colWidths=[half_w, GAP, half_w],
     )
     data_r1.setStyle(TableStyle([
@@ -1904,11 +1990,17 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),
         ("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
-    # Row 2: Commodities | Bonds & Crypto
-    data_r2 = Table(
-        [[_dtbl(commodities_df,"COMMODITIES"), P(""), _dtbl(bonds_df,"BONDS & CRYPTO")]],
-        colWidths=[half_w, GAP, half_w],
-    )
+    # Row 2: Commodities & Crypto | FX
+    if not fx_pdf_df.empty:
+        data_r2 = Table(
+            [[_dtbl(commodities_crypto_df,"COMMODITIES & CRYPTO"), P(""), _dtbl(fx_pdf_df,"FX")]],
+            colWidths=[half_w, GAP, half_w],
+        )
+    else:
+        data_r2 = Table(
+            [[_dtbl(commodities_crypto_df,"COMMODITIES & CRYPTO")]],
+            colWidths=[PW*cm],
+        )
     data_r2.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"TOP"),
         ("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),
@@ -2067,6 +2159,7 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
     rates_df       = snapshot[snapshot["group"] == "rates"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
     commodities_df = snapshot[snapshot["group"] == "commodities"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
     bonds_df       = snapshot[snapshot["group"].isin(["bonds", "alternatives"])][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
+    fx_df          = snapshot[snapshot["group"] == "fx"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
 
     news_df, news_status = load_news()
     writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag)
@@ -2094,11 +2187,17 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
 
     metrics = {
         "global_equities_ytd": get_metric("msci_world", "ytd"),
-        "global_bonds_ytd": get_metric("global_bonds", "ytd"),
-        "usd_bonds_ytd": get_metric("usd_bonds", "ytd"),
-        "eur_bonds_ytd": get_metric("eur_bonds", "ytd"),
-        "gold_ytd": get_metric("gold", "ytd"),
-        "bitcoin_ytd": get_metric("bitcoin", "ytd"),
+        "global_equities_d1":  get_metric("msci_world", "d1"),
+        "global_bonds_ytd":    get_metric("global_bonds", "ytd"),
+        "global_bonds_d1":     get_metric("global_bonds", "d1"),
+        "usd_bonds_ytd":       get_metric("usd_bonds", "ytd"),
+        "usd_bonds_d1":        get_metric("usd_bonds", "d1"),
+        "eur_bonds_ytd":       get_metric("eur_bonds", "ytd"),
+        "eur_bonds_d1":        get_metric("eur_bonds", "d1"),
+        "gold_ytd":            get_metric("gold", "ytd"),
+        "gold_d1":             get_metric("gold", "d1"),
+        "bitcoin_ytd":         get_metric("bitcoin", "ytd"),
+        "bitcoin_d1":          get_metric("bitcoin", "d1"),
     }
 
     return {
@@ -2108,6 +2207,7 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
         "rates_df": rates_df,
         "commodities_df": commodities_df,
         "bonds_df": bonds_df,
+        "fx_df": fx_df,
         "news_df": news_df,
         "writing": writing,
         "status": status,
@@ -2273,6 +2373,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         base_state["status"],
         cotd=cotd,
         cotd_png=cotd_png,
+        fx_df=base_state.get("fx_df"),
     )
 
     state = dict(base_state)

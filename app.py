@@ -1166,7 +1166,17 @@ def pick_chart_of_day(history, news_df):
             })
             out, _ = ai_generate_json(payload)
             if isinstance(out, dict) and out.get("key") and out.get("reason"):
-                return out
+                # Only accept keys that actually exist in history — ignore invented tickers
+                valid_keys = set(history["key"].unique())
+                ai_key = out.get("key", "")
+                if ai_key in valid_keys:
+                    return out
+                # AI returned an unknown key — try to match a mover by label
+                ai_label = (out.get("label","") or "").lower()
+                for m in movers:
+                    if m["label"].lower() == ai_label:
+                        return {**out, "key": m["key"], "label": m["label"]}
+                # No match — fall through to local fallback
         except Exception:
             pass
 

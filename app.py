@@ -242,6 +242,42 @@ section[data-testid="stSidebar"] hr { margin: 0.3rem 0 !important; }
 div[data-testid="stMetric"] { background: transparent !important;
                                padding: 0 !important; border: 0 !important; }
 details summary { font-size: 14px !important; padding: 6px 0 !important; }
+
+/* ── Mobile / iPhone responsive ── */
+@media (max-width: 768px) {
+  .block-container { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
+  .hero h1 { font-size: 16px !important; }
+  .hero-sub { font-size: 11px !important; }
+  .section-card { padding: 8px 10px !important; border-radius: 10px !important; }
+
+  /* Stack Streamlit columns vertically on mobile */
+  div[data-testid="column"] { min-width: 100% !important; flex: 0 0 100% !important; }
+
+  /* Ticker strip: scrollable horizontally */
+  div[data-testid="stMarkdownContainer"] table { min-width: 560px !important; }
+
+  /* Make Plotly charts not overflow */
+  div[data-testid="stPlotlyChart"] { overflow-x: auto !important; }
+
+  /* Sidebar: full width on mobile when open */
+  section[data-testid="stSidebar"] { width: 80vw !important; }
+
+  /* Reduce font sizes for readability on small screens */
+  p, li, .stMarkdown { font-size: 13px !important; }
+  h2, h3 { font-size: 15px !important; }
+  details summary { font-size: 13px !important; }
+
+  /* Expander headings */
+  div[data-testid="stExpander"] summary { font-size: 13px !important; padding: 5px 0 !important; }
+
+  /* Dataframes: allow horizontal scroll */
+  div[data-testid="stDataFrame"] { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
+  div[data-testid="stDataFrame"] iframe { min-width: 340px !important; }
+
+  /* Metrics: smaller padding */
+  div[data-testid="stMetric"] label { font-size: 11px !important; }
+  div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: 15px !important; }
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -1814,12 +1850,12 @@ def pdf_chart_subset(weekly_df):
 def render_combined_card(item, snapshot_row, history, chart_key):
     """Single Plotly figure per card: coloured border + metric annotations + sparkline.
 
-    Layout: height=265, margin_t=118, margin_b=24
-      plot-area top  = (265-118)/265 = 0.555  → annotations sit at y > 0.56
-      plot-area bot  = 24/265        = 0.091
+    Layout: height=215, margin_t=95, margin_b=20
+      plot-area top  = (215-95)/215 = 0.558  → annotations sit at y > 0.56
+      plot-area bot  = 20/215       = 0.093
     3 cards per row gives ~33 % screen width — enough breathing room.
     """
-    H, MT, MB, ML, MR = 265, 118, 24, 10, 8
+    H, MT, MB, ML, MR = 215, 95, 20, 10, 8
 
     if snapshot_row.empty:
         fig = go.Figure()
@@ -2014,7 +2050,7 @@ def render_card_strip(snapshot, history, strip, title, caption, strip_name):
     st.subheader(title)
     st.caption(caption)
 
-    rows = [strip[i:i + 3] for i in range(0, len(strip), 3)]
+    rows = [strip[i:i + 4] for i in range(0, len(strip), 4)]
     for row_idx, block in enumerate(rows):
         cols = st.columns(len(block), gap="small")
         for col_idx, (col, item) in enumerate(zip(cols, block)):
@@ -2301,7 +2337,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         match = _match_bullet_to_article(b, news_df) if not news_df.empty else None
         meta  = ""
         if match:
-            src = _t(match.get("source","") or "", 12)
+            src = _t(match.get("source","") or "", 22)
             pub = match.get("published_at","") or ""
             try: dt_s = pd.Timestamp(pub).strftime("%d %b") if pub else ""
             except: dt_s = ""
@@ -2315,13 +2351,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         if ri < len(bullets)-1:
             bul_cmds.append(("LINEBELOW",(0,ri),(-1,ri), 0.3, RUL))
 
-    bul_tbl = Table(bul_rows or [[P(""),P("")]], colWidths=[(NAR_W-1.55)*cm, 1.55*cm])
+    bul_tbl = Table(bul_rows or [[P(""),P("")]], colWidths=[(NAR_W-2.2)*cm, 2.2*cm])
     bul_tbl.setStyle(TableStyle(bul_cmds))
 
     # Narrative cell — "Market Recap" title + 1-sentence AI summary
     nar_title = P("Market Recap", fn="Helvetica-Bold", sz=7.5, col=NAV, lead=9)
     _summ_txt = (writing.get("news_summary","") or writing.get("subheadline","")).strip()
-    nar_summ  = P(_summ_txt[:200], sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
+    nar_summ  = P(_summ_txt[:600], sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
     nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
     nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
@@ -2343,7 +2379,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
         tf          = int(cotd.get("timeframe_days", 60))
-        reason_text = (cotd.get("reason","") or "")[:160]
+        reason_text = (cotd.get("reason","") or "")[:350]
         cotd_flows += [
             P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
             Spacer(1, 0.04*cm),

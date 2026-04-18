@@ -611,6 +611,289 @@ def render_morning_call(mc: dict):
                             unsafe_allow_html=True)
 
 
+# ── Research Library: multi-file upload & parse ───────────────────────────────
+
+def _pdf_first_page_text(pdf_bytes: bytes) -> str:
+    """Quick text extract from first 2 pages for type detection."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            return " ".join((pdf.pages[i].extract_text() or "") for i in range(min(2, len(pdf.pages))))
+    except Exception:
+        return ""
+
+
+def detect_pdf_type(pdf_bytes: bytes, filename: str) -> str:
+    """Detect what kind of research document this is."""
+    fn = filename.lower()
+    text = _pdf_first_page_text(pdf_bytes).lower()
+    if "equity coverage universe" in text or "equity_coverage" in fn:
+        return "equity_coverage"
+    if ("morning call" in text or "morning_call" in fn or
+            ("bank of singapore" in text and ("us\n" in text or "europe\n" in text))):
+        return "morning_call"
+    if "fixed income" in text and ("coverage universe" in text or "bond list" in text):
+        return "fixed_income_coverage"
+    if "focus list" in text or ("preferred" in text and "fixed income" in text):
+        return "preferred_fi"
+    if "monthly investment guide" in text or "building resilience" in text or "wealth equation" in text:
+        return "monthly_guide"
+    return "generic_research"
+
+
+def parse_equity_universe(pdf_bytes: bytes) -> dict:
+    """Parse the BOS Equity Coverage Universe PDF into a structured stock list."""
+    try:
+        import pdfplumber
+    except ImportError:
+        return {"error": "pdfplumber not installed", "stocks": []}
+
+    stocks = []
+    known_regions = {"NORTH AMERICA","EUROPE","ASIA PACIFIC","GREATER CHINA",
+                     "SINGAPORE","INDONESIA","JAPAN","LATIN AMERICA","MIDDLE EAST"}
+    known_ratings = {"Buy","Hold","Sell","UR","Restricted","NC"}
+    date_str = ""
+
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            # Date from first page
+            p0 = pdf.pages[0].extract_text() or ""
+            dm = re.search(r'\d{1,2}\s+\w+\s+\d{4}', p0)
+            if dm:
+                date_str = dm.group(0)
+
+            current_region = ""
+            current_sector = ""
+
+            for page in pdf.pages[2:]:   # skip intro pages
+                tables = page.extract_tables() or []
+                for table in tables:
+                    for row in table:
+                        if not row or not row[0]:
+                            continue
+                        cells = [str(c or "").strip() for c in row]
+                        name   = cells[0]
+                        ticker = cells[2] if len(cells) > 2 else ""
+                        rating = cells[4] if len(cells) > 4 else ""
+
+                        # Detect region/sector headers
+                        if name.upper() in known_regions:
+                            current_region = name.title(); current_sector = ""; continue
+                        if (not ticker and rating not in known_ratings
+                                and name and not name[0].isdigit()
+                                and name not in ("Company Name","Moat","Ticker")):
+                            # likely a sector header
+                            current_sector = name; continue
+
+                        if ticker and rating in known_ratings and name.isupper():
+                            def _f(idx):
+                                return cells[idx] if len(cells) > idx else ""
+                            stocks.append({
+                                "region":      current_region,
+                                "sector":      current_sector,
+                                "name":        name,
+                                "ticker":      ticker,
+                                "mkt_cap":     _f(3),
+                                "rating":      rating,
+                                "currency":    _f(5),
+                                "price":       _f(6),
+                                "fair_value":  _f(7),
+                                "upside":      _f(8),
+                                "div_yield":   _f(9),
+                                "pe":          _f(10),
+                                "pb":          _f(11),
+                                "eps_gr":      _f(12),
+                                "roe":         _f(13),
+                                "risk":        _f(14),
+                                "ytd":         _f(15),
+                                "esg":         _f(16),
+                                "uncertainty": _f(18),
+                            })
+    except Exception as e:
+        return {"error": str(e), "stocks": stocks, "date": date_str}
+
+    return {"stocks": stocks, "date": date_str, "error": None}
+
+
+def parse_generic_research(pdf_bytes: bytes, filename: str) -> dict:
+    """Extract text from any PDF and return structured summary."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            pages_text = []
+            for page in pdf.pages[:20]:   # limit to 20 pages
+                t = page.extract_text() or ""
+                if t.strip():
+                    pages_text.append(t)
+            full_text = "\n".join(pages_text)
+            return {
+                "filename": filename,
+                "pages": len(pdf.pages),
+                "text": full_text[:8000],   # cap for display
+                "error": None,
+            }
+    except Exception as e:
+        return {"filename": filename, "pages": 0, "text": "", "error": str(e)}
+
+
+def auto_detect_and_parse(pdf_bytes: bytes, filename: str) -> dict:
+    """Route PDF to correct parser based on content detection."""
+    doc_type = detect_pdf_type(pdf_bytes, filename)
+    if doc_type == "morning_call":
+        result = parse_morning_call(pdf_bytes)
+    elif doc_type == "equity_coverage":
+        result = parse_equity_universe(pdf_bytes)
+    else:
+        result = parse_generic_research(pdf_bytes, filename)
+    result["_doc_type"] = doc_type
+    result["_filename"] = filename
+    return result
+
+
+def _ticker_to_yahoo_url(ticker: str) -> str:
+    """Convert BOS ticker format (e.g. 'META US', '1698 HK') to Yahoo Finance URL."""
+    parts = ticker.strip().split()
+    if len(parts) < 2:
+        return f"https://finance.yahoo.com/quote/{ticker.strip()}"
+    sym, mkt = parts[0], parts[-1].upper()
+    suffix_map = {
+        "US": "",    "HK": ".HK", "JP": ".T",  "LN": ".L",
+        "GY": ".DE", "SP": ".SI", "ID": ".JK", "AU": ".AX",
+        "SW": ".SW", "FP": ".PA", "IM": ".MI", "SQ": ".SI",
+    }
+    suffix = suffix_map.get(mkt, f".{mkt}")
+    return f"https://finance.yahoo.com/quote/{sym}{suffix}"
+
+
+def _ticker_to_morningstar_url(ticker: str) -> str:
+    """Build Morningstar search URL for a ticker."""
+    sym = ticker.strip().split()[0]
+    return f"https://www.morningstar.com/search?query={sym}"
+
+
+def render_equity_universe(data: dict):
+    """Render the equity coverage universe as a filterable table."""
+    stocks = data.get("stocks", [])
+    date_str = data.get("date", "")
+    if not stocks:
+        st.warning("No stock data extracted.")
+        return
+
+    df = pd.DataFrame(stocks)
+
+    # Add links
+    df["yahoo_url"]      = df["ticker"].apply(_ticker_to_yahoo_url)
+    df["morningstar_url"] = df["ticker"].apply(_ticker_to_morningstar_url)
+
+    # Numeric conversion
+    for col in ["upside", "div_yield", "pe", "ytd", "mkt_cap"]:
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",","").str.replace("%",""), errors="coerce")
+
+    st.markdown(f"**📊 Equity Coverage Universe** — {date_str} · {len(df):,} stocks")
+
+    # Summary stats
+    rating_counts = df["rating"].value_counts()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🟢 Buy",  int(rating_counts.get("Buy", 0)))
+    c2.metric("🟡 Hold", int(rating_counts.get("Hold", 0)))
+    c3.metric("🔴 Sell", int(rating_counts.get("Sell", 0)))
+    c4.metric("Total",   len(df))
+
+    st.markdown("---")
+
+    # Filters
+    fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
+    with fc1:
+        sel_rating = st.multiselect("Rating", ["Buy","Hold","Sell","UR"],
+                                    default=["Buy"], key="eq_rating_filter")
+    with fc2:
+        regions = sorted(df["region"].dropna().unique())
+        sel_region = st.multiselect("Region", regions, default=[], key="eq_region_filter")
+    with fc3:
+        sectors = sorted(df["sector"].dropna().unique())
+        sel_sector = st.multiselect("Sector", sectors, default=[], key="eq_sector_filter")
+    with fc4:
+        search = st.text_input("Search name / ticker", key="eq_search")
+
+    # Apply filters
+    fdf = df.copy()
+    if sel_rating:
+        fdf = fdf[fdf["rating"].isin(sel_rating)]
+    if sel_region:
+        fdf = fdf[fdf["region"].isin(sel_region)]
+    if sel_sector:
+        fdf = fdf[fdf["sector"].isin(sel_sector)]
+    if search:
+        mask = (fdf["name"].str.contains(search.upper(), na=False) |
+                fdf["ticker"].str.contains(search.upper(), na=False))
+        fdf = fdf[mask]
+
+    # Sort by upside descending
+    fdf = fdf.sort_values("upside", ascending=False, na_position="last")
+
+    # Display columns
+    disp = fdf[["ticker","name","region","sector","rating","currency",
+                "price","fair_value","upside","div_yield","pe","ytd","uncertainty",
+                "yahoo_url","morningstar_url"]].copy()
+    disp.columns = ["Ticker","Company","Region","Sector","Rating","Ccy",
+                    "Price","Fair Value","Upside %","Div Yld %","P/E","YTD %","Risk",
+                    "Yahoo Finance","Morningstar"]
+    disp = disp.reset_index(drop=True)
+
+    st.dataframe(
+        disp,
+        use_container_width=True,
+        height=500,
+        hide_index=True,
+        column_config={
+            "Upside %":     st.column_config.NumberColumn(format="%.0f%%"),
+            "Div Yld %":    st.column_config.NumberColumn(format="%.1f%%"),
+            "P/E":          st.column_config.NumberColumn(format="%.1f"),
+            "YTD %":        st.column_config.NumberColumn(format="%.1f%%"),
+            "Rating":       st.column_config.TextColumn(width="small"),
+            "Yahoo Finance":  st.column_config.LinkColumn("Yahoo Finance",  display_text="📈 Quote"),
+            "Morningstar":    st.column_config.LinkColumn("Morningstar",    display_text="⭐ Research"),
+        }
+    )
+    st.caption(f"Showing {len(fdf):,} of {len(df):,} stocks · "
+               "BOS individual reports require portal login · Morningstar links open free research page")
+
+
+def render_generic_research(data: dict):
+    """Render a generic research PDF."""
+    filename = data.get("_filename", "Document")
+    pages = data.get("pages", 0)
+    text = data.get("text", "")
+    st.markdown(f"**📄 {filename}** — {pages} pages")
+    if text:
+        # Show first ~600 chars as preview
+        preview = " ".join(text[:600].split())
+        st.markdown(f"<div style='font-size:11px;color:#475467;line-height:1.5;'>"
+                    f"{preview}…</div>", unsafe_allow_html=True)
+        with st.expander("Full extracted text"):
+            st.text_area("", text, height=400, key=f"txt_{filename[:20]}")
+
+
+def render_research_library():
+    """Render all uploaded research documents."""
+    docs = st.session_state.get("research_docs", {})
+    if not docs:
+        return
+
+    with st.expander(f"📚 Research Library — {len(docs)} document(s)", expanded=True):
+        tabs = st.tabs([d.get("_filename", f"Doc {i+1}")[:30]
+                        for i, d in enumerate(docs.values())])
+        for tab, doc in zip(tabs, docs.values()):
+            with tab:
+                dtype = doc.get("_doc_type", "generic_research")
+                if dtype == "morning_call":
+                    render_morning_call(doc)
+                elif dtype == "equity_coverage":
+                    render_equity_universe(doc)
+                else:
+                    render_generic_research(doc)
+
+
 # ── RSS feeds: free, no API key needed ───────────────────────────────────────
 RSS_FEEDS = [
     ("Reuters",      "https://feeds.reuters.com/reuters/businessNews"),
@@ -2622,24 +2905,34 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("**📄 Morning Call PDF**")
-    mc_file = st.file_uploader(
-        "Upload today's Morning Call", type=["pdf"],
-        key="morning_call_upload",
-        help="Bank of Singapore or similar daily briefing PDF",
+    st.markdown("**📚 Research Library**")
+    st.caption("Upload any PDFs: Morning Call, Equity Universe, Fixed Income, reports…")
+    uploaded_files = st.file_uploader(
+        "Drop PDFs here", type=["pdf"],
+        accept_multiple_files=True,
+        key="research_uploads",
     )
-    if mc_file is not None:
-        mc_bytes = mc_file.read()
-        mc_data  = parse_morning_call(mc_bytes)
-        st.session_state["morning_call"] = mc_data
-        if mc_data.get("error"):
-            st.warning(f"⚠ {mc_data['error']}")
-        else:
-            rec = mc_data.get("recommendation_changes", {})
-            n_rec = sum(len(v) for v in rec.values())
-            n_regions = len(mc_data.get("regional_summaries", {}))
-            st.success(f"✅ {mc_data.get('date','Morning Call')} — "
-                       f"{n_regions} regions, {n_rec} rec changes")
+    if uploaded_files:
+        if "research_docs" not in st.session_state:
+            st.session_state["research_docs"] = {}
+        new_count = 0
+        for f in uploaded_files:
+            if f.name not in st.session_state["research_docs"]:
+                pdf_bytes = f.read()
+                doc = auto_detect_and_parse(pdf_bytes, f.name)
+                st.session_state["research_docs"][f.name] = doc
+                new_count += 1
+        docs = st.session_state.get("research_docs", {})
+        for fname, doc in docs.items():
+            dtype = doc.get("_doc_type","generic")
+            icon = {"morning_call":"🏦","equity_coverage":"📊",
+                    "fixed_income_coverage":"📈","preferred_fi":"⭐",
+                    "monthly_guide":"📘"}.get(dtype,"📄")
+            err = " ⚠️" if doc.get("error") else " ✅"
+            st.caption(f"{icon} {fname[:35]}{err}")
+        if st.button("🗑 Clear library", use_container_width=True):
+            st.session_state["research_docs"] = {}
+            st.rerun()
 
     st.markdown("---")
     generate = st.button("▶ Generate Brief", type="primary", use_container_width=True)
@@ -2763,10 +3056,9 @@ else:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── 3b. Morning Call (Bank of Singapore) ─────────────────────────────────
-    mc = st.session_state.get("morning_call")
-    if mc:
-        render_morning_call(mc)
+    # ── 3b. Research Library (Morning Call, Equity Universe, etc.) ───────────
+    render_research_library()
+    if st.session_state.get("research_docs"):
         st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 4. Main cross-asset chart + Chart of the Day ─────────────────────────

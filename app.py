@@ -1,9 +1,11 @@
 import os
+import re
 import json
 import time
 from io import BytesIO
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -405,6 +407,210 @@ def load_news_marketaux(count):
         return pd.DataFrame()
 
 
+# ── Trusted financial news domains (allowlist) ───────────────────────────────
+_FINANCIAL_DOMAINS = {
+    "reuters.com", "marketwatch.com", "wsj.com", "yahoo.com", "finance.yahoo.com",
+    "cnbc.com", "bloomberg.com", "ft.com", "barrons.com", "investing.com",
+    "seekingalpha.com", "thestreet.com", "businessinsider.com", "fortune.com",
+    "economist.com", "morningstar.com", "financialtimes.com", "apnews.com",
+    "axios.com", "politico.com", "thehill.com", "bbc.com", "bbc.co.uk",
+}
+
+def _is_financial_url(url: str) -> bool:
+    """Return True only if the URL belongs to a trusted financial/news domain."""
+    if not url:
+        return True
+    try:
+        domain = urlparse(url.lower()).netloc.lstrip("www.")
+        return any(domain == d or domain.endswith("." + d) for d in _FINANCIAL_DOMAINS)
+    except Exception:
+        return True
+
+
+# ── Morning Call PDF parser ───────────────────────────────────────────────────
+def parse_morning_call(pdf_bytes: bytes) -> dict:
+    """Parse Bank of Singapore (or similar) Morning Call PDF.
+    Extracts: date, regional summaries (US/Europe/Asia), equity viewpoints,
+    fixed income bullets, FX views, and recommendation changes table.
+    """
+    result = {
+        "date": "", "source": "Morning Call",
+        "regional_summaries": {}, "equity_viewpoints": [],
+        "fixed_income": [], "fx_views": [],
+        "recommendation_changes": {"upgrades": [], "downgrades": [], "fair_value_changes": []},
+        "error": None,
+    }
+    try:
+        import pdfplumber
+    except ImportError:
+        result["error"] = "pdfplumber not installed — run: pip install pdfplumber"
+        return result
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            pages_text, all_tables = [], []
+            for page in pdf.pages:
+                t = page.extract_text() or ""
+                pages_text.append(t)
+                tbls = page.extract_tables() or []
+                all_tables.extend(tbls)
+            full = "\n".join(pages_text)
+
+            # ── Date ──────────────────────────────────────────────────────────
+            dm = re.search(r'(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\d+\s+\w+\s+\d{4}', full)
+            if dm:
+                result["date"] = dm.group(0)
+
+            # ── Regional summaries ────────────────────────────────────────────
+            region_bounds = [
+                ("US",           ["Europe", "Asia Pacific", "MONTHLY", "INVESTMENT VIEWPOINTS"]),
+                ("Europe",       ["Asia Pacific", "MONTHLY", "INVESTMENT VIEWPOINTS"]),
+                ("Asia Pacific", ["MONTHLY", "INVESTMENT VIEWPOINTS", "Fixed income"]),
+            ]
+            for region, stops in region_bounds:
+                stop_pat = "|".join(re.escape(s) for s in stops)
+                m = re.search(rf'(?:^|\n){re.escape(region)}\s*\n(.*?)(?={stop_pat})', full, re.DOTALL)
+                if m:
+                    txt = re.sub(r'\s+', ' ', m.group(1)).strip()[:1200]
+                    result["regional_summaries"][region] = txt
+
+            # ── Investment Viewpoints subsections ────────────────────────────
+            def extract_bullets(header, stops):
+                stop_pat = "|".join(re.escape(s) for s in stops)
+                m = re.search(rf'{re.escape(header)}\s*\n(.*?)(?={stop_pat})', full, re.DOTALL)
+                if not m:
+                    return []
+                raw = m.group(1)
+                parts = [re.sub(r'\s+', ' ', b).strip() for b in re.split(r'[•·]\s*', raw) if len(b.strip()) > 30]
+                return parts[:6]
+
+            result["equity_viewpoints"] = extract_bullets(
+                "Equities", ["Fixed income", "Foreign exchange", "INVESTMENT IDEAS", "LATEST RECOMMENDATION"])
+            result["fixed_income"] = extract_bullets(
+                "Fixed income", ["Foreign exchange", "INVESTMENT IDEAS", "LATEST RECOMMENDATION"])
+            result["fx_views"] = extract_bullets(
+                "Foreign exchange", ["INVESTMENT IDEAS", "LATEST RECOMMENDATION", "Equities\n"])
+
+            # ── Recommendation changes table ──────────────────────────────────
+            rec = result["recommendation_changes"]
+            for table in all_tables:
+                if not table or len(table) < 2:
+                    continue
+                flat = " ".join(str(c or "") for row in table for c in row).lower()
+                if not any(kw in flat for kw in ["buy", "sell", "hold", "upgrade", "downgrade", "nc"]):
+                    continue
+                current = None
+                for row in table:
+                    if not row:
+                        continue
+                    cells = [str(c or "").strip() for c in row]
+                    row_str = " ".join(cells).lower()
+                    if "upgrades" in row_str and len(row_str) < 30:
+                        current = "upgrades"; continue
+                    if "downgrades" in row_str and len(row_str) < 30:
+                        current = "downgrades"; continue
+                    if "fair value" in row_str and len(row_str) < 40:
+                        current = "fair_value_changes"; continue
+                    if current and cells[0] and cells[0].lower() not in ("name", "legend", "note", ""):
+                        non_empty = [c for c in cells if c]
+                        if len(non_empty) >= 3:
+                            rec[current].append({
+                                "name":       cells[0],
+                                "date":       cells[1] if len(cells) > 1 else "",
+                                "price":      cells[2] if len(cells) > 2 else "",
+                                "currency":   cells[3] if len(cells) > 3 else "",
+                                "rating_old": cells[4] if len(cells) > 4 else "",
+                                "rating_new": cells[5] if len(cells) > 5 else "",
+                                "fv_old":     cells[6] if len(cells) > 6 else "",
+                                "fv_new":     cells[7] if len(cells) > 7 else "",
+                            })
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def render_morning_call(mc: dict):
+    """Render parsed Morning Call data as a Streamlit section."""
+    if not mc:
+        return
+    date_str = mc.get("date", "")
+    title = "🏦 Morning Call" + (f" — {date_str}" if date_str else "")
+    with st.expander(title, expanded=True):
+        if mc.get("error"):
+            st.warning(f"Parse issue: {mc['error']}")
+
+        # Regional summaries
+        summaries = mc.get("regional_summaries", {})
+        if summaries:
+            st.markdown("**🌍 Regional Summaries**")
+            cols = st.columns(len(summaries))
+            for i, (region, text) in enumerate(summaries.items()):
+                with cols[i]:
+                    st.markdown(f"<div style='font-size:11.5px;font-weight:700;color:#103B73;"
+                                f"margin-bottom:4px;'>{region}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px;line-height:1.55;color:#334155;'>"
+                                f"{text}</div>", unsafe_allow_html=True)
+            st.markdown("---")
+
+        # Recommendation changes
+        rec = mc.get("recommendation_changes", {})
+        has_recs = any(rec.get(k) for k in ["upgrades", "downgrades", "fair_value_changes"])
+        if has_recs:
+            st.markdown("**📊 Latest Recommendation Changes**")
+            for section, label, bg in [
+                ("upgrades",           "⬆ Upgrades",           "#E8F5E9"),
+                ("downgrades",         "⬇ Downgrades",         "#FFEBEE"),
+                ("fair_value_changes", "💰 Fair Value Changes", "#E3F2FD"),
+            ]:
+                items = rec.get(section, [])
+                if not items:
+                    continue
+                st.markdown(
+                    f"<div style='background:{bg};padding:3px 8px;border-radius:4px;"
+                    f"font-weight:600;font-size:11.5px;margin:6px 0 2px;'>{label}</div>",
+                    unsafe_allow_html=True)
+                rows = []
+                for it in items:
+                    old_r, new_r = it.get("rating_old",""), it.get("rating_new","")
+                    old_fv, new_fv = it.get("fv_old",""), it.get("fv_new","")
+                    rows.append({
+                        "Company":    it.get("name",""),
+                        "Price":      f"{it.get('currency','')} {it.get('price','')}".strip(),
+                        "Rating":     f"{old_r} → {new_r}" if new_r and new_r != "NC" else old_r,
+                        "Fair Value": f"{old_fv} → {new_fv}" if new_fv and new_fv != "NC" else old_fv,
+                    })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                 hide_index=True, height=min(36 * len(rows) + 40, 220))
+            st.markdown("---")
+
+        # FX views + Fixed income side by side
+        fx = mc.get("fx_views", [])
+        fi = mc.get("fixed_income", [])
+        if fx or fi:
+            c1, c2 = st.columns(2)
+            with c1:
+                if fx:
+                    st.markdown("**💱 FX Views**")
+                    for v in fx:
+                        st.markdown(f"<div style='font-size:11px;margin-bottom:5px;'>• {v}</div>",
+                                    unsafe_allow_html=True)
+            with c2:
+                if fi:
+                    st.markdown("**📈 Fixed Income**")
+                    for v in fi[:5]:
+                        st.markdown(f"<div style='font-size:11px;margin-bottom:5px;'>• {v}</div>",
+                                    unsafe_allow_html=True)
+            st.markdown("---")
+
+        # Equity viewpoints
+        ev = mc.get("equity_viewpoints", [])
+        if ev:
+            st.markdown("**📈 Equity Viewpoints**")
+            for v in ev:
+                st.markdown(f"<div style='font-size:11px;margin-bottom:6px;'>• {v}</div>",
+                            unsafe_allow_html=True)
+
+
 # ── RSS feeds: free, no API key needed ───────────────────────────────────────
 RSS_FEEDS = [
     ("Reuters",      "https://feeds.reuters.com/reuters/businessNews"),
@@ -438,6 +644,10 @@ def load_news_rss(max_per_feed: int = 8) -> pd.DataFrame:
                 summary  = (entry.get("summary") or "").strip()
                 # Strip any HTML tags from summary
                 summary  = summary.replace("<b>","").replace("</b>","").replace("<p>","").replace("</p>","")
+
+                # Only allow articles from known financial news domains
+                if link and not _is_financial_url(link):
+                    continue
 
                 if headline:
                     rows.append({
@@ -631,10 +841,27 @@ def load_news(count=NEWS_COUNT):
     def score_row(row):
         h = (row.get("headline") or "").lower()
         score = 0
-        for kw in ["fed","ecb","inflation","yield","treasury","oil","iran","war","ceasefire",
-                   "china","tariff","earnings","economy","rates","dollar","euro","franc","bitcoin","gold","snb"]:
+        # High-importance macro/market keywords (score 3)
+        for kw in ["fed","federal reserve","fomc","powell","waller","ecb","boe","snb","rba","boj",
+                   "inflation","cpi","ppi","gdp","rate cut","rate hike","interest rate",
+                   "treasury","yield","tariff","trade war","sanctions","iran","war","ceasefire",
+                   "china","oil","gold","dollar","euro","franc"]:
             if kw in h:
-                score += 2
+                score += 3
+        # Standard financial keywords (score 1)
+        for kw in ["economy","rates","earnings","market","equity","stock","nasdaq","s&p","bitcoin","silver","copper"]:
+            if kw in h:
+                score += 1
+        # Boost premium sources (FT, Bloomberg emails are high-quality)
+        src = (row.get("source") or "").lower()
+        if "financial times" in src or "bloomberg" in src:
+            score += 4
+        # Penalise minor single-company stories (small/unknown companies)
+        minor_signals = ["q1 earnings", "q2 earnings", "q3 earnings", "q4 earnings",
+                         "raises dividend", "plans delisting", "reports revenue",
+                         "charged with fraud", "bankrupt"]
+        if any(s in h for s in minor_signals):
+            score -= 3
         if row.get("url"):   score += 1
         if row.get("source"): score += 1
         return score
@@ -676,10 +903,11 @@ def load_news(count=NEWS_COUNT):
     df = df.sort_values(by=["score", "published_at"], ascending=[False, False])
     df = df.drop(columns=["headline_key", "score"], errors="ignore")
 
-    # Ensure variety: up to 3 per category, then fill to count
+    # Ensure variety: cap per category (Equities capped at 2 to avoid minor company noise)
+    cat_caps = {"Macro / Rates": 4, "Geopolitics": 3, "Equities": 2, "Commodities": 2, "Crypto": 1, "Other": 1}
     final_rows, seen = [], set()
     for cat in ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]:
-        for _, row in df[df["category"] == cat].head(3).iterrows():
+        for _, row in df[df["category"] == cat].head(cat_caps.get(cat, 2)).iterrows():
             if row["headline"] not in seen:
                 seen.add(row["headline"])
                 final_rows.append(row)
@@ -2394,6 +2622,26 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
+    st.markdown("**📄 Morning Call PDF**")
+    mc_file = st.file_uploader(
+        "Upload today's Morning Call", type=["pdf"],
+        key="morning_call_upload",
+        help="Bank of Singapore or similar daily briefing PDF",
+    )
+    if mc_file is not None:
+        mc_bytes = mc_file.read()
+        mc_data  = parse_morning_call(mc_bytes)
+        st.session_state["morning_call"] = mc_data
+        if mc_data.get("error"):
+            st.warning(f"⚠ {mc_data['error']}")
+        else:
+            rec = mc_data.get("recommendation_changes", {})
+            n_rec = sum(len(v) for v in rec.values())
+            n_regions = len(mc_data.get("regional_summaries", {}))
+            st.success(f"✅ {mc_data.get('date','Morning Call')} — "
+                       f"{n_regions} regions, {n_rec} rec changes")
+
+    st.markdown("---")
     generate = st.button("▶ Generate Brief", type="primary", use_container_width=True)
 
 if generate:
@@ -2514,6 +2762,12 @@ else:
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 3b. Morning Call (Bank of Singapore) ─────────────────────────────────
+    mc = st.session_state.get("morning_call")
+    if mc:
+        render_morning_call(mc)
+        st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 4. Main cross-asset chart + Chart of the Day ─────────────────────────
     chart_col, cotd_col = st.columns([3, 2], gap="medium")

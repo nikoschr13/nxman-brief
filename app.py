@@ -1850,12 +1850,12 @@ def pdf_chart_subset(weekly_df):
 def render_combined_card(item, snapshot_row, history, chart_key):
     """Single Plotly figure per card: coloured border + metric annotations + sparkline.
 
-    Layout: height=215, margin_t=95, margin_b=20
-      plot-area top  = (215-95)/215 = 0.558  → annotations sit at y > 0.56
-      plot-area bot  = 20/215       = 0.093
-    3 cards per row gives ~33 % screen width — enough breathing room.
+    Layout: height=155, margin_t=62, margin_b=14
+      plot-area top  = (155-62)/155 = 0.600  → annotations sit at y > 0.60
+      plot-area bot  = 14/155       = 0.090
+    4 cards per row gives ~25 % screen width — compact grid.
     """
-    H, MT, MB, ML, MR = 215, 95, 20, 10, 8
+    H, MT, MB, ML, MR = 155, 62, 14, 8, 6
 
     if snapshot_row.empty:
         fig = go.Figure()
@@ -1863,9 +1863,9 @@ def render_combined_card(item, snapshot_row, history, chart_key):
             height=H, margin=dict(l=ML, r=MR, t=MT, b=MB),
             plot_bgcolor="#F8FAFC", paper_bgcolor="#F8FAFC",
             showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False),
-            annotations=[dict(x=0.5, y=0.75, xref="paper", yref="paper",
+            annotations=[dict(x=0.5, y=0.82, xref="paper", yref="paper",
                               text=f"<b>{item['label']}</b><br><span style='color:#9AA8B7'>No data</span>",
-                              font=dict(size=11, color="#475467"), showarrow=False)],
+                              font=dict(size=9, color="#475467"), showarrow=False)],
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=chart_key)
         return
@@ -1940,32 +1940,32 @@ def render_combined_card(item, snapshot_row, history, chart_key):
         showlegend=False,
         xaxis=dict(
             showgrid=False, showline=False,
-            tickformat="%d %b", tickfont=dict(size=8, color="#9AA8B7"),
-            nticks=4, showticklabels=True, automargin=True,
+            tickformat="%d %b", tickfont=dict(size=7, color="#9AA8B7"),
+            nticks=3, showticklabels=True, automargin=True,
         ),
         yaxis=dict(
             showgrid=False, showline=False,
             showticklabels=False,   # hide y-axis numbers — sparkline is for shape only
             automargin=False,
         ),
-        # All annotation y values > 0.56 (above plot area top at 0.555)
+        # All annotation y values > 0.60 (above plot area top at 0.600)
         annotations=[
-            dict(x=0.04, y=0.98, xref="paper", yref="paper",
+            dict(x=0.04, y=0.99, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"<b>{lbl}</b>",
-                 font=dict(size=10, color="#475467"), showarrow=False),
-            dict(x=0.04, y=0.87, xref="paper", yref="paper",
+                 font=dict(size=9, color="#475467"), showarrow=False),
+            dict(x=0.04, y=0.90, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"<b>{value_str}</b>{extra}",
-                 font=dict(size=21, color="#0F2D52"), showarrow=False),
-            dict(x=0.04, y=0.71, xref="paper", yref="paper",
+                 font=dict(size=16, color="#0F2D52"), showarrow=False),
+            dict(x=0.04, y=0.76, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"<b>1D</b> {d1_str}",
-                 font=dict(size=11, color="#344054"), showarrow=False),
-            dict(x=0.04, y=0.61, xref="paper", yref="paper",
+                 font=dict(size=10, color="#344054"), showarrow=False),
+            dict(x=0.04, y=0.67, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"YTD  {ytd_str}",
-                 font=dict(size=10, color="#667085"), showarrow=False),
+                 font=dict(size=9, color="#667085"), showarrow=False),
         ],
         shapes=[dict(
             type="rect", xref="paper", yref="paper",

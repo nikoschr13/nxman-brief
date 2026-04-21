@@ -786,6 +786,138 @@ def auto_detect_and_parse(pdf_bytes: bytes, filename: str) -> dict:
     return result
 
 
+# ── Research context helpers ───────────────────────────────────────────────────
+
+def get_research_context(research_docs: dict) -> str:
+    """Distil uploaded research docs into a concise text block for the AI prompt."""
+    if not research_docs:
+        return ""
+    parts = []
+    for fname, doc in research_docs.items():
+        dtype = doc.get("_doc_type", "generic_research")
+        short = fname[:30]
+        if dtype == "morning_call":
+            # Regional summaries
+            for region, txt in (doc.get("regional_summaries") or {}).items():
+                if txt:
+                    parts.append(f"[{short}|{region}] {txt[:250]}")
+            # Equity viewpoints
+            for vp in (doc.get("equity_viewpoints") or [])[:4]:
+                parts.append(f"[{short}|Equity] {vp[:200]}")
+            # Recommendation changes
+            rec = doc.get("recommendation_changes") or {}
+            for upg in (rec.get("upgrades") or [])[:3]:
+                parts.append(f"[{short}|UPGRADE] {upg.get('name','')} → {upg.get('rating_new','')}")
+            for dwn in (rec.get("downgrades") or [])[:3]:
+                parts.append(f"[{short}|DOWNGRADE] {dwn.get('name','')} → {dwn.get('rating_new','')}")
+        elif dtype == "equity_coverage":
+            stocks = doc.get("stocks") or []
+            buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:8]
+            sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:5]
+            if buys:
+                parts.append(f"[{short}|BUY rated] {', '.join(buys)}")
+            if sells:
+                parts.append(f"[{short}|SELL rated] {', '.join(sells)}")
+        else:
+            text = doc.get("text") or ""
+            if text:
+                parts.append(f"[{short}] {' '.join(text[:500].split())}")
+    return "\n".join(parts[:25])
+
+
+def save_research_snapshot(research_docs: dict, date_str: str) -> None:
+    """Save today's equity ratings + recommendation changes to the Gist for tracking."""
+    if not research_docs or not GITHUB_TOKEN or not GITHUB_GIST_ID:
+        return
+    try:
+        snapshot = {"date": date_str, "docs": {}}
+        for fname, doc in research_docs.items():
+            dtype = doc.get("_doc_type", "generic_research")
+            entry: dict = {"type": dtype}
+            if dtype == "equity_coverage":
+                entry["stocks"] = [
+                    {"name": s.get("name"), "ticker": s.get("ticker"),
+                     "rating": s.get("rating"), "fair_value": s.get("fair_value")}
+                    for s in (doc.get("stocks") or [])
+                ]
+            elif dtype == "morning_call":
+                rec = doc.get("recommendation_changes") or {}
+                entry["upgrades"]   = rec.get("upgrades", [])
+                entry["downgrades"] = rec.get("downgrades", [])
+                entry["fv_changes"] = rec.get("fair_value_changes", [])
+            snapshot["docs"][fname] = entry
+
+        all_snaps = _load_gist_all()
+        key = f"research_{date_str}"
+        all_snaps[key] = snapshot
+        _save_gist_all(all_snaps)
+    except Exception:
+        pass
+
+
+def diff_research_snapshots(today_docs: dict, today_str: str) -> list:
+    """Compare today's research against yesterday's. Returns list of change dicts."""
+    if not GITHUB_TOKEN or not GITHUB_GIST_ID:
+        return []
+    try:
+        import datetime as _dt
+        yesterday = (pd.Timestamp(today_str) - pd.Timedelta(days=1)).date().isoformat()
+        all_snaps = _load_gist_all()
+        prev = all_snaps.get(f"research_{yesterday}")
+        if not prev:
+            # Try up to 7 days back
+            for d in range(2, 8):
+                day = (pd.Timestamp(today_str) - pd.Timedelta(days=d)).date().isoformat()
+                prev = all_snaps.get(f"research_{day}")
+                if prev:
+                    break
+        if not prev:
+            return []
+
+        changes = []
+        # Build previous rating map: {name -> rating}
+        prev_ratings = {}
+        for fname, entry in (prev.get("docs") or {}).items():
+            if entry.get("type") == "equity_coverage":
+                for s in (entry.get("stocks") or []):
+                    if s.get("name"):
+                        prev_ratings[s["name"]] = {
+                            "rating": s.get("rating"), "fv": s.get("fair_value"), "src": fname}
+
+        # Compare against today
+        for fname, doc in today_docs.items():
+            if doc.get("_doc_type") == "equity_coverage":
+                for s in (doc.get("stocks") or []):
+                    name = s.get("name")
+                    if not name:
+                        continue
+                    prev_info = prev_ratings.get(name)
+                    if prev_info:
+                        old_r = prev_info.get("rating")
+                        new_r = s.get("rating")
+                        old_fv = prev_info.get("fv")
+                        new_fv = s.get("fair_value")
+                        if old_r != new_r:
+                            changes.append({"type": "rating", "name": name,
+                                            "old": old_r, "new": new_r, "src": fname})
+                        elif old_fv and new_fv and old_fv != new_fv:
+                            changes.append({"type": "fv", "name": name,
+                                            "old": old_fv, "new": new_fv, "src": fname})
+            elif doc.get("_doc_type") == "morning_call":
+                rec = doc.get("recommendation_changes") or {}
+                for upg in (rec.get("upgrades") or []):
+                    changes.append({"type": "upgrade", "name": upg.get("name",""),
+                                    "old": upg.get("rating_old",""), "new": upg.get("rating_new",""),
+                                    "src": fname})
+                for dwn in (rec.get("downgrades") or []):
+                    changes.append({"type": "downgrade", "name": dwn.get("name",""),
+                                    "old": dwn.get("rating_old",""), "new": dwn.get("rating_new",""),
+                                    "src": fname})
+        return changes
+    except Exception:
+        return []
+
+
 def _ticker_to_yahoo_url(ticker: str) -> str:
     """Convert BOS ticker format (e.g. 'META US', '1698 HK') to Yahoo Finance URL."""
     parts = ticker.strip().split()
@@ -1402,7 +1534,7 @@ def ai_generate_json(payload: str):
     return None, "AI failed: " + " | ".join(errors[:6])
 
 
-def build_writing(news_df, snapshot, use_gemini):
+def build_writing(news_df, snapshot, use_gemini, research_context=""):
     local_summary = build_local_news_summary(news_df)
 
     fallback = {
@@ -1440,7 +1572,12 @@ def build_writing(news_df, snapshot, use_gemini):
             news_df[["headline", "source", "category"]].fillna("").to_dict(orient="records")
             if news_df is not None and not news_df.empty else []
         )
-        payload = _safe_json_dumps({
+        research_note = (
+            " Where relevant, reference analyst views or rating changes from research_context "
+            "to add depth (e.g. 'BOS upgraded X to Buy' or 'analysts remain cautious on sector Y')."
+            if research_context else ""
+        )
+        payload_dict = {
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
                 "Keys required: headline, subheadline, news_summary, news_bullets. "
@@ -1448,15 +1585,16 @@ def build_writing(news_df, snapshot, use_gemini):
                 "(1) name the event, "
                 "(2) state the market impact using ACTUAL numbers from market_snapshot (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
                 "(3) explain why in plain English, adding a parenthetical clarification for any jargon "
-                "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE) as'). "
-                "Example of the required style: "
-                "'US-Iran peace talks progressed — equities rallied (S&P 500 +0.80%, Nasdaq +1.40%) "
-                "while Treasury yields fell (meaning existing bond PRICES ROSE) as risk appetite improved.' "
-                "Use the actual d1_pct figures from market_snapshot. Be factual and concise. No preamble."
+                "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE) as')."
+                + research_note +
+                " Use the actual d1_pct figures from market_snapshot. Be factual and concise. No preamble."
             ),
             "headlines":       head_rows,
             "market_snapshot": snap_rows,
-        })
+        }
+        if research_context:
+            payload_dict["research_context"] = research_context
+        payload = _safe_json_dumps(payload_dict)
     except Exception as e:
         return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
 
@@ -2181,10 +2319,11 @@ def render_news_bullets(writing, news_df):
                     )
                 with c2:
                     link_md = f"[{headline}]({url})" if url else headline
+                    meta_span = (f'  <span style="color:#9AA8B7;font-size:11px;"> — {meta}</span>'
+                                 if meta else "")
                     st.markdown(
                         f"<div style='padding:2px 0;font-size:12px;line-height:1.4;'>"
-                        f"{link_md}"
-                        f"{'  <span style=\"color:#9AA8B7;font-size:11px;\"> — ' + meta + '</span>' if meta else ''}"
+                        f"{link_md}{meta_span}"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -2211,7 +2350,8 @@ def render_news_bullets(writing, news_df):
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
-              metrics, writing, news_df, status, cotd=None, cotd_png=None, fx_df=None):
+              metrics, writing, news_df, status, cotd=None, cotd_png=None, fx_df=None,
+              research_docs=None):
     """Professional one-page landscape PDF. Max 2 levels of Table nesting."""
     from reportlab.platypus import HRFlowable
     buffer = BytesIO()
@@ -2538,7 +2678,81 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     ]))
     story += [data_r1, Spacer(1, 0.12*cm), data_r2]
 
-    # ── 5. DISCLAIMER ─────────────────────────────────────────────────────────
+    # ── 5. RESEARCH HIGHLIGHTS (if docs uploaded) ─────────────────────────────
+    if research_docs:
+        res_rows = []
+        for fname, doc in research_docs.items():
+            dtype = doc.get("_doc_type", "generic_research")
+            short = _t(fname, 35)
+            if dtype == "morning_call":
+                # Equity viewpoints
+                vps = (doc.get("equity_viewpoints") or [])[:3]
+                for vp in vps:
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P(f"Equities", sz=4.5, col=MID),
+                                     P(_t(vp, 160), sz=4.8, col=TXT)])
+                # Upgrades / Downgrades
+                rec = doc.get("recommendation_changes") or {}
+                for upg in (rec.get("upgrades") or [])[:3]:
+                    label = f"⬆ {upg.get('name','')} {upg.get('rating_old','')}→{upg.get('rating_new','')}"
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P("Upgrade", sz=4.5, col=GRN),
+                                     P(label, sz=4.8, col=TXT)])
+                for dwn in (rec.get("downgrades") or [])[:3]:
+                    label = f"⬇ {dwn.get('name','')} {dwn.get('rating_old','')}→{dwn.get('rating_new','')}"
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P("Downgrade", sz=4.5, col=RED),
+                                     P(label, sz=4.8, col=TXT)])
+            elif dtype == "equity_coverage":
+                stocks = doc.get("stocks") or []
+                buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
+                sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
+                if buys:
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P("Buy", sz=4.5, col=GRN),
+                                     P(", ".join(buys), sz=4.8, col=TXT)])
+                if sells:
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P("Sell", sz=4.5, col=RED),
+                                     P(", ".join(sells), sz=4.8, col=TXT)])
+            else:
+                text = _t((doc.get("text") or "").replace("\n"," "), 200)
+                if text:
+                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                     P("Research", sz=4.5, col=MID),
+                                     P(text, sz=4.8, col=TXT)])
+
+        if res_rows:
+            res_tbl = Table(
+                [[P("Source", fn="Helvetica-Bold", sz=5, col=WHT),
+                  P("Category", fn="Helvetica-Bold", sz=5, col=WHT),
+                  P("Highlights", fn="Helvetica-Bold", sz=5, col=WHT)]] + res_rows,
+                colWidths=[5.5*cm, 2.2*cm, (PW-7.7)*cm],
+            )
+            res_cmds = [
+                ("BACKGROUND",  (0,0), (-1,0), NAV),
+                ("TEXTCOLOR",   (0,0), (-1,0), WHT),
+                ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE",    (0,0), (-1,0), 5),
+                ("LEFTPADDING", (0,0), (-1,-1), 4),
+                ("RIGHTPADDING",(0,0), (-1,-1), 4),
+                ("TOPPADDING",  (0,0), (-1,-1), 2),
+                ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),[WHT, STR]),
+                ("LINEBELOW",   (0,0), (-1,-1), 0.3, RUL),
+                ("VALIGN",      (0,0), (-1,-1), "TOP"),
+            ]
+            res_tbl.setStyle(TableStyle(res_cmds))
+            story += [
+                Spacer(1, 0.1*cm),
+                HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
+                Spacer(1, 0.05*cm),
+                P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
+                Spacer(1, 0.04*cm),
+                res_tbl,
+            ]
+
+    # ── 6. DISCLAIMER ─────────────────────────────────────────────────────────
     disc = ("Disclaimer: This briefing is for informational purposes only and does not "
             "constitute investment advice or a recommendation to buy or sell any financial "
             "instrument. Information is believed reliable but accuracy cannot be guaranteed. "
@@ -2692,7 +2906,9 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
     fx_df          = snapshot[snapshot["group"] == "fx"][["label", "description", "level", "d1", "wtd", "mtd", "ytd"]]
 
     news_df, news_status = load_news()
-    writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag)
+    research_docs    = st.session_state.get("research_docs", {})
+    research_context = get_research_context(research_docs)
+    writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag, research_context)
 
     # Merge Gemini per-article angles into news_df (keyed by headline)
     angles = writing.pop("article_angles", [])
@@ -2904,6 +3120,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         cotd=cotd,
         cotd_png=cotd_png,
         fx_df=base_state.get("fx_df"),
+        research_docs=st.session_state.get("research_docs"),
     )
 
     state = dict(base_state)
@@ -3095,6 +3312,28 @@ else:
     # ── 3b. Research Library (Morning Call, Equity Universe, etc.) ───────────
     render_research_library()
     if st.session_state.get("research_docs"):
+        today_str = pd.Timestamp.today().date().isoformat()
+        # Save snapshot for tracking
+        save_research_snapshot(st.session_state["research_docs"], today_str)
+        # Show changes vs previous day
+        changes = diff_research_snapshots(st.session_state["research_docs"], today_str)
+        if changes:
+            with st.expander(f"📋 Research Changes vs Previous Day ({len(changes)} change{'s' if len(changes)!=1 else ''})", expanded=True):
+                for ch in changes:
+                    ctype = ch.get("type","")
+                    name  = ch.get("name","")
+                    old   = ch.get("old","")
+                    new   = ch.get("new","")
+                    src   = ch.get("src","")[:25]
+                    if ctype in ("upgrade",):
+                        st.markdown(f"🟢 **UPGRADE** {name}: {old} → **{new}** *(from {src})*")
+                    elif ctype in ("downgrade",):
+                        st.markdown(f"🔴 **DOWNGRADE** {name}: {old} → **{new}** *(from {src})*")
+                    elif ctype == "rating":
+                        icon = "🟢" if new in ("Buy",) else ("🔴" if new in ("Sell",) else "🟡")
+                        st.markdown(f"{icon} **RATING CHANGE** {name}: {old} → **{new}** *(from {src})*")
+                    elif ctype == "fv":
+                        st.markdown(f"📌 **FV CHANGE** {name}: {old} → **{new}** *(from {src})*")
         st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 4. Main cross-asset chart + Chart of the Day ─────────────────────────

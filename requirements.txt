@@ -8,3 +8,4 @@ requests
 python-dotenv
 reportlab
 pdfplumber
+kaleido==0.2.1

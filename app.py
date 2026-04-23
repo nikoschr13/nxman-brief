@@ -793,44 +793,66 @@ def auto_detect_and_parse(pdf_bytes: bytes, filename: str) -> dict:
     return result
 
 
-def autoload_research_from_drive(force_refresh: bool = False) -> int:
+def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]:
     """Populate st.session_state['research_docs'] with PDFs pulled from
     Google Drive (SNIPER/Research_Processed + Research_Inbox).
 
+    Errored parses are tracked separately in st.session_state['_drive_research_failed']
+    so we NEVER hand a malformed doc to build_pdf — the PDF render path only
+    ever sees clean, fully-parsed docs.
+
     Runs at most once per session unless force_refresh=True.
-    Returns the number of PDFs newly loaded this call (0 if the library was
-    already seeded from Drive this session, or the loader is unavailable).
+    Returns (loaded_count, failed_count) from this call.
     """
     if _drive_pdf_loader is None:
-        return 0
+        return (0, 0)
 
     # Only pull from Drive once per Streamlit session — users can still upload
     # extras manually, and a 🔄 button lets them force a re-sync explicitly.
     flag = "_drive_research_loaded"
     if st.session_state.get(flag) and not force_refresh:
-        return 0
+        return (0, 0)
 
     try:
         pdfs = _drive_pdf_loader()
     except Exception:
         st.session_state[flag] = True  # don't loop-retry on error
-        return 0
+        return (0, 0)
 
     if "research_docs" not in st.session_state:
         st.session_state["research_docs"] = {}
+    if "_drive_research_failed" not in st.session_state:
+        st.session_state["_drive_research_failed"] = {}
 
-    new_count = 0
+    loaded = 0
+    failed = 0
     for fname, pdf_bytes in (pdfs or {}).items():
-        if force_refresh or fname not in st.session_state["research_docs"]:
-            try:
-                doc = auto_detect_and_parse(pdf_bytes, fname)
-            except Exception as e:
-                doc = {"filename": fname, "error": f"parse failed: {e}", "_doc_type": "generic_research", "_filename": fname}
+        already_loaded = fname in st.session_state["research_docs"]
+        already_failed = fname in st.session_state["_drive_research_failed"]
+        if not force_refresh and (already_loaded or already_failed):
+            continue
+
+        try:
+            doc = auto_detect_and_parse(pdf_bytes, fname)
+        except Exception as e:
+            doc = {"_filename": fname, "error": f"parse failed: {e}"}
+
+        if doc.get("error"):
+            # Record the failure so we can surface it in the sidebar, but do
+            # NOT put it in research_docs — that dict is consumed by build_pdf
+            # and any half-parsed doc will crash the PDF render.
+            st.session_state["_drive_research_failed"][fname] = doc.get("error", "parse failed")
+            # Clean any stale successful copy if this is a force refresh.
+            if force_refresh:
+                st.session_state["research_docs"].pop(fname, None)
+            failed += 1
+        else:
             st.session_state["research_docs"][fname] = doc
-            new_count += 1
+            st.session_state["_drive_research_failed"].pop(fname, None)
+            loaded += 1
 
     st.session_state[flag] = True
-    return new_count
+    return (loaded, failed)
 
 
 # ── Research context helpers ───────────────────────────────────────────────────
@@ -3209,13 +3231,22 @@ with st.sidebar:
 
     # Auto-pull PDFs from Google Drive (SNIPER/Research_Processed + Inbox).
     # This runs once per session; the 🔄 button below forces a re-sync.
-    auto_added = autoload_research_from_drive()
+    loaded, failed = autoload_research_from_drive()
     if _drive_pdf_loader is not None:
         drive_count = len(st.session_state.get("research_docs", {}))
-        if auto_added:
-            st.caption(f"☁️ Auto-loaded {auto_added} PDF(s) from Drive.")
+        failed_docs = st.session_state.get("_drive_research_failed", {})
+        if loaded or failed:
+            parts = []
+            if loaded:
+                parts.append(f"☁️ Auto-loaded {loaded} PDF(s) from Drive")
+            if failed:
+                parts.append(f"⚠️ {failed} failed to parse")
+            st.caption(" · ".join(parts))
         else:
             st.caption(f"☁️ Drive sync: {drive_count} PDF(s) in library.")
+        if failed_docs:
+            for fname, err in list(failed_docs.items())[:5]:
+                st.caption(f"⚠️ {fname[:35]} — {str(err)[:60]}")
         if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
             autoload_research_from_drive(force_refresh=True)
             st.rerun()

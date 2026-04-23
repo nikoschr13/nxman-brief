@@ -7,5 +7,7 @@ reportlab>=4.2
 kaleido>=0.2.1
 yfinance>=0.2.54
 streamlit-autorefresh>=1.0.1
+feedparser>=6.0
+pdfplumber>=0.11
 google-api-python-client>=2.120
 google-auth>=2.29

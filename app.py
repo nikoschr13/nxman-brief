@@ -2599,13 +2599,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         cotd_flows += [
             P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
             Spacer(1, 0.04*cm),
-            P(f"<b>{_t(cotd_label,24)}</b>  \u00b7 {tf} days", sz=7, col=NAV, lead=8.5),
+            P(f"<b>{_xs(_t(cotd_label,24))}</b>  \u00b7 {tf} days", sz=7, col=NAV, lead=8.5),
             Spacer(1, 0.04*cm),
         ]
         if cotd_png:
             cotd_flows.append(Image(BytesIO(cotd_png), width=(COTD_W-0.5)*cm, height=2.4*cm))
             cotd_flows.append(Spacer(1, 0.04*cm))
-        cotd_flows.append(P(reason_text, sz=5.0, col=TXT, lead=6.3))
+        cotd_flows.append(P(_xs(reason_text), sz=5.0, col=TXT, lead=6.3))
     else:
         cotd_flows.append(P(""))
 
@@ -2624,7 +2624,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             except Exception:
                 date_str = e["date"]
             cotd_flows.append(
-                P(f"<b>{date_str}</b>  {e['event']}", sz=5.2, col=TXT, lead=6.5)
+                P(f"<b>{_xs(date_str)}</b>  {_xs(str(e.get('event','')))}", sz=5.2, col=TXT, lead=6.5)
             )
             cotd_flows.append(Spacer(1, 0.025*cm))
 
@@ -2663,7 +2663,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         # Row 1 = column headers
         # Row 2+ = data
         rows = [
-            [P(sec_title, fn="Helvetica-Bold", sz=6.5, col=WHT, lead=8),
+            [P(_xs(sec_title), fn="Helvetica-Bold", sz=6.5, col=WHT, lead=8),
              P(""), P(""), P(""), P("")],
             [P("Instrument", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("Level",      fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
@@ -2691,7 +2691,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             cmds.append(("TEXTCOLOR",  (2,ri+2),(2,ri+2), _pc(d1)))
             cmds.append(("FONTNAME",   (2,ri+2),(2,ri+2), "Helvetica-Bold"))
             rows.append([
-                P(_t(str(row.get("label","")), 22), sz=5.5, col=TXT, lead=7),
+                P(_xs(_t(str(row.get("label","")), 22)), sz=5.5, col=TXT, lead=7),
                 P(_num(row.get("level")),            sz=5.5, col=TXT, lead=7),
                 P(_pct(d1),  sz=5.5, col=_pc(d1),   lead=7),
                 P(_pct(wtd), sz=5.5, col=_pc(wtd),  lead=7),
@@ -2845,58 +2845,22 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         P(disc, sz=4.5, col=GRY, lead=5.8),
     ]
 
-    def _build_with_fallback(story_in):
-        """Build the PDF. If reportlab chokes on XML-unsafe chars inside any
-        Paragraph (stray '&', unmatched '<'/'>' from Gemini or parsed PDFs),
-        retry with every Paragraph's text fully escaped, then finally retry
-        with the research highlights block stripped out entirely."""
-        import re as _re
+    try:
+        doc.build(story)
+    except Exception as e:
+        # Last-ditch: surface the real error as a one-page PDF so the app
+        # doesn't crash and we can see what went wrong. The UI doesn't show
+        # the underlying exception text; embedding it here makes it visible.
         try:
-            doc.build(story_in)
-            return
-        except Exception as e1:
-            # Attempt 2: rebuild every Paragraph with fully escaped text.
-            try:
-                buffer.seek(0); buffer.truncate(0)
-                doc2 = SimpleDocTemplate(buffer, pagesize=A4,
-                    leftMargin=1.0*cm, rightMargin=1.0*cm,
-                    topMargin=0.8*cm, bottomMargin=0.8*cm)
-                def _resanitize(flow):
-                    if isinstance(flow, Paragraph):
-                        raw = getattr(flow, "text", "") or ""
-                        # strip any leftover tags the parser would trip on,
-                        # keeping only raw text for the retry path
-                        plain = _re.sub(r"<[^>]*>", "", raw)
-                        return Paragraph(_xs(plain), flow.style)
-                    if isinstance(flow, Table):
-                        new_rows = []
-                        for row in getattr(flow, "_cellvalues", []) or []:
-                            new_rows.append([_resanitize(c) for c in row])
-                        if new_rows:
-                            t = Table(new_rows, colWidths=flow._colWidths)
-                            try: t.setStyle(flow._bkgrndcmds + flow._linecmds)
-                            except Exception: pass
-                            return t
-                    return flow
-                doc2.build([_resanitize(f) for f in story_in])
-                return
-            except Exception as e2:
-                # Attempt 3: drop the research highlights and disclaimer and
-                # emit a bare Brief so the user still gets their report.
-                buffer.seek(0); buffer.truncate(0)
-                doc3 = SimpleDocTemplate(buffer, pagesize=A4,
-                    leftMargin=1.0*cm, rightMargin=1.0*cm,
-                    topMargin=0.8*cm, bottomMargin=0.8*cm)
-                safe_story = [f for f in story_in if not isinstance(f, Table)]
-                try:
-                    doc3.build(safe_story)
-                except Exception:
-                    # Last-ditch: emit an error page rather than crashing the UI.
-                    doc3.build([Paragraph(
-                        f"PDF render failed: {type(e1).__name__}: {str(e1)[:200]}",
-                        ParagraphStyle("_err", fontName="Helvetica", fontSize=10))])
-
-    _build_with_fallback(story)
+            buffer.seek(0); buffer.truncate(0)
+            doc2 = SimpleDocTemplate(buffer, pagesize=A4,
+                leftMargin=1.0*cm, rightMargin=1.0*cm,
+                topMargin=0.8*cm, bottomMargin=0.8*cm)
+            msg = f"PDF render failed: {type(e).__name__}: {str(e)[:400]}"
+            doc2.build([Paragraph(_xs(msg),
+                ParagraphStyle("_err", fontName="Helvetica", fontSize=10))])
+        except Exception:
+            pass
     return buffer.getvalue()
 
 

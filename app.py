@@ -2757,19 +2757,21 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     # ── 5. RESEARCH HIGHLIGHTS (if docs uploaded) ─────────────────────────────
     if research_docs:
         res_rows = []
-        for fname, doc in research_docs.items():
+        # IMPORTANT: use `rdoc` as the loop variable — `doc` is already the
+        # outer SimpleDocTemplate; shadowing it breaks the final doc.build().
+        for fname, rdoc in research_docs.items():
             try:
-                dtype = doc.get("_doc_type", "generic_research")
+                dtype = rdoc.get("_doc_type", "generic_research")
                 short = _xs(_t(fname, 35))
                 if dtype == "morning_call":
                     # Equity viewpoints
-                    vps = (doc.get("equity_viewpoints") or [])[:3]
+                    vps = (rdoc.get("equity_viewpoints") or [])[:3]
                     for vp in vps:
                         res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
                                          P("Equities", sz=4.5, col=MID),
                                          P(_xs(_t(vp, 160)), sz=4.8, col=TXT)])
                     # Upgrades / Downgrades
-                    rec = doc.get("recommendation_changes") or {}
+                    rec = rdoc.get("recommendation_changes") or {}
                     for upg in (rec.get("upgrades") or [])[:3]:
                         label = f"⬆ {upg.get('name','')} {upg.get('rating_old','')}→{upg.get('rating_new','')}"
                         res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
@@ -2781,7 +2783,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                                          P("Downgrade", sz=4.5, col=RED),
                                          P(_xs(label), sz=4.8, col=TXT)])
                 elif dtype == "equity_coverage":
-                    stocks = doc.get("stocks") or []
+                    stocks = rdoc.get("stocks") or []
                     buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
                     sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
                     if buys:
@@ -2793,7 +2795,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                                          P("Sell", sz=4.5, col=RED),
                                          P(_xs(", ".join(sells)), sz=4.8, col=TXT)])
                 else:
-                    text = _t((doc.get("text") or "").replace("\n"," "), 200)
+                    text = _t((rdoc.get("text") or "").replace("\n"," "), 200)
                     if text:
                         res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
                                          P("Research", sz=4.5, col=MID),

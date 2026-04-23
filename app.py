@@ -3108,6 +3108,18 @@ def _fig_to_png(fig, width, height, scale=1.5):
 
 
 def add_render_outputs(base_state, chart_window="YTD"):
+    # history + chart_allowed_keys are stripped from serialized snapshots
+    # (too large for JSON/Gist). Re-hydrate from a fresh build_bundle() call
+    # when they're missing so we never KeyError out of a saved snapshot.
+    if "history" not in base_state or "chart_allowed_keys" not in base_state:
+        try:
+            _snap, fresh_history, fresh_chart_keys = build_bundle()
+            base_state.setdefault("history", fresh_history)
+            base_state.setdefault("chart_allowed_keys", fresh_chart_keys)
+        except Exception:
+            base_state.setdefault("history", pd.DataFrame(
+                columns=["date", "key", "label", "group", "value", "source_type"]))
+            base_state.setdefault("chart_allowed_keys", [])
     history = base_state["history"]
     chart_allowed_keys = base_state["chart_allowed_keys"]
     include_crypto_flag = base_state.get("include_crypto_flag", True)

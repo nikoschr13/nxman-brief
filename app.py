@@ -2453,6 +2453,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         s = "" if s is None else str(s)
         return s if len(s) <= n else s[:n-1]+"\u2026"
 
+    def _xs(s):
+        """XML-escape untrusted text before it goes into Paragraph.
+        reportlab parses its input as mini-XML, so a stray &/</> from a
+        PDF extraction (P&G, S&P, <5%, >15x) crashes doc.build()."""
+        s = "" if s is None else str(s)
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     def _pct(v):
         if v is None: return "N/A"
         try:
@@ -2751,45 +2758,49 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if research_docs:
         res_rows = []
         for fname, doc in research_docs.items():
-            dtype = doc.get("_doc_type", "generic_research")
-            short = _t(fname, 35)
-            if dtype == "morning_call":
-                # Equity viewpoints
-                vps = (doc.get("equity_viewpoints") or [])[:3]
-                for vp in vps:
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P(f"Equities", sz=4.5, col=MID),
-                                     P(_t(vp, 160), sz=4.8, col=TXT)])
-                # Upgrades / Downgrades
-                rec = doc.get("recommendation_changes") or {}
-                for upg in (rec.get("upgrades") or [])[:3]:
-                    label = f"⬆ {upg.get('name','')} {upg.get('rating_old','')}→{upg.get('rating_new','')}"
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P("Upgrade", sz=4.5, col=GRN),
-                                     P(label, sz=4.8, col=TXT)])
-                for dwn in (rec.get("downgrades") or [])[:3]:
-                    label = f"⬇ {dwn.get('name','')} {dwn.get('rating_old','')}→{dwn.get('rating_new','')}"
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P("Downgrade", sz=4.5, col=RED),
-                                     P(label, sz=4.8, col=TXT)])
-            elif dtype == "equity_coverage":
-                stocks = doc.get("stocks") or []
-                buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
-                sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
-                if buys:
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P("Buy", sz=4.5, col=GRN),
-                                     P(", ".join(buys), sz=4.8, col=TXT)])
-                if sells:
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P("Sell", sz=4.5, col=RED),
-                                     P(", ".join(sells), sz=4.8, col=TXT)])
-            else:
-                text = _t((doc.get("text") or "").replace("\n"," "), 200)
-                if text:
-                    res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                     P("Research", sz=4.5, col=MID),
-                                     P(text, sz=4.8, col=TXT)])
+            try:
+                dtype = doc.get("_doc_type", "generic_research")
+                short = _xs(_t(fname, 35))
+                if dtype == "morning_call":
+                    # Equity viewpoints
+                    vps = (doc.get("equity_viewpoints") or [])[:3]
+                    for vp in vps:
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Equities", sz=4.5, col=MID),
+                                         P(_xs(_t(vp, 160)), sz=4.8, col=TXT)])
+                    # Upgrades / Downgrades
+                    rec = doc.get("recommendation_changes") or {}
+                    for upg in (rec.get("upgrades") or [])[:3]:
+                        label = f"⬆ {upg.get('name','')} {upg.get('rating_old','')}→{upg.get('rating_new','')}"
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Upgrade", sz=4.5, col=GRN),
+                                         P(_xs(label), sz=4.8, col=TXT)])
+                    for dwn in (rec.get("downgrades") or [])[:3]:
+                        label = f"⬇ {dwn.get('name','')} {dwn.get('rating_old','')}→{dwn.get('rating_new','')}"
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Downgrade", sz=4.5, col=RED),
+                                         P(_xs(label), sz=4.8, col=TXT)])
+                elif dtype == "equity_coverage":
+                    stocks = doc.get("stocks") or []
+                    buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
+                    sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
+                    if buys:
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Buy", sz=4.5, col=GRN),
+                                         P(_xs(", ".join(buys)), sz=4.8, col=TXT)])
+                    if sells:
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Sell", sz=4.5, col=RED),
+                                         P(_xs(", ".join(sells)), sz=4.8, col=TXT)])
+                else:
+                    text = _t((doc.get("text") or "").replace("\n"," "), 200)
+                    if text:
+                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
+                                         P("Research", sz=4.5, col=MID),
+                                         P(_xs(text), sz=4.8, col=TXT)])
+            except Exception:
+                # Never let a single bad doc kill the PDF render.
+                continue
 
         if res_rows:
             res_tbl = Table(

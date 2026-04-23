@@ -2559,8 +2559,8 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             except: dt_s = ""
             meta = " \u00b7 ".join([x for x in [src,dt_s] if x])
         bul_rows.append([
-            P(f"\u2192 {b}", sz=5.6, col=TXT, lead=7),
-            P(meta, fn="Helvetica-Oblique", sz=4.8, col=GRY, lead=6),
+            P(f"\u2192 {_xs(b)}", sz=5.6, col=TXT, lead=7),
+            P(_xs(meta), fn="Helvetica-Oblique", sz=4.8, col=GRY, lead=6),
         ])
         bg = WHT if ri%2==0 else STR
         bul_cmds.append(("BACKGROUND",(0,ri),(-1,ri), bg))
@@ -2573,7 +2573,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     # Narrative cell — "Market Recap" title + 1-sentence AI summary
     nar_title = P("Market Recap", fn="Helvetica-Bold", sz=7.5, col=NAV, lead=9)
     _summ_txt = (writing.get("news_summary","") or writing.get("subheadline","")).strip()
-    nar_summ  = P(_summ_txt[:600], sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
+    nar_summ  = P(_xs(_summ_txt[:600]), sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
     nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
     nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
@@ -2845,7 +2845,58 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         P(disc, sz=4.5, col=GRY, lead=5.8),
     ]
 
-    doc.build(story)
+    def _build_with_fallback(story_in):
+        """Build the PDF. If reportlab chokes on XML-unsafe chars inside any
+        Paragraph (stray '&', unmatched '<'/'>' from Gemini or parsed PDFs),
+        retry with every Paragraph's text fully escaped, then finally retry
+        with the research highlights block stripped out entirely."""
+        import re as _re
+        try:
+            doc.build(story_in)
+            return
+        except Exception as e1:
+            # Attempt 2: rebuild every Paragraph with fully escaped text.
+            try:
+                buffer.seek(0); buffer.truncate(0)
+                doc2 = SimpleDocTemplate(buffer, pagesize=A4,
+                    leftMargin=1.0*cm, rightMargin=1.0*cm,
+                    topMargin=0.8*cm, bottomMargin=0.8*cm)
+                def _resanitize(flow):
+                    if isinstance(flow, Paragraph):
+                        raw = getattr(flow, "text", "") or ""
+                        # strip any leftover tags the parser would trip on,
+                        # keeping only raw text for the retry path
+                        plain = _re.sub(r"<[^>]*>", "", raw)
+                        return Paragraph(_xs(plain), flow.style)
+                    if isinstance(flow, Table):
+                        new_rows = []
+                        for row in getattr(flow, "_cellvalues", []) or []:
+                            new_rows.append([_resanitize(c) for c in row])
+                        if new_rows:
+                            t = Table(new_rows, colWidths=flow._colWidths)
+                            try: t.setStyle(flow._bkgrndcmds + flow._linecmds)
+                            except Exception: pass
+                            return t
+                    return flow
+                doc2.build([_resanitize(f) for f in story_in])
+                return
+            except Exception as e2:
+                # Attempt 3: drop the research highlights and disclaimer and
+                # emit a bare Brief so the user still gets their report.
+                buffer.seek(0); buffer.truncate(0)
+                doc3 = SimpleDocTemplate(buffer, pagesize=A4,
+                    leftMargin=1.0*cm, rightMargin=1.0*cm,
+                    topMargin=0.8*cm, bottomMargin=0.8*cm)
+                safe_story = [f for f in story_in if not isinstance(f, Table)]
+                try:
+                    doc3.build(safe_story)
+                except Exception:
+                    # Last-ditch: emit an error page rather than crashing the UI.
+                    doc3.build([Paragraph(
+                        f"PDF render failed: {type(e1).__name__}: {str(e1)[:200]}",
+                        ParagraphStyle("_err", fontName="Helvetica", fontSize=10))])
+
+    _build_with_fallback(story)
     return buffer.getvalue()
 
 

@@ -2549,7 +2549,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ("BOTTOMPADDING",(0,0),(-1,-1), 1.5),
         ("ALIGN",        (1,0),(1,-1),  "RIGHT"),
     ]
-    for ri, b in enumerate(bullets[:7]):
+    for ri, b in enumerate(bullets[:5]):
         match = _match_bullet_to_article(b, news_df) if not news_df.empty else None
         meta  = ""
         if match:
@@ -2795,7 +2795,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                                          P("Sell", sz=4.5, col=RED),
                                          P(_xs(", ".join(sells)), sz=4.8, col=TXT)])
                 else:
-                    text = _t((rdoc.get("text") or "").replace("\n"," "), 200)
+                    text = _t((rdoc.get("text") or "").replace("\n"," "), 140)
                     if text:
                         res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
                                          P("Research", sz=4.5, col=MID),
@@ -2826,11 +2826,11 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             ]
             res_tbl.setStyle(TableStyle(res_cmds))
             story += [
-                Spacer(1, 0.1*cm),
+                Spacer(1, 0.06*cm),
                 HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
-                Spacer(1, 0.05*cm),
-                P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
-                Spacer(1, 0.04*cm),
+                Spacer(1, 0.03*cm),
+                P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.5, col=NAV, lead=6.5),
+                Spacer(1, 0.02*cm),
                 res_tbl,
             ]
 
@@ -3061,10 +3061,18 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
 
 
 def _fig_to_png(fig, width, height, scale=1.5):
-    """Shared kaleido export helper. Returns bytes or None."""
+    """Shared kaleido export helper. Returns bytes or None.
+    Handles both kaleido 0.2.x (pio.kaleido.scope.mathjax) and kaleido 1.x
+    (scope attribute removed) — Streamlit Cloud resolves the version non-
+    deterministically and either can be installed."""
     try:
         import plotly.io as pio
-        pio.kaleido.scope.mathjax = None
+        # Best-effort: disable mathjax on kaleido 0.2.x only. On 1.x the
+        # attribute doesn't exist and we silently skip.
+        try:
+            pio.kaleido.scope.mathjax = None
+        except Exception:
+            pass
         return pio.to_image(fig, format="png", scale=scale, width=width, height=height)
     except Exception:
         try:

@@ -10,3 +10,5 @@ streamlit-autorefresh>=1.0.1
 google-api-python-client>=2.120
 google-auth>=2.29
 feedparser>=6.0
+google-api-python-client>=2.120
+google-auth>=2.29

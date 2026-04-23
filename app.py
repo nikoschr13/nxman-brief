@@ -23,6 +23,13 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 
+# Optional: Drive-backed research library feed. If brief_drive_reader isn't
+# importable (e.g. dep not installed locally), Brief falls back to manual upload.
+try:
+    from brief_drive_reader import load_research_pdfs_dict_cached as _drive_pdf_loader
+except Exception:
+    _drive_pdf_loader = None
+
 load_dotenv()
 
 
@@ -784,6 +791,46 @@ def auto_detect_and_parse(pdf_bytes: bytes, filename: str) -> dict:
     result["_doc_type"] = doc_type
     result["_filename"] = filename
     return result
+
+
+def autoload_research_from_drive(force_refresh: bool = False) -> int:
+    """Populate st.session_state['research_docs'] with PDFs pulled from
+    Google Drive (SNIPER/Research_Processed + Research_Inbox).
+
+    Runs at most once per session unless force_refresh=True.
+    Returns the number of PDFs newly loaded this call (0 if the library was
+    already seeded from Drive this session, or the loader is unavailable).
+    """
+    if _drive_pdf_loader is None:
+        return 0
+
+    # Only pull from Drive once per Streamlit session — users can still upload
+    # extras manually, and a 🔄 button lets them force a re-sync explicitly.
+    flag = "_drive_research_loaded"
+    if st.session_state.get(flag) and not force_refresh:
+        return 0
+
+    try:
+        pdfs = _drive_pdf_loader()
+    except Exception:
+        st.session_state[flag] = True  # don't loop-retry on error
+        return 0
+
+    if "research_docs" not in st.session_state:
+        st.session_state["research_docs"] = {}
+
+    new_count = 0
+    for fname, pdf_bytes in (pdfs or {}).items():
+        if force_refresh or fname not in st.session_state["research_docs"]:
+            try:
+                doc = auto_detect_and_parse(pdf_bytes, fname)
+            except Exception as e:
+                doc = {"filename": fname, "error": f"parse failed: {e}", "_doc_type": "generic_research", "_filename": fname}
+            st.session_state["research_docs"][fname] = doc
+            new_count += 1
+
+    st.session_state[flag] = True
+    return new_count
 
 
 # ── Research context helpers ───────────────────────────────────────────────────
@@ -3159,7 +3206,23 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**📚 Research Library**")
-    st.caption("Upload any PDFs: Morning Call, Equity Universe, Fixed Income, reports…")
+
+    # Auto-pull PDFs from Google Drive (SNIPER/Research_Processed + Inbox).
+    # This runs once per session; the 🔄 button below forces a re-sync.
+    auto_added = autoload_research_from_drive()
+    if _drive_pdf_loader is not None:
+        drive_count = len(st.session_state.get("research_docs", {}))
+        if auto_added:
+            st.caption(f"☁️ Auto-loaded {auto_added} PDF(s) from Drive.")
+        else:
+            st.caption(f"☁️ Drive sync: {drive_count} PDF(s) in library.")
+        if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
+            autoload_research_from_drive(force_refresh=True)
+            st.rerun()
+    else:
+        st.caption("⚠️ Drive sync unavailable — install google-api-python-client / google-auth.")
+
+    st.caption("Or drop PDFs manually (Morning Call, Equity Universe, Fixed Income, reports…):")
     uploaded_files = st.file_uploader(
         "Drop PDFs here", type=["pdf"],
         accept_multiple_files=True,
@@ -3175,16 +3238,21 @@ with st.sidebar:
                 doc = auto_detect_and_parse(pdf_bytes, f.name)
                 st.session_state["research_docs"][f.name] = doc
                 new_count += 1
-        docs = st.session_state.get("research_docs", {})
+
+    # Show the current library (whether loaded from Drive, uploaded, or both).
+    docs = st.session_state.get("research_docs", {})
+    if docs:
         for fname, doc in docs.items():
-            dtype = doc.get("_doc_type","generic")
-            icon = {"morning_call":"🏦","equity_coverage":"📊",
-                    "fixed_income_coverage":"📈","preferred_fi":"⭐",
-                    "monthly_guide":"📘"}.get(dtype,"📄")
+            dtype = doc.get("_doc_type", "generic")
+            icon = {"morning_call": "🏦", "equity_coverage": "📊",
+                    "fixed_income_coverage": "📈", "preferred_fi": "⭐",
+                    "monthly_guide": "📘"}.get(dtype, "📄")
             err = " ⚠️" if doc.get("error") else " ✅"
             st.caption(f"{icon} {fname[:35]}{err}")
         if st.button("🗑 Clear library", use_container_width=True):
             st.session_state["research_docs"] = {}
+            # Let the Drive autoload re-populate on the next run if desired.
+            st.session_state["_drive_research_loaded"] = False
             st.rerun()
 
     st.markdown("---")

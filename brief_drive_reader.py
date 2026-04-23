@@ -1,9 +1,16 @@
 """
 brief_drive_reader.py — drop this into the nxman-brief repo.
 
-Provides `load_research_df()` which returns the SNIPER research.csv as a
-pandas DataFrame by reading it from the Google Drive SNIPER folder (owned
-by Nikos, SA = Editor).
+Two entry points for the Brief:
+
+* `load_research_df()` / `load_research_df_cached()`
+      → the SNIPER research.csv as a pandas DataFrame
+
+* `load_research_pdfs_dict()` / `load_research_pdfs_dict_cached()`
+      → {filename: pdf_bytes} for every PDF inside the SNIPER research tree
+        on Drive (Research_Processed by default, optionally + Research_Inbox).
+        Feed each one to the Brief's existing auto_detect_and_parse() and
+        you get the Research Library populated for free — no manual upload.
 
 Config sources, in priority order:
 
@@ -17,12 +24,13 @@ Config sources, in priority order:
      ~/.config/sniper/service_account.json
      ~/SNIPER/drive_config.json
 
-If no config resolves, `load_research_df()` returns an empty DataFrame and
-logs once — Brief should degrade gracefully, not crash.
+If no config resolves, every loader returns an empty structure and logs once
+— Brief should degrade gracefully, never crash.
 
 Usage:
-    from brief_drive_reader import load_research_df
-    df = load_research_df()       # columns: date, house, action, name_raw, ticker, ...
+    from brief_drive_reader import load_research_df, load_research_pdfs_dict
+    df    = load_research_df()               # columns: date, house, action, ...
+    pdfs  = load_research_pdfs_dict()        # {'Morning Call_22 April 2026.pdf': b'...'}
 """
 
 from __future__ import annotations
@@ -201,9 +209,122 @@ def load_research_df() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# Streamlit convenience wrapper — caches the DataFrame for N seconds so the
-# Brief UI doesn't hit Drive on every interaction. Import only if running
-# under Streamlit; otherwise fall back to a plain passthrough.
+# --------------------------------------------------------------------------- PDF loader
+
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+PDF_MIME = "application/pdf"
+
+
+def _find_subfolder(drive, parent_id: str, name: str) -> str | None:
+    """Return the folder ID for a child folder by name, or None if not found."""
+    # name may legitimately contain apostrophes; escape them for the Drive query.
+    safe_name = name.replace("'", "\\'")
+    try:
+        resp = drive.files().list(
+            q=(
+                f"'{parent_id}' in parents and trashed = false "
+                f"and mimeType = '{FOLDER_MIME}' "
+                f"and name = '{safe_name}'"
+            ),
+            fields="files(id,name)",
+            pageSize=5,
+        ).execute()
+    except Exception as e:
+        logger.error("Drive subfolder lookup failed for %s: %s", name, e)
+        return None
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def _list_pdfs_in_folder(drive, folder_id: str, page_size: int = 200) -> list[dict]:
+    """Return [{id, name, modifiedTime}, ...] for every PDF in `folder_id`."""
+    try:
+        resp = drive.files().list(
+            q=(
+                f"'{folder_id}' in parents and trashed = false "
+                f"and mimeType = '{PDF_MIME}'"
+            ),
+            fields="files(id,name,modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=page_size,
+        ).execute()
+    except Exception as e:
+        logger.error("Drive PDF list failed in %s: %s", folder_id, e)
+        return []
+    return resp.get("files", [])
+
+
+def load_research_pdfs_dict(
+    include_inbox: bool = True,
+    max_pdfs: int = 20,
+) -> dict[str, bytes]:
+    """Download all PDFs under the SNIPER research tree on Drive.
+
+    Looks for child folders named 'Research_Processed' (and optionally
+    'Research_Inbox') under the SNIPER folder ID. If neither exists, falls
+    back to PDFs at the SNIPER folder root.
+
+    Args:
+        include_inbox: if True, also return PDFs still sitting in
+            Research_Inbox (not yet swept by autopilot). Default True.
+        max_pdfs: cap the number of PDFs returned to keep Brief startup
+            fast. Newest-first by modifiedTime.
+
+    Returns:
+        {filename: pdf_bytes}. Empty dict on any misconfiguration / failure.
+        If the same filename appears in both Inbox and Processed (which
+        shouldn't happen post-sweep but can mid-sweep), Processed wins.
+    """
+    drive = _drive_client()
+    sniper_id = _load_sniper_folder_id()
+    if drive is None or not sniper_id:
+        logger.info("Drive PDF library not available — check SA + folder-ID config.")
+        return {}
+
+    # Resolve Research_Processed (+ Research_Inbox) by name, fall back to root.
+    processed_id = _find_subfolder(drive, sniper_id, "Research_Processed")
+    inbox_id = _find_subfolder(drive, sniper_id, "Research_Inbox") if include_inbox else None
+
+    files: list[dict] = []
+    if inbox_id:
+        files.extend(_list_pdfs_in_folder(drive, inbox_id))
+    if processed_id:
+        files.extend(_list_pdfs_in_folder(drive, processed_id))
+    if not files:
+        # nothing in subfolders (or subfolders missing) — try the SNIPER root
+        files = _list_pdfs_in_folder(drive, sniper_id)
+
+    if not files:
+        return {}
+
+    # Dedupe by filename (later entry wins — we list inbox first, processed
+    # second, so processed copies overwrite stale inbox copies of the same name).
+    by_name: dict[str, dict] = {}
+    for f in files:
+        by_name[f["name"]] = f
+
+    # Newest-first, then cap.
+    ordered = sorted(
+        by_name.values(),
+        key=lambda f: f.get("modifiedTime", ""),
+        reverse=True,
+    )[:max_pdfs]
+
+    out: dict[str, bytes] = {}
+    for f in ordered:
+        raw = _download_bytes(drive, f["id"])
+        if raw:
+            out[f["name"]] = raw
+    return out
+
+
+# --------------------------------------------------------------------------- streamlit caches
+
+
+# Streamlit convenience wrappers — cache results for N seconds so the Brief UI
+# doesn't hit Drive on every interaction. Import only if running under
+# Streamlit; otherwise fall back to plain passthroughs.
 try:  # pragma: no cover — optional
     import streamlit as _st
 
@@ -211,15 +332,33 @@ try:  # pragma: no cover — optional
     def load_research_df_cached() -> pd.DataFrame:
         return load_research_df()
 
+    @_st.cache_data(ttl=300)
+    def load_research_pdfs_dict_cached(
+        include_inbox: bool = True,
+        max_pdfs: int = 20,
+    ) -> dict[str, bytes]:
+        return load_research_pdfs_dict(include_inbox=include_inbox, max_pdfs=max_pdfs)
+
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
 
+    def load_research_pdfs_dict_cached(  # type: ignore[no-redef]
+        include_inbox: bool = True,
+        max_pdfs: int = 20,
+    ) -> dict[str, bytes]:
+        return load_research_pdfs_dict(include_inbox=include_inbox, max_pdfs=max_pdfs)
+
 
 if __name__ == "__main__":
-    # CLI: dump the current Drive research.csv to stdout as TSV (for eyeballing).
+    # CLI: list what's available in Drive for the Brief.
     df = load_research_df()
     if df.empty:
-        print("(empty — no data or config missing)")
+        print("research.csv: (empty — no data or config missing)")
     else:
-        print(df.to_csv(sep="\t", index=False))
+        print(f"research.csv: {len(df)} rows")
+
+    pdfs = load_research_pdfs_dict()
+    print(f"PDFs found: {len(pdfs)}")
+    for name, blob in pdfs.items():
+        print(f"  {name}  ({len(blob)} bytes)")

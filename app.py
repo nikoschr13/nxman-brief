@@ -2755,8 +2755,11 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     story += [data_r1, Spacer(1, 0.12*cm), data_r2]
 
     # ── 5. RESEARCH HIGHLIGHTS (if docs uploaded) ─────────────────────────────
+    # Compact bullet-list style instead of a table — saves ~1.5cm of vertical
+    # space (no header row, no table padding) and lets long text wrap freely
+    # so nothing is truncated.
     if research_docs:
-        res_rows = []
+        res_lines: list[tuple[str, str, str, object]] = []
         # IMPORTANT: use `rdoc` as the loop variable — `doc` is already the
         # outer SimpleDocTemplate; shadowing it breaks the final doc.build().
         for fname, rdoc in research_docs.items():
@@ -2764,75 +2767,45 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                 dtype = rdoc.get("_doc_type", "generic_research")
                 short = _xs(_t(fname, 35))
                 if dtype == "morning_call":
-                    # Equity viewpoints
-                    vps = (rdoc.get("equity_viewpoints") or [])[:3]
-                    for vp in vps:
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Equities", sz=4.5, col=MID),
-                                         P(_xs(_t(vp, 160)), sz=4.8, col=TXT)])
-                    # Upgrades / Downgrades
+                    for vp in (rdoc.get("equity_viewpoints") or [])[:3]:
+                        res_lines.append((short, "Equities", _xs(str(vp)), MID))
                     rec = rdoc.get("recommendation_changes") or {}
                     for upg in (rec.get("upgrades") or [])[:3]:
-                        label = f"⬆ {upg.get('name','')} {upg.get('rating_old','')}→{upg.get('rating_new','')}"
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Upgrade", sz=4.5, col=GRN),
-                                         P(_xs(label), sz=4.8, col=TXT)])
+                        label = f"\u2b06 {upg.get('name','')} {upg.get('rating_old','')}\u2192{upg.get('rating_new','')}"
+                        res_lines.append((short, "Upgrade", _xs(label), GRN))
                     for dwn in (rec.get("downgrades") or [])[:3]:
-                        label = f"⬇ {dwn.get('name','')} {dwn.get('rating_old','')}→{dwn.get('rating_new','')}"
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Downgrade", sz=4.5, col=RED),
-                                         P(_xs(label), sz=4.8, col=TXT)])
+                        label = f"\u2b07 {dwn.get('name','')} {dwn.get('rating_old','')}\u2192{dwn.get('rating_new','')}"
+                        res_lines.append((short, "Downgrade", _xs(label), RED))
                 elif dtype == "equity_coverage":
                     stocks = rdoc.get("stocks") or []
                     buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
                     sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
                     if buys:
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Buy", sz=4.5, col=GRN),
-                                         P(_xs(", ".join(buys)), sz=4.8, col=TXT)])
+                        res_lines.append((short, "Buy", _xs(", ".join(buys)), GRN))
                     if sells:
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Sell", sz=4.5, col=RED),
-                                         P(_xs(", ".join(sells)), sz=4.8, col=TXT)])
+                        res_lines.append((short, "Sell", _xs(", ".join(sells)), RED))
                 else:
-                    text = _t((rdoc.get("text") or "").replace("\n"," "), 140)
+                    text = (rdoc.get("text") or "").replace("\n", " ").strip()
                     if text:
-                        res_rows.append([P(short, sz=4.8, col=BLU, bold=True),
-                                         P("Research", sz=4.5, col=MID),
-                                         P(_xs(text), sz=4.8, col=TXT)])
+                        # full text — paragraph will wrap naturally
+                        res_lines.append((short, "Research", _xs(text), MID))
             except Exception:
-                # Never let a single bad doc kill the PDF render.
                 continue
 
-        if res_rows:
-            res_tbl = Table(
-                [[P("Source", fn="Helvetica-Bold", sz=5, col=WHT),
-                  P("Category", fn="Helvetica-Bold", sz=5, col=WHT),
-                  P("Highlights", fn="Helvetica-Bold", sz=5, col=WHT)]] + res_rows,
-                colWidths=[5.5*cm, 2.2*cm, (PW-7.7)*cm],
-            )
-            res_cmds = [
-                ("BACKGROUND",  (0,0), (-1,0), NAV),
-                ("TEXTCOLOR",   (0,0), (-1,0), WHT),
-                ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
-                ("FONTSIZE",    (0,0), (-1,0), 5),
-                ("LEFTPADDING", (0,0), (-1,-1), 4),
-                ("RIGHTPADDING",(0,0), (-1,-1), 4),
-                ("TOPPADDING",  (0,0), (-1,-1), 2),
-                ("BOTTOMPADDING",(0,0),(-1,-1), 2),
-                ("ROWBACKGROUNDS",(0,1),(-1,-1),[WHT, STR]),
-                ("LINEBELOW",   (0,0), (-1,-1), 0.3, RUL),
-                ("VALIGN",      (0,0), (-1,-1), "TOP"),
-            ]
-            res_tbl.setStyle(TableStyle(res_cmds))
+        if res_lines:
             story += [
                 Spacer(1, 0.06*cm),
                 HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
                 Spacer(1, 0.03*cm),
                 P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.5, col=NAV, lead=6.5),
                 Spacer(1, 0.02*cm),
-                res_tbl,
             ]
+            for src, cat, body, cat_col in res_lines:
+                tag = f'<font color="{cat_col.hexval()}"><b>{cat}</b></font>'
+                story.append(P(
+                    f"<b>{src}</b> \u00b7 {tag} \u00b7 {body}",
+                    sz=4.8, col=TXT, lead=6.2,
+                ))
 
     # ── 6. DISCLAIMER ─────────────────────────────────────────────────────────
     disc = ("Disclaimer: This briefing is for informational purposes only and does not "
@@ -2841,10 +2814,10 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             "Past performance is not indicative of future results. Market data may be delayed. "
             "Always consult a qualified financial adviser before making investment decisions.")
     story += [
-        Spacer(1, 0.08*cm),
-        HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
         Spacer(1, 0.04*cm),
-        P(disc, sz=4.5, col=GRY, lead=5.8),
+        HRFlowable(width=PW*cm, thickness=0.4, color=RUL),
+        Spacer(1, 0.02*cm),
+        P(disc, sz=4.2, col=GRY, lead=5.2),
     ]
 
     try:

@@ -1741,22 +1741,44 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if len(bank_docs) < 1:
         return empty
 
+    allowed_banks = sorted({d["bank"] for d in bank_docs})
+
     payload_dict = {
         "instruction": (
             "You are synthesising broker research for a daily market brief. "
-            "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
-            "Shape: {\"themes\": [{\"theme\": str, \"bullets\": "
+            "The CURRENT DATE is " + datetime.now().strftime("%Y-%m-%d") + " — "
+            "all forecasts and references should be treated as current; do NOT "
+            "anchor to any other year. "
+            "\n\n"
+            "CRITICAL GROUNDING RULES — violations will corrupt the brief:\n"
+            "1. The ONLY banks that may appear in 'bank' fields are EXACTLY "
+            "these: " + ", ".join(allowed_banks) + ". "
+            "Do NOT add, invent, rename, or substitute other banks (no "
+            "Goldman Sachs, no JP Morgan, no Deutsche Bank, etc. — UNLESS one "
+            "of those is in the allowed list above).\n"
+            "2. Every 'view' MUST be a direct paraphrase of text that appears "
+            "in that specific bank's 'text' field in the input. Do NOT "
+            "fabricate price targets, ratings, rate calls, GDP forecasts, or "
+            "any other numbers. If a bank's text doesn't state a specific "
+            "number, don't invent one.\n"
+            "3. Do NOT use training-data knowledge about what these banks "
+            "'typically' say. Use ONLY what is written in the provided text.\n"
+            "4. If a theme is only covered by ONE of the input banks, either "
+            "include it with that single bullet (no filler from other banks) "
+            "or drop the theme — never pad with invented views.\n"
+            "\n"
+            "OUTPUT FORMAT — raw JSON only, no markdown, no code fences:\n"
+            "{\"themes\": [{\"theme\": str, \"bullets\": "
             "[{\"bank\": str, \"view\": str}]}]}. "
-            "Identify 3 to 5 themes across the research (e.g. oil/geopolitics, "
-            "AI and tech, rates/Fed, Europe outlook, specific stock calls). "
-            "For each theme, give 2 to 4 bank-attributed bullets. "
-            "Each 'view' MUST be one tight sentence — no filler, no jargon "
-            "without a brief gloss. Prefer concrete calls (ratings, price "
-            "targets, levels) over generic commentary. Where banks disagree, "
-            "SAY SO explicitly in a bullet (e.g. 'bearish vs UBS's constructive "
-            "stance'). If a bank has nothing on a theme, omit it — don't invent. "
-            "Keep total output under ~400 words."
+            "Pick 3 to 5 themes actually present in the inputs (e.g. "
+            "oil/geopolitics, AI and tech, rates/Fed, Europe outlook, EM FX, "
+            "specific stock calls). For each theme: 1-4 bank-attributed "
+            "bullets, each 'view' one tight sentence with concrete specifics "
+            "(price targets, yield levels, ratings changes) where the source "
+            "text provides them. Where the source texts disagree, call it "
+            "out explicitly in the bullet. Total output under ~400 words."
         ),
+        "allowed_banks": allowed_banks,
         "research": bank_docs,
     }
 
@@ -1772,7 +1794,39 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if not isinstance(themes, list):
         return empty
 
-    # Validate shape + sanitise
+    # Hard guardrail: drop any bullet whose bank is not in the allowed set.
+    # Matches case-insensitively and tolerates minor variants (e.g. "UBS" vs
+    # "UBS Wealth Management", "BoS" vs "Bank of Singapore").
+    allowed_norm: dict[str, str] = {}
+    for b in allowed_banks:
+        allowed_norm[b.lower()] = b  # canonical casing
+    # Add recognised aliases to the map so legitimate variants pass.
+    _aliases = {
+        "bank of singapore": "BoS",
+        "bos":              "BoS",
+        "ubs wealth":       "UBS",
+        "ubs gwm":          "UBS",
+        "ubs ag":           "UBS",
+        "ubs universe":     "UBS Universe",
+        "oversea-chinese banking": "OCBC",
+        "oversea chinese banking": "OCBC",
+    }
+    for alias, canonical in _aliases.items():
+        if canonical in allowed_banks:
+            allowed_norm[alias] = canonical
+
+    def _resolve_bank(raw: str) -> str | None:
+        r = raw.strip().lower()
+        if not r:
+            return None
+        if r in allowed_norm:
+            return allowed_norm[r]
+        # substring match: "UBS" should match "UBS Wealth" etc. in either direction
+        for key, canonical in allowed_norm.items():
+            if key and (key in r or r in key):
+                return canonical
+        return None
+
     clean_themes: list[dict] = []
     for t in themes[:5]:
         if not isinstance(t, dict):
@@ -1783,12 +1837,21 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         for b in (bullets if isinstance(bullets, list) else [])[:4]:
             if not isinstance(b, dict):
                 continue
-            bank = str(b.get("bank") or "").strip()
+            raw_bank = str(b.get("bank") or "")
             view = str(b.get("view") or "").strip()
-            if bank and view:
-                clean_bullets.append({"bank": bank, "view": view})
+            resolved = _resolve_bank(raw_bank)
+            if resolved is None:
+                # Bank not in allowed set — Gemini hallucinated. Drop silently.
+                continue
+            if view:
+                clean_bullets.append({"bank": resolved, "view": view})
         if theme_name and clean_bullets:
             clean_themes.append({"theme": theme_name, "bullets": clean_bullets})
+
+    # If guardrail killed everything, return empty so the per-doc fallback
+    # kicks in rather than showing a half-empty themed section.
+    if not clean_themes:
+        return empty
 
     return {"themes": clean_themes}
 

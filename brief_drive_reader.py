@@ -133,9 +133,11 @@ def _drive_client():
         logger.error("google-api-python-client not installed: %s", e)
         return None
 
+    # Full drive scope (read + write) — the Brief now also UPLOADS new PDFs
+    # from its sidebar into Research_Inbox. SA is Editor on the SNIPER tree.
     creds = Credentials.from_service_account_info(
         sa_info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        scopes=["https://www.googleapis.com/auth/drive"],
     )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
@@ -257,24 +259,25 @@ def _list_pdfs_in_folder(drive, folder_id: str, page_size: int = 200) -> list[di
 
 def load_research_pdfs_dict(
     include_inbox: bool = True,
+    include_processed: bool = False,
     max_pdfs: int = 20,
 ) -> dict[str, bytes]:
-    """Download all PDFs under the SNIPER research tree on Drive.
+    """Download PDFs from the SNIPER research tree on Drive.
 
-    Looks for child folders named 'Research_Processed' (and optionally
-    'Research_Inbox') under the SNIPER folder ID. If neither exists, falls
-    back to PDFs at the SNIPER folder root.
+    Default behaviour (2026-04 policy): INBOX ONLY. Processed is treated as
+    an archive and does not appear in the Brief library. Pass
+    include_processed=True explicitly if you need the archive too.
 
     Args:
-        include_inbox: if True, also return PDFs still sitting in
-            Research_Inbox (not yet swept by autopilot). Default True.
+        include_inbox: pull PDFs currently in Research_Inbox. Default True.
+        include_processed: also pull PDFs from Research_Processed. Default
+            False — the archive stays out of the library so the Brief only
+            shows today's / this-cycle's broker drops.
         max_pdfs: cap the number of PDFs returned to keep Brief startup
             fast. Newest-first by modifiedTime.
 
     Returns:
         {filename: pdf_bytes}. Empty dict on any misconfiguration / failure.
-        If the same filename appears in both Inbox and Processed (which
-        shouldn't happen post-sweep but can mid-sweep), Processed wins.
     """
     drive = _drive_client()
     sniper_id = _load_sniper_folder_id()
@@ -282,29 +285,26 @@ def load_research_pdfs_dict(
         logger.info("Drive PDF library not available — check SA + folder-ID config.")
         return {}
 
-    # Resolve Research_Processed (+ Research_Inbox) by name, fall back to root.
-    processed_id = _find_subfolder(drive, sniper_id, "Research_Processed")
     inbox_id = _find_subfolder(drive, sniper_id, "Research_Inbox") if include_inbox else None
+    processed_id = _find_subfolder(drive, sniper_id, "Research_Processed") if include_processed else None
 
     files: list[dict] = []
     if inbox_id:
         files.extend(_list_pdfs_in_folder(drive, inbox_id))
     if processed_id:
         files.extend(_list_pdfs_in_folder(drive, processed_id))
-    if not files:
-        # nothing in subfolders (or subfolders missing) — try the SNIPER root
+    if not files and not inbox_id and not processed_id:
+        # No subfolders requested at all — try the SNIPER root as a last resort.
         files = _list_pdfs_in_folder(drive, sniper_id)
 
     if not files:
         return {}
 
-    # Dedupe by filename (later entry wins — we list inbox first, processed
-    # second, so processed copies overwrite stale inbox copies of the same name).
+    # Dedupe by filename.
     by_name: dict[str, dict] = {}
     for f in files:
         by_name[f["name"]] = f
 
-    # Newest-first, then cap.
     ordered = sorted(
         by_name.values(),
         key=lambda f: f.get("modifiedTime", ""),
@@ -317,6 +317,58 @@ def load_research_pdfs_dict(
         if raw:
             out[f["name"]] = raw
     return out
+
+
+# --------------------------------------------------------------------------- writer
+
+
+def upload_pdf_to_research_inbox(filename: str, pdf_bytes: bytes) -> str | None:
+    """Upload a PDF into the SNIPER Research_Inbox folder on Drive.
+
+    Used by the Brief sidebar: when a user drops a PDF into the uploader,
+    the same bytes are pushed to Drive so the autopilot picks them up on
+    the next sweep. Returns the new Drive file ID on success, or None on
+    any failure (misconfig, network, 403, etc.) — Brief should degrade
+    gracefully, never crash.
+
+    Args:
+        filename: display name for the new Drive file (e.g.
+            "Morning Call_24 April 2026.pdf").
+        pdf_bytes: the PDF content as bytes.
+
+    Returns:
+        The Drive file ID string, or None on any failure.
+    """
+    drive = _drive_client()
+    sniper_id = _load_sniper_folder_id()
+    if drive is None or not sniper_id:
+        logger.info("Drive upload skipped — SA / folder-ID config missing.")
+        return None
+
+    inbox_id = _find_subfolder(drive, sniper_id, "Research_Inbox")
+    if not inbox_id:
+        logger.warning("Research_Inbox folder not found under SNIPER root; cannot upload.")
+        return None
+
+    try:
+        from googleapiclient.http import MediaInMemoryUpload
+    except ImportError as e:
+        logger.error("googleapiclient missing: %s", e)
+        return None
+
+    media = MediaInMemoryUpload(pdf_bytes, mimetype="application/pdf", resumable=False)
+    metadata = {"name": filename, "parents": [inbox_id]}
+    try:
+        created = drive.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name,createdTime",
+        ).execute()
+    except Exception as e:
+        logger.error("Drive upload failed for %s: %s", filename, e)
+        return None
+
+    return created.get("id")
 
 
 # --------------------------------------------------------------------------- streamlit caches
@@ -335,9 +387,14 @@ try:  # pragma: no cover — optional
     @_st.cache_data(ttl=300)
     def load_research_pdfs_dict_cached(
         include_inbox: bool = True,
+        include_processed: bool = False,
         max_pdfs: int = 20,
     ) -> dict[str, bytes]:
-        return load_research_pdfs_dict(include_inbox=include_inbox, max_pdfs=max_pdfs)
+        return load_research_pdfs_dict(
+            include_inbox=include_inbox,
+            include_processed=include_processed,
+            max_pdfs=max_pdfs,
+        )
 
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
@@ -345,9 +402,14 @@ except Exception:
 
     def load_research_pdfs_dict_cached(  # type: ignore[no-redef]
         include_inbox: bool = True,
+        include_processed: bool = False,
         max_pdfs: int = 20,
     ) -> dict[str, bytes]:
-        return load_research_pdfs_dict(include_inbox=include_inbox, max_pdfs=max_pdfs)
+        return load_research_pdfs_dict(
+            include_inbox=include_inbox,
+            include_processed=include_processed,
+            max_pdfs=max_pdfs,
+        )
 
 
 if __name__ == "__main__":

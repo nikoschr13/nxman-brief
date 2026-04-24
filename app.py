@@ -30,6 +30,11 @@ try:
 except Exception:
     _drive_pdf_loader = None
 
+try:
+    from brief_drive_reader import upload_pdf_to_research_inbox as _drive_pdf_uploader
+except Exception:
+    _drive_pdf_uploader = None
+
 load_dotenv()
 
 
@@ -3283,13 +3288,44 @@ with st.sidebar:
     if uploaded_files:
         if "research_docs" not in st.session_state:
             st.session_state["research_docs"] = {}
+        if "_drive_uploaded" not in st.session_state:
+            st.session_state["_drive_uploaded"] = set()
         new_count = 0
+        drive_ok = 0
+        drive_fail = 0
         for f in uploaded_files:
             if f.name not in st.session_state["research_docs"]:
                 pdf_bytes = f.read()
                 doc = auto_detect_and_parse(pdf_bytes, f.name)
                 st.session_state["research_docs"][f.name] = doc
                 new_count += 1
+
+                # Also push the PDF to Drive Research_Inbox so the autopilot
+                # picks it up on its next sweep and the file becomes a
+                # permanent research artifact instead of a per-session blob.
+                # Track already-uploaded names so re-reading the same uploader
+                # state doesn't re-POST the same file.
+                if (
+                    _drive_pdf_uploader is not None
+                    and f.name not in st.session_state["_drive_uploaded"]
+                ):
+                    try:
+                        new_id = _drive_pdf_uploader(f.name, pdf_bytes)
+                    except Exception:
+                        new_id = None
+                    if new_id:
+                        drive_ok += 1
+                        st.session_state["_drive_uploaded"].add(f.name)
+                    else:
+                        drive_fail += 1
+
+        if drive_ok:
+            st.caption(f"☁️ Uploaded {drive_ok} PDF(s) to Drive Research_Inbox.")
+        if drive_fail:
+            st.caption(
+                f"⚠️ {drive_fail} PDF(s) could not be uploaded to Drive "
+                "(will still be used in this session)."
+            )
 
     # Show the current library (whether loaded from Drive, uploaded, or both).
     docs = st.session_state.get("research_docs", {})

@@ -67,11 +67,15 @@ MARKETAUX_API_TOKEN = get_secret("MARKETAUX_API_TOKEN")
 FRED_API_KEY = get_secret("FRED_API_KEY")
 GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-2.5-flash")
+# Only include models that are CURRENTLY in Google's Gemini API. The 1.5
+# / 1.0 models were deprecated and return HTTP 404, which was previously
+# burning through the fallback chain before reaching Groq. Keep this list
+# current; if you override via secrets, only add models you've verified exist.
 GEMINI_FALLBACK_MODELS = [
     m.strip()
     for m in get_secret(
         "GEMINI_FALLBACK_MODELS",
-        "gemini-2.5-flash,gemini-1.5-flash,gemini-1.5-flash-8b,gemini-1.5-pro,gemini-1.0-pro"
+        "gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite"
     ).split(",")
     if m.strip()
 ]
@@ -1620,17 +1624,25 @@ def ai_generate_json(payload: str):
 def _ai_generate_json_uncached(payload: str):
     """Same as ai_generate_json but NOT wrapped in @st.cache_data. Used for
     the research-summary loop where we don't want stale None responses from
-    earlier failures to be served for 30 minutes. Cost: may hit Gemini /
-    Groq slightly more often, but research is only called once per Brief."""
-    errors = []
+    earlier failures to be served for 30 minutes.
 
-    if GEMINI_API_KEY:
+    Smart escalation: on a Gemini 429 (quota) or a string of 404s (dead
+    models), break out of the Gemini loop entirely and jump to Groq. No
+    point burning API calls on deprecated models."""
+    errors = []
+    groq_shortcut = False  # set True to skip remaining Gemini attempts
+
+    if GEMINI_API_KEY and not groq_shortcut:
         models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+        consecutive_404s = 0
         for model_name in models_to_try:
+            if groq_shortcut:
+                break
             for attempt in range(2):
                 try:
                     r = try_gemini_model(model_name, payload)
                     if r.ok:
+                        consecutive_404s = 0
                         data = r.json()
                         if data.get("promptFeedback", {}).get("blockReason"):
                             errors.append(f"Gemini/{model_name}: blocked")
@@ -1654,7 +1666,18 @@ def _ai_generate_json_uncached(payload: str):
                             break
                     else:
                         if r.status_code == 429:
-                            errors.append(f"Gemini/{model_name}: 429 quota")
+                            # Primary model quota-hit → skip the rest of Gemini,
+                            # go straight to Groq. We'd only burn time on more
+                            # 429s or on deprecated-model 404s.
+                            errors.append(f"Gemini/{model_name}: 429 quota → Groq")
+                            groq_shortcut = True
+                            break
+                        if r.status_code == 404:
+                            # Deprecated model. After 2 404s in a row, bail to Groq.
+                            errors.append(f"Gemini/{model_name}: 404")
+                            consecutive_404s += 1
+                            if consecutive_404s >= 2:
+                                groq_shortcut = True
                             break
                         if r.status_code in {500, 503} and attempt == 0:
                             time.sleep(3)

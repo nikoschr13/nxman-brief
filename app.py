@@ -1692,19 +1692,66 @@ def _ai_generate_json_uncached(payload: str):
                         break
 
     if GROQ_API_KEY:
-        try:
-            payload_obj = json.loads(payload)
-            r = try_groq(payload_obj)
-            if r.ok:
-                raw = r.json()["choices"][0]["message"]["content"].strip()
-                cleaned = _strip_json_fences(raw)
-                return json.loads(cleaned), f"Groq OK ({GROQ_MODEL})"
-            else:
-                errors.append(f"Groq: HTTP {r.status_code}")
-        except Exception as e:
-            errors.append(f"Groq: {type(e).__name__}: {str(e)[:80]}")
+        # Try primary Groq model, then fall back to the small fast model if
+        # the large one hits TPM / RPM limits. The small model has 10-20x
+        # higher token budget on free tier, so it reliably absorbs overflow.
+        groq_models = [GROQ_MODEL]
+        if "llama-3.1-8b-instant" not in GROQ_MODEL:
+            groq_models.append("llama-3.1-8b-instant")
 
-    return None, "AI failed: " + " | ".join(errors[:6])
+        for gm in groq_models:
+            try:
+                payload_obj = json.loads(payload)
+                r = _try_groq_model(payload_obj, gm)
+                if r.ok:
+                    raw = r.json()["choices"][0]["message"]["content"].strip()
+                    cleaned = _strip_json_fences(raw)
+                    try:
+                        return json.loads(cleaned), f"Groq OK ({gm})"
+                    except Exception:
+                        errors.append(f"Groq/{gm}: bad JSON")
+                        continue
+                else:
+                    errors.append(f"Groq/{gm}: HTTP {r.status_code}")
+                    # On 429, keep trying the smaller model. On other errors, stop.
+                    if r.status_code != 429:
+                        break
+            except Exception as e:
+                errors.append(f"Groq/{gm}: {type(e).__name__}: {str(e)[:60]}")
+
+    return None, "AI failed: " + " | ".join(errors[:8])
+
+
+def _try_groq_model(payload_obj: dict, model_name: str):
+    """Call a specific Groq model by name (overrides GROQ_MODEL). Returns the
+    requests.Response so the caller handles status codes."""
+    instruction = payload_obj.get("instruction", "")
+    data_blocks = []
+    for key, val in payload_obj.items():
+        if key == "instruction":
+            continue
+        try:
+            rendered = json.dumps(val, ensure_ascii=False, default=str)
+        except Exception:
+            rendered = str(val)
+        data_blocks.append(f"{key}:\n{rendered}")
+
+    user_msg = instruction + ("\n\n" + "\n\n".join(data_blocks) if data_blocks else "")
+
+    return requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model":       model_name,
+            "messages":    [{"role": "user", "content": user_msg}],
+            "temperature": 0.2,
+            "max_tokens":  2048,
+        },
+        timeout=60,
+    )
 
 
 def build_writing(news_df, snapshot, use_gemini, research_context=""):
@@ -1947,7 +1994,9 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
                 "Shape: {\"bullets\": [\"bullet 1\", \"bullet 2\", ...]}"
             ),
             "bank": bank,
-            "document_text": source_text[:6000],
+            # 2500 chars ≈ 700 tokens — stays well under Groq's 6k TPM free-tier
+            # budget when all 5 bank calls fire within the same minute.
+            "document_text": source_text[:2500],
         })
 
         # Space Gemini calls out to stay under 15 RPM. First call no delay,

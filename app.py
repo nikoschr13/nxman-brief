@@ -1689,6 +1689,110 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
     return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": reason}
 
 
+def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
+    """Produce a cross-bank research synthesis: a small number of themes with
+    attributed bank views. Returns:
+        {"themes": [
+            {"theme": "Oil & Middle East",
+             "bullets": [{"bank": "UBS", "view": "..."},
+                         {"bank": "OCBC", "view": "..."}]},
+            ...]}
+    Empty dict on failure / no research / Gemini off.
+    """
+    empty = {"themes": []}
+    if not research_docs or not use_gemini or not GEMINI_API_KEY:
+        return empty
+
+    # Build a clean {bank_label: raw_text_excerpt} map for Gemini.
+    # Bank label is inferred from filename heuristics.
+    def _infer_bank(fname: str) -> str:
+        fn = fname.lower()
+        if "morning call" in fn or "bos" in fn:           return "BoS"
+        if "barclays"     in fn:                          return "Barclays"
+        if "daily europe" in fn or "ubs"        in fn:    return "UBS"
+        if "equity_coverage" in fn or "universe" in fn:   return "UBS Universe"
+        if "dmo"          in fn or "ocbc"       in fn:    return "OCBC"
+        if "gs_"          in fn or "goldman"    in fn:    return "Goldman"
+        if "jpm"          in fn or "jpmorgan"   in fn:    return "JPMorgan"
+        if "ms_"          in fn or "morgan stanley" in fn: return "Morgan Stanley"
+        return fname.split(".")[0][:30]  # fallback to filename stub
+
+    bank_docs: list[dict] = []
+    for fname, rdoc in research_docs.items():
+        if rdoc.get("error"):
+            continue
+        # Prefer raw text; fall back to structured fields for morning_call.
+        text = (rdoc.get("text") or "").strip()
+        if not text and rdoc.get("_doc_type") == "morning_call":
+            parts = []
+            for reg, txt in (rdoc.get("regional_summaries") or {}).items():
+                if txt: parts.append(f"[{reg}] {txt}")
+            for vp in (rdoc.get("equity_viewpoints") or []):
+                parts.append(f"[equity view] {vp}")
+            text = "\n".join(parts)
+        if not text:
+            continue
+        bank_docs.append({
+            "bank": _infer_bank(fname),
+            "source": fname,
+            "text": text[:3000],  # cap per-doc to keep prompt reasonable
+        })
+
+    if len(bank_docs) < 1:
+        return empty
+
+    payload_dict = {
+        "instruction": (
+            "You are synthesising broker research for a daily market brief. "
+            "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
+            "Shape: {\"themes\": [{\"theme\": str, \"bullets\": "
+            "[{\"bank\": str, \"view\": str}]}]}. "
+            "Identify 3 to 5 themes across the research (e.g. oil/geopolitics, "
+            "AI and tech, rates/Fed, Europe outlook, specific stock calls). "
+            "For each theme, give 2 to 4 bank-attributed bullets. "
+            "Each 'view' MUST be one tight sentence — no filler, no jargon "
+            "without a brief gloss. Prefer concrete calls (ratings, price "
+            "targets, levels) over generic commentary. Where banks disagree, "
+            "SAY SO explicitly in a bullet (e.g. 'bearish vs UBS's constructive "
+            "stance'). If a bank has nothing on a theme, omit it — don't invent. "
+            "Keep total output under ~400 words."
+        ),
+        "research": bank_docs,
+    }
+
+    try:
+        payload = _safe_json_dumps(payload_dict)
+    except Exception:
+        return empty
+
+    out, _reason = ai_generate_json(payload)
+    if not isinstance(out, dict):
+        return empty
+    themes = out.get("themes")
+    if not isinstance(themes, list):
+        return empty
+
+    # Validate shape + sanitise
+    clean_themes: list[dict] = []
+    for t in themes[:5]:
+        if not isinstance(t, dict):
+            continue
+        theme_name = str(t.get("theme") or "").strip()
+        bullets = t.get("bullets") or []
+        clean_bullets: list[dict] = []
+        for b in (bullets if isinstance(bullets, list) else [])[:4]:
+            if not isinstance(b, dict):
+                continue
+            bank = str(b.get("bank") or "").strip()
+            view = str(b.get("view") or "").strip()
+            if bank and view:
+                clean_bullets.append({"bank": bank, "view": view})
+        if theme_name and clean_bullets:
+            clean_themes.append({"theme": theme_name, "bullets": clean_bullets})
+
+    return {"themes": clean_themes}
+
+
 def build_bundle():
     history_frames = []
     chart_allowed_keys = []
@@ -2425,7 +2529,7 @@ def render_news_bullets(writing, news_df):
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
               metrics, writing, news_df, status, cotd=None, cotd_png=None, fx_df=None,
-              research_docs=None):
+              research_docs=None, research_themes=None):
     """Professional one-page landscape PDF. Max 2 levels of Table nesting."""
     from reportlab.platypus import HRFlowable
     buffer = BytesIO()
@@ -2759,11 +2863,56 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     ]))
     story += [data_r1, Spacer(1, 0.12*cm), data_r2]
 
-    # ── 5. RESEARCH HIGHLIGHTS (if docs uploaded) ─────────────────────────────
-    # Compact bullet-list style instead of a table — saves ~1.5cm of vertical
-    # space (no header row, no table padding) and lets long text wrap freely
-    # so nothing is truncated.
-    if research_docs:
+    # ── 5. RESEARCH HIGHLIGHTS ────────────────────────────────────────────────
+    # Preferred rendering: the Gemini-synthesised `research_themes` — themed
+    # bullets with bank attribution (e.g. "Oil & Middle East: UBS… OCBC…").
+    # Fallback: the per-doc bullet list we used before Gemini synthesis,
+    # used when Gemini fails or is disabled.
+    _themes_list = (research_themes or {}).get("themes") if isinstance(research_themes, dict) else None
+    if _themes_list:
+        # Assign a colour per bank so the eye can group "what each house says".
+        _bank_palette = [BLU, GRN, RED, NAV, MID, GRY]
+        _bank_colour: dict[str, object] = {}
+
+        def _colour_for(bank: str):
+            if bank not in _bank_colour:
+                _bank_colour[bank] = _bank_palette[len(_bank_colour) % len(_bank_palette)]
+            return _bank_colour[bank]
+
+        story += [
+            Spacer(1, 0.06*cm),
+            HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
+            Spacer(1, 0.03*cm),
+            P("RESEARCH HIGHLIGHTS \u2014 cross-bank view",
+              fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
+            Spacer(1, 0.04*cm),
+        ]
+
+        for theme in _themes_list[:5]:
+            theme_name = theme.get("theme") or ""
+            bullets = theme.get("bullets") or []
+            if not theme_name or not bullets:
+                continue
+            # Theme header line — bold, small caps via uppercase.
+            story.append(P(
+                f"<b>{_xs(theme_name).upper()}</b>",
+                sz=5.0, col=NAV, lead=6.5,
+            ))
+            # One indented bullet per bank.
+            for b in bullets:
+                bank = str(b.get("bank") or "")
+                view = str(b.get("view") or "")
+                if not bank or not view:
+                    continue
+                bcol = _colour_for(bank)
+                bullet_line = (
+                    f"\u00a0\u00a0\u2022 <font color=\"{bcol.hexval()}\">"
+                    f"<b>{_xs(bank)}</b></font>: {_xs(view)}"
+                )
+                story.append(P(bullet_line, sz=4.9, col=TXT, lead=6.3))
+            story.append(Spacer(1, 0.05*cm))
+
+    elif research_docs:
         res_lines: list[tuple[str, str, str, object]] = []
         # IMPORTANT: use `rdoc` as the loop variable — `doc` is already the
         # outer SimpleDocTemplate; shadowing it breaks the final doc.build().
@@ -2985,6 +3134,11 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
     research_context = get_research_context(research_docs)
     writing, gemini_status = build_writing(news_df, snapshot, use_gemini_flag, research_context)
 
+    # Cross-bank research synthesis — Gemini produces themed bullets with
+    # bank attribution (e.g. "Oil: UBS says… OCBC says…"). Empty dict on
+    # failure / Gemini off / no research.
+    research_themes = build_research_themes(research_docs, use_gemini_flag)
+
     # Merge Gemini per-article angles into news_df (keyed by headline)
     angles = writing.pop("article_angles", [])
     if angles and not news_df.empty:
@@ -3035,6 +3189,7 @@ def build_base_state(include_crypto_flag, use_gemini_flag):
         "metrics": metrics,
         "chart_allowed_keys": chart_allowed_keys,
         "include_crypto_flag": include_crypto_flag,
+        "research_themes": research_themes,
     }
 
 
@@ -3216,6 +3371,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         cotd_png=cotd_png,
         fx_df=base_state.get("fx_df"),
         research_docs=st.session_state.get("research_docs"),
+        research_themes=base_state.get("research_themes"),
     )
 
     state = dict(base_state)
@@ -3309,15 +3465,24 @@ with st.sidebar:
                     _drive_pdf_uploader is not None
                     and f.name not in st.session_state["_drive_uploaded"]
                 ):
+                    err_msg = ""
                     try:
                         new_id = _drive_pdf_uploader(f.name, pdf_bytes)
-                    except Exception:
+                    except Exception as _exc:
                         new_id = None
+                        err_msg = f"{type(_exc).__name__}: {str(_exc)[:160]}"
                     if new_id:
                         drive_ok += 1
                         st.session_state["_drive_uploaded"].add(f.name)
                     else:
                         drive_fail += 1
+                        # Pull the recorded reason from the uploader fn if it
+                        # set one, else use the exception we caught above.
+                        if not err_msg:
+                            err_msg = getattr(
+                                _drive_pdf_uploader, "last_error", "unknown error"
+                            )
+                        st.caption(f"⚠️ {f.name[:40]}: {err_msg[:120]}")
 
         if drive_ok:
             st.caption(f"☁️ Uploaded {drive_ok} PDF(s) to Drive Research_Inbox.")

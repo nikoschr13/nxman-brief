@@ -1714,20 +1714,127 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
 
 
 def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
-    """Per-bank summary of what each uploaded broker says.
+    """Deterministic per-bank summary from parsed document structure.
 
-    Simplified 2026-04-24: summarise ONE document at a time instead of
-    cross-bank synthesis. That keeps each call to a narrow, grounded task
-    ("summarise this specific PDF") which Gemini handles reliably, and
-    eliminates the cross-bank contamination that caused hallucinations
-    like the 'UBS expects Fed 25bps' fabrication.
+    2026-04-24 final approach: no AI, no hallucinations. We render the same
+    structured data the website shows — equity viewpoints, rating changes,
+    top Buys / Sells ranked by upside, etc. If a document is generic research
+    we couldn't parse structurally, it's simply omitted from the PDF
+    (better nothing than fabricated summaries).
 
-    Returns: {"banks": [{"bank": "UBS", "bullets": ["..."]}]}. Empty dict on
-    failure / no research / Gemini off. If a specific bank fails, that bank
-    is omitted — no mechanical fallback.
+    Returns: {"banks": [{"bank": "UBS", "bullets": ["..."]}]}
     """
     empty = {"banks": [], "themes": []}
-    if not research_docs or not use_gemini or not GEMINI_API_KEY:
+    if not research_docs:
+        return empty
+
+    def _infer_bank(fname: str) -> str:
+        fn = fname.lower()
+        if "morning call" in fn:                        return "BoS"
+        if "barclays"     in fn:                        return "Barclays"
+        if "daily europe" in fn:                        return "UBS"
+        if "equity_coverage" in fn or "universe" in fn: return "UBS Universe"
+        if "dmo"          in fn or "ocbc" in fn:        return "OCBC"
+        if "goldman"      in fn:                        return "Goldman"
+        if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
+        return fname.split(".")[0][:24]
+
+    def _num(v) -> float:
+        try:
+            return float(str(v or 0).replace("%", "").replace(",", ""))
+        except Exception:
+            return 0.0
+
+    per_bank: dict[str, list[str]] = {}
+
+    for fname, rdoc in research_docs.items():
+        try:
+            bank  = _infer_bank(fname)
+            dtype = rdoc.get("_doc_type", "generic_research")
+            bullets = per_bank.setdefault(bank, [])
+
+            if dtype == "equity_coverage":
+                stocks = rdoc.get("stocks") or []
+                buys  = [s for s in stocks if s.get("rating") == "Buy"]
+                sells = [s for s in stocks if s.get("rating") == "Sell"]
+                # Sort Buys by upside desc, Sells by upside asc (worst downside first)
+                buys.sort(key=lambda s: _num(s.get("upside")), reverse=True)
+                sells.sort(key=lambda s: _num(s.get("upside")))
+
+                if buys:
+                    top = []
+                    for s in buys[:4]:
+                        nm = str(s.get("name", ""))[:18]
+                        up = _num(s.get("upside"))
+                        dy = _num(s.get("div_yield"))
+                        pieces = [nm]
+                        if up:
+                            pieces.append(f"+{up:.0f}%")
+                        if dy:
+                            pieces.append(f"{dy:.1f}% yld")
+                        top.append(" ".join(pieces))
+                    bullets.append("Top Buys (by upside): " + " · ".join(top))
+                if sells:
+                    top = []
+                    for s in sells[:4]:
+                        nm = str(s.get("name", ""))[:18]
+                        up = _num(s.get("upside"))
+                        if up:
+                            top.append(f"{nm} {up:.0f}%")
+                        else:
+                            top.append(nm)
+                    bullets.append("Top Sells: " + " · ".join(top))
+
+            elif dtype == "morning_call":
+                for vp in (rdoc.get("equity_viewpoints") or [])[:3]:
+                    s = str(vp).strip()
+                    if s:
+                        bullets.append(s[:200])
+                rec = rdoc.get("recommendation_changes") or {}
+                for upg in (rec.get("upgrades") or [])[:3]:
+                    nm = upg.get("name", "")
+                    old = upg.get("rating_old", "")
+                    new = upg.get("rating_new", "")
+                    bullets.append(f"\u2b06 Upgrade: {nm} {old}\u2192{new}".strip())
+                for dwn in (rec.get("downgrades") or [])[:3]:
+                    nm = dwn.get("name", "")
+                    old = dwn.get("rating_old", "")
+                    new = dwn.get("rating_new", "")
+                    bullets.append(f"\u2b07 Downgrade: {nm} {old}\u2192{new}".strip())
+
+            # generic_research and others: skip entirely — no mechanical
+            # text dumps, no AI summaries. User sees these docs in the
+            # website's Research Library but not in the PDF. Better to
+            # omit than to fabricate.
+
+            if not bullets:
+                per_bank.pop(bank, None)
+        except Exception:
+            continue
+
+    if not per_bank:
+        return empty
+
+    banks_out = [
+        {"bank": bank, "bullets": per_bank[bank][:6]}
+        for bank in sorted(per_bank.keys())
+    ]
+
+    # Diagnostic stays so the sidebar can still tell us what happened.
+    try:
+        import streamlit as _st
+        _st.session_state["_research_themes_debug"] = {
+            "source": "deterministic (no AI)",
+            "banks_rendered": [b["bank"] for b in banks_out],
+            "total_bullets": sum(len(b["bullets"]) for b in banks_out),
+        }
+    except Exception:
+        pass
+
+    return {"banks": banks_out, "themes": []}
+
+    # Gemini-driven path below kept unreachable for possible future reuse.
+    if not use_gemini or not GEMINI_API_KEY:
         return empty
 
     # Build a clean {bank_label: raw_text_excerpt} map for Gemini.

@@ -1769,37 +1769,35 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     payload_dict = {
         "instruction": (
             "You are synthesising broker research for a daily market brief. "
-            "The CURRENT DATE is " + datetime.now().strftime("%Y-%m-%d") + " — "
-            "all forecasts and references should be treated as current; do NOT "
-            "anchor to any other year. "
+            "The CURRENT DATE is " + datetime.now().strftime("%Y-%m-%d") + ". "
             "\n\n"
-            "CRITICAL GROUNDING RULES — violations will corrupt the brief:\n"
-            "1. The ONLY banks that may appear in 'bank' fields are EXACTLY "
-            "these: " + ", ".join(allowed_banks) + ". "
-            "Do NOT add, invent, rename, or substitute other banks (no "
-            "Goldman Sachs, no JP Morgan, no Deutsche Bank, etc. — UNLESS one "
-            "of those is in the allowed list above).\n"
+            "CRITICAL GROUNDING RULES — violations corrupt the brief:\n"
+            "1. The ONLY banks that may appear in 'bank' fields are: "
+            + ", ".join(allowed_banks) + ". No other banks. No renames.\n"
             "2. Every 'view' MUST be a direct paraphrase of text that appears "
-            "in that specific bank's 'text' field in the input. Do NOT "
-            "fabricate price targets, ratings, rate calls, GDP forecasts, or "
-            "any other numbers. If a bank's text doesn't state a specific "
-            "number, don't invent one.\n"
-            "3. Do NOT use training-data knowledge about what these banks "
-            "'typically' say. Use ONLY what is written in the provided text.\n"
-            "4. If a theme is only covered by ONE of the input banks, either "
-            "include it with that single bullet (no filler from other banks) "
-            "or drop the theme — never pad with invented views.\n"
+            "IN THAT SPECIFIC BANK'S 'text' field. You MUST include an "
+            "'evidence' field with a VERBATIM quote (10-40 words) from that "
+            "bank's 'text' that supports the view. If you cannot find a "
+            "supporting verbatim quote, OMIT the bullet.\n"
+            "3. The 'evidence' quote MUST appear character-for-character "
+            "inside the corresponding bank's 'text' (allowing only whitespace "
+            "normalisation). DO NOT paraphrase the evidence. DO NOT invent "
+            "quotes.\n"
+            "4. NEVER fabricate price targets, rate calls, GDP forecasts, "
+            "ratings. Do NOT mix up central banks (the Fed is NOT the ECB). "
+            "If a bank discusses the ECB, do not rephrase as the Fed. "
+            "If a bank discusses disinflation, do not rephrase as rate hikes.\n"
+            "5. Do NOT use training-data knowledge about what these banks "
+            "'typically' say. ONLY what is literally in the provided text.\n"
+            "6. If only 1 bank covers a theme, include that single bullet. "
+            "Do NOT pad with views from banks whose text doesn't cover it.\n"
             "\n"
             "OUTPUT FORMAT — raw JSON only, no markdown, no code fences:\n"
             "{\"themes\": [{\"theme\": str, \"bullets\": "
-            "[{\"bank\": str, \"view\": str}]}]}. "
-            "Pick 3 to 5 themes actually present in the inputs (e.g. "
-            "oil/geopolitics, AI and tech, rates/Fed, Europe outlook, EM FX, "
-            "specific stock calls). For each theme: 1-4 bank-attributed "
-            "bullets, each 'view' one tight sentence with concrete specifics "
-            "(price targets, yield levels, ratings changes) where the source "
-            "text provides them. Where the source texts disagree, call it "
-            "out explicitly in the bullet. Total output under ~400 words."
+            "[{\"bank\": str, \"view\": str, \"evidence\": str}]}]}\n"
+            "Pick 3 to 5 themes actually present in the inputs. For each "
+            "theme: 1-4 bank-attributed bullets. 'view' is one tight sentence. "
+            "'evidence' is the verbatim supporting quote from the source."
         ),
         "allowed_banks": allowed_banks,
         "research": bank_docs,
@@ -1850,7 +1848,37 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
                 return canonical
         return None
 
+    # Build a bank -> source-text lookup for evidence verification.
+    import re as _re
+    def _norm(s: str) -> str:
+        # Collapse whitespace + lowercase for forgiving substring match.
+        return _re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+    bank_to_text: dict[str, str] = {}
+    for d in bank_docs:
+        bank_to_text.setdefault(d["bank"], "")
+        bank_to_text[d["bank"]] += " " + _norm(d["text"])
+
+    def _evidence_present(bank: str, evidence: str) -> bool:
+        """Return True if the evidence quote is found inside the bank's text.
+        Allows whitespace normalisation. Quote must be substantial (>=6 words)
+        to avoid trivial matches on common stopwords."""
+        ev = _norm(evidence)
+        if not ev or len(ev.split()) < 6:
+            return False
+        src = bank_to_text.get(bank, "")
+        if not src:
+            return False
+        # Direct substring first (most common case)
+        if ev in src:
+            return True
+        # Allow partial match: the first 40 chars of the quote must appear,
+        # which catches cases where Gemini truncated the tail.
+        head = ev[:40] if len(ev) > 40 else ev
+        return head in src and len(ev.split()) >= 8
+
     clean_themes: list[dict] = []
+    dropped_no_evidence: list[str] = []
     for t in themes[:5]:
         if not isinstance(t, dict):
             continue
@@ -1862,14 +1890,33 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
                 continue
             raw_bank = str(b.get("bank") or "")
             view = str(b.get("view") or "").strip()
+            evidence = str(b.get("evidence") or "").strip()
             resolved = _resolve_bank(raw_bank)
             if resolved is None:
-                # Bank not in allowed set — Gemini hallucinated. Drop silently.
+                continue  # bank not in allowed set
+            if not view:
                 continue
-            if view:
-                clean_bullets.append({"bank": resolved, "view": view})
+            # Evidence check: the verbatim quote must be in the bank's text.
+            # If absent, the bullet is almost certainly a hallucination.
+            if not _evidence_present(resolved, evidence):
+                dropped_no_evidence.append(f"{resolved}: {view[:60]}")
+                continue
+            clean_bullets.append({
+                "bank": resolved,
+                "view": view,
+                # Don't carry evidence into the render — it's just for gating.
+            })
         if theme_name and clean_bullets:
             clean_themes.append({"theme": theme_name, "bullets": clean_bullets})
+
+    # Log dropped bullets so they're visible if Nikos checks Streamlit logs.
+    if dropped_no_evidence:
+        try:
+            import streamlit as _st
+            # Stash on session_state so sidebar can optionally surface this.
+            _st.session_state["_research_themes_dropped"] = dropped_no_evidence
+        except Exception:
+            pass
 
     # If guardrail killed everything, return empty so the per-doc fallback
     # kicks in rather than showing a half-empty themed section.

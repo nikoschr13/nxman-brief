@@ -1516,17 +1516,25 @@ def _strip_json_fences(raw: str) -> str:
 
 
 def try_groq(payload_obj: dict):
-    """Call Groq OpenAI-compatible endpoint. payload_obj is the already-parsed dict."""
-    # Build a clean natural-language prompt from the structured payload
+    """Call Groq OpenAI-compatible endpoint. payload_obj is the already-parsed
+    dict. Generic: pass every key through as labelled JSON so Groq sees the
+    whole payload regardless of shape (news brief, research summarisation,
+    chart-of-day, etc.)."""
     instruction = payload_obj.get("instruction", "")
-    headlines   = payload_obj.get("headlines", [])
-    snapshot    = payload_obj.get("market_snapshot", [])
+    # Dump every NON-instruction key as a labelled JSON block.
+    data_blocks = []
+    for key, val in payload_obj.items():
+        if key == "instruction":
+            continue
+        try:
+            rendered = json.dumps(val, ensure_ascii=False, default=str)
+        except Exception:
+            rendered = str(val)
+        data_blocks.append(f"{key}:\n{rendered}")
 
-    user_msg = (
-        f"{instruction}\n\n"
-        f"Headlines (JSON):\n{json.dumps(headlines, ensure_ascii=False)}\n\n"
-        f"Market snapshot (JSON):\n{json.dumps(snapshot, ensure_ascii=False)}"
-    )
+    user_msg = instruction
+    if data_blocks:
+        user_msg = f"{instruction}\n\n" + "\n\n".join(data_blocks)
 
     r = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -1933,7 +1941,8 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             continue
 
         if not isinstance(out, dict):
-            debug_info.append(f"{bank}: no JSON ({str(reason)[:80]})")
+            # Full reason — shows both Gemini AND Groq errors.
+            debug_info.append(f"{bank}: no JSON ({str(reason)[:220]})")
             continue
 
         # Deep-extract bullets from whatever shape Gemini returned.
@@ -2359,12 +2368,15 @@ def pdf_chart_subset(weekly_df):
 def render_combined_card(item, snapshot_row, history, chart_key):
     """Single Plotly figure per card: coloured border + metric annotations + sparkline.
 
-    Layout: height=155, margin_t=62, margin_b=14
-      plot-area top  = (155-62)/155 = 0.600  → annotations sit at y > 0.60
-      plot-area bot  = 14/155       = 0.090
-    4 cards per row gives ~25 % screen width — compact grid.
+    Trading-terminal layout (redesigned 2026-04-24 for compactness):
+      Row 1 (top):    label (small, left)      ·  1D change (small, right)
+      Row 2 (middle): value (big, left)         ·  YTD change (small, right)
+      Row 3 (bottom): sparkline, fills remainder
+
+    Larger top margin so text has exclusive space (no chart-line showing through
+    text). Cards are the same outer size so the grid doesn't break.
     """
-    H, MT, MB, ML, MR = 155, 62, 14, 8, 6
+    H, MT, MB, ML, MR = 160, 74, 10, 10, 10
 
     if snapshot_row.empty:
         fig = go.Figure()
@@ -2457,24 +2469,29 @@ def render_combined_card(item, snapshot_row, history, chart_key):
             showticklabels=False,   # hide y-axis numbers — sparkline is for shape only
             automargin=False,
         ),
-        # All annotation y values > 0.60 (above plot area top at 0.600)
+        # Plot area: y ∈ [0.0625, 0.5375]. Text annotations live above 0.54.
+        # Row 1 top y=1.02 : label (left) + 1D change (right), accent-coloured
+        # Row 2 top y=0.80 : value (left, big) + YTD change (right, small)
         annotations=[
-            dict(x=0.04, y=0.99, xref="paper", yref="paper",
+            # Row 1 — label + 1D on same line
+            dict(x=0.03, y=1.02, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"<b>{lbl}</b>",
-                 font=dict(size=9, color="#475467"), showarrow=False),
-            dict(x=0.04, y=0.90, xref="paper", yref="paper",
+                 font=dict(size=9.5, color="#475467"), showarrow=False),
+            dict(x=0.97, y=1.02, xref="paper", yref="paper",
+                 xanchor="right", yanchor="top",
+                 text=f"<b>1D {d1_str}</b>",
+                 font=dict(size=9, color=accent if accent != "#94A3B8" else "#475467"),
+                 showarrow=False),
+            # Row 2 — value (big) + YTD (small)
+            dict(x=0.03, y=0.82, xref="paper", yref="paper",
                  xanchor="left", yanchor="top",
                  text=f"<b>{value_str}</b>{extra}",
-                 font=dict(size=16, color="#0F2D52"), showarrow=False),
-            dict(x=0.04, y=0.76, xref="paper", yref="paper",
-                 xanchor="left", yanchor="top",
-                 text=f"<b>1D</b> {d1_str}",
-                 font=dict(size=10, color="#344054"), showarrow=False),
-            dict(x=0.04, y=0.67, xref="paper", yref="paper",
-                 xanchor="left", yanchor="top",
-                 text=f"YTD  {ytd_str}",
-                 font=dict(size=9, color="#667085"), showarrow=False),
+                 font=dict(size=17, color="#0F2D52"), showarrow=False),
+            dict(x=0.97, y=0.78, xref="paper", yref="paper",
+                 xanchor="right", yanchor="top",
+                 text=f"YTD {ytd_str}",
+                 font=dict(size=8.5, color="#667085"), showarrow=False),
         ],
         shapes=[dict(
             type="rect", xref="paper", yref="paper",

@@ -1946,369 +1946,6 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     ]
     return {"banks": banks_out, "themes": []}
 
-    # unreachable legacy
-    _unreachable = None
-
-    # Build a clean {bank_label: raw_text_excerpt} map for Gemini.
-    # Bank label is inferred from filename heuristics.
-    def _infer_bank(fname: str) -> str:
-        fn = fname.lower()
-        if "morning call" in fn or "bos" in fn:           return "BoS"
-        if "barclays"     in fn:                          return "Barclays"
-        if "daily europe" in fn or "ubs"        in fn:    return "UBS"
-        if "equity_coverage" in fn or "universe" in fn:   return "UBS Universe"
-        if "dmo"          in fn or "ocbc"       in fn:    return "OCBC"
-        if "gs_"          in fn or "goldman"    in fn:    return "Goldman"
-        if "jpm"          in fn or "jpmorgan"   in fn:    return "JPMorgan"
-        if "ms_"          in fn or "morgan stanley" in fn: return "Morgan Stanley"
-        return fname.split(".")[0][:30]  # fallback to filename stub
-
-    bank_docs: list[dict] = []
-    for fname, rdoc in research_docs.items():
-        if rdoc.get("error"):
-            continue
-        # Prefer raw text; fall back to structured fields for morning_call.
-        text = (rdoc.get("text") or "").strip()
-        if not text and rdoc.get("_doc_type") == "morning_call":
-            parts = []
-            for reg, txt in (rdoc.get("regional_summaries") or {}).items():
-                if txt: parts.append(f"[{reg}] {txt}")
-            for vp in (rdoc.get("equity_viewpoints") or []):
-                parts.append(f"[equity view] {vp}")
-            text = "\n".join(parts)
-        if not text:
-            continue
-        bank_docs.append({
-            "bank": _infer_bank(fname),
-            "source": fname,
-            "text": text[:3000],  # cap per-doc to keep prompt reasonable
-        })
-
-    if len(bank_docs) < 1:
-        return empty
-
-    # Single Gemini call: feed all banks' texts, ask for per-bank summaries.
-    # No post-validator — the tight prompt IS the grounding. If Gemini
-    # hallucinates, fix the prompt, don't layer validators.
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    payload = _safe_json_dumps({
-        "instruction": (
-            f"The CURRENT DATE is {today_str}. "
-            "You will receive a list of broker research documents in "
-            "'research'. Each entry has a 'bank' label and the extracted "
-            "'text' of the document. "
-            "\n\n"
-            "TASK: produce 3 to 5 short bullets per bank, summarising what "
-            "THAT bank's document says. "
-            "\n\n"
-            "RULES:\n"
-            "1. Use ONLY information that literally appears in that bank's "
-            "'text'. Do not add anything from training data.\n"
-            "2. Do not invent numbers, price targets, ratings, analyst "
-            "names, rate forecasts, or GDP calls.\n"
-            "3. Do not mix up central banks (Fed is not ECB is not BoJ). "
-            "Do not attribute one bank's view to another.\n"
-            "4. Each bullet is one tight sentence (10-25 words). Prefer "
-            "concrete specifics where the text has them.\n"
-            "5. If a bank's text is thin (e.g. just a ticker list), return "
-            "just 1-2 bullets for it. Don't pad.\n"
-            "\n"
-            "OUTPUT: raw JSON only, no markdown, no code fences. "
-            "Shape: {\"banks\": [{\"bank\": str, \"bullets\": [str, ...]}]}."
-        ),
-        "research": bank_docs,
-    })
-
-    out, reason = ai_generate_json(payload)
-
-    # Diagnostic — survives as a session_state value even if nothing renders,
-    # so the sidebar can tell us what happened.
-    try:
-        import streamlit as _st
-        _st.session_state["_research_themes_debug"] = {
-            "gemini_reason": str(reason)[:120],
-            "has_banks_key": isinstance(out, dict) and "banks" in out,
-            "n_banks_in": len(bank_docs),
-        }
-    except Exception:
-        pass
-
-    if not isinstance(out, dict):
-        return empty
-
-    banks_raw = out.get("banks")
-    if not isinstance(banks_raw, list):
-        # Tolerate legacy 'themes' shape — flatten into banks.
-        themes_raw = out.get("themes")
-        if isinstance(themes_raw, list):
-            regrouped: dict[str, list[str]] = {}
-            for t in themes_raw:
-                if not isinstance(t, dict):
-                    continue
-                for b in (t.get("bullets") or []):
-                    if not isinstance(b, dict):
-                        continue
-                    bank = str(b.get("bank") or "").strip()
-                    view = str(b.get("view") or "").strip()
-                    if bank and view:
-                        regrouped.setdefault(bank, []).append(view)
-            banks_raw = [{"bank": k, "bullets": v} for k, v in regrouped.items()]
-        else:
-            return empty
-
-    clean_banks: list[dict] = []
-    for entry in banks_raw[:10]:
-        if not isinstance(entry, dict):
-            continue
-        bank = str(entry.get("bank") or "").strip()
-        if not bank:
-            continue
-        raw_bullets = entry.get("bullets") or []
-        bullets_clean: list[str] = []
-        for b in (raw_bullets if isinstance(raw_bullets, list) else [])[:5]:
-            if isinstance(b, str):
-                s = b.strip()
-            elif isinstance(b, dict):
-                s = str(b.get("view") or b.get("text") or b.get("bullet") or "").strip()
-            else:
-                continue
-            if s:
-                bullets_clean.append(s)
-        if bullets_clean:
-            clean_banks.append({"bank": bank, "bullets": bullets_clean})
-
-    if not clean_banks:
-        return empty
-
-    return {"banks": clean_banks, "themes": []}
-
-    # -- unreachable legacy --
-    allowed_banks = sorted({d["bank"] for d in bank_docs})
-
-    payload_dict = {
-        "instruction": (
-            "You are summarising broker research for a daily market brief. "
-            "The CURRENT DATE is " + datetime.now().strftime("%Y-%m-%d") + ". "
-            "\n\n"
-            "TASK: For each bank in 'research', produce 3-5 short bullet "
-            "summaries of THAT BANK's views. Each bullet captures ONE "
-            "specific point the bank makes in its research. Keep bullets "
-            "tight (10-25 words), factual, concrete. Prefer bullets with "
-            "specifics (price targets, rating changes, yield levels, rate "
-            "calls). Avoid generic commentary.\n"
-            "\n"
-            "CRITICAL GROUNDING RULES — violations corrupt the brief:\n"
-            "1. The ONLY banks that may appear in the output are: "
-            + ", ".join(allowed_banks) + ". No other banks. No renames.\n"
-            "2. Every bullet MUST paraphrase text that literally appears in "
-            "that bank's 'text' field. If a claim is not in that bank's "
-            "text, DO NOT include it.\n"
-            "3. NEVER fabricate price targets, rate calls, GDP forecasts, "
-            "ratings, analyst names, or any numbers. Do NOT mix up central "
-            "banks (Fed is NOT ECB). Do NOT rephrase 'disinflation' as "
-            "'rate hike'. Do NOT attribute one bank's view to another.\n"
-            "4. Do NOT use training-data knowledge about what these banks "
-            "'typically' say. Use ONLY what is in the provided text.\n"
-            "5. If a bank's text is thin (e.g. just a list of tickers with "
-            "no commentary), return fewer bullets — even 1 — rather than "
-            "padding with invented commentary.\n"
-            "\n"
-            "OUTPUT FORMAT — raw JSON only, no markdown, no code fences:\n"
-            "{\"banks\": [{\"bank\": str, \"bullets\": [str, str, ...]}]}\n"
-            "One entry per bank. 3-5 bullets per bank where possible; at "
-            "least 1. Each bullet is a plain string (no nested objects)."
-        ),
-        "allowed_banks": allowed_banks,
-        "research": bank_docs,
-    }
-
-    try:
-        payload = _safe_json_dumps(payload_dict)
-    except Exception:
-        return empty
-
-    out, _reason = ai_generate_json(payload)
-    if not isinstance(out, dict):
-        return empty
-    # Prefer the new 'banks' key; fall back to 'themes' if Gemini uses the
-    # legacy key. We need SOMETHING iterable to process.
-    banks_raw = out.get("banks")
-    if not isinstance(banks_raw, list):
-        # If Gemini still produced themes, flatten them into banks by taking
-        # each theme's bullets and regrouping by 'bank' field.
-        themes_raw = out.get("themes")
-        if isinstance(themes_raw, list):
-            regrouped: dict[str, list[str]] = {}
-            for t in themes_raw:
-                if not isinstance(t, dict):
-                    continue
-                for b in (t.get("bullets") or []):
-                    if not isinstance(b, dict):
-                        continue
-                    bank = str(b.get("bank") or "").strip()
-                    view = str(b.get("view") or "").strip()
-                    if bank and view:
-                        regrouped.setdefault(bank, []).append(view)
-            banks_raw = [{"bank": k, "bullets": v} for k, v in regrouped.items()]
-        else:
-            return empty
-
-    # Hard guardrail: drop any bullet whose bank is not in the allowed set.
-    # Matches case-insensitively and tolerates minor variants (e.g. "UBS" vs
-    # "UBS Wealth Management", "BoS" vs "Bank of Singapore").
-    allowed_norm: dict[str, str] = {}
-    for b in allowed_banks:
-        allowed_norm[b.lower()] = b  # canonical casing
-    # Add recognised aliases to the map so legitimate variants pass.
-    _aliases = {
-        "bank of singapore": "BoS",
-        "bos":              "BoS",
-        "ubs wealth":       "UBS",
-        "ubs gwm":          "UBS",
-        "ubs ag":           "UBS",
-        "ubs universe":     "UBS Universe",
-        "oversea-chinese banking": "OCBC",
-        "oversea chinese banking": "OCBC",
-    }
-    for alias, canonical in _aliases.items():
-        if canonical in allowed_banks:
-            allowed_norm[alias] = canonical
-
-    def _resolve_bank(raw: str) -> str | None:
-        r = raw.strip().lower()
-        if not r:
-            return None
-        if r in allowed_norm:
-            return allowed_norm[r]
-        # substring match: "UBS" should match "UBS Wealth" etc. in either direction
-        for key, canonical in allowed_norm.items():
-            if key and (key in r or r in key):
-                return canonical
-        return None
-
-    # Build a bank -> source-text lookup for evidence verification.
-    import re as _re
-
-    _stopwords = {
-        "the","a","an","and","or","but","of","in","to","for","on","at","by",
-        "with","is","are","was","were","be","been","being","as","that","this",
-        "it","its","our","we","they","their","from","has","have","had","will",
-        "would","can","could","may","might","should","do","does","did","not",
-        "no","if","than","then","there","here","which","who","what","how",
-        "also","more","most","less","very","some","any","all","us",
-    }
-
-    def _norm(s: str) -> str:
-        # Lowercase, strip non-word chars (including OCR artifacts like ■ from
-        # pdfplumber), collapse whitespace.
-        s2 = _re.sub(r"[^a-z0-9\s]", " ", (s or "").lower())
-        return _re.sub(r"\s+", " ", s2).strip()
-
-    def _content_words(s: str) -> set[str]:
-        return {w for w in _norm(s).split() if len(w) >= 4 and w not in _stopwords}
-
-    bank_to_words: dict[str, set[str]] = {}
-    for d in bank_docs:
-        w = bank_to_words.setdefault(d["bank"], set())
-        w.update(_content_words(d["text"]))
-
-    def _overlap_ratio(text: str, bank: str) -> float:
-        """Fraction of meaningful words in `text` that appear in bank's source.
-        Returns 0.0 if too few content words to judge."""
-        words = _content_words(text)
-        if len(words) < 3:
-            return 0.0
-        src = bank_to_words.get(bank, set())
-        if not src:
-            return 0.0
-        return len(words & src) / len(words)
-
-    def _bullet_is_grounded(bank: str, view: str, evidence: str) -> bool:
-        """Accept a bullet if EITHER the evidence quote OR the view itself
-        shows enough overlap with the bank's source text. Using max() of
-        the two makes the gate robust to Gemini omitting/paraphrasing
-        evidence, while still catching clean hallucinations (where both
-        view and evidence contain words the bank's PDF doesn't have).
-
-        Example catches:
-          * Fake 'UBS expects Fed to raise rates 25bps': UBS PDF has no
-            content words 'fed','raise','rates','basis','points' together
-            → view overlap < 50% → dropped.
-          * Real paraphrase of a Barclays rating change: both view and
-            evidence contain 'barclays','target','price','overweight' that
-            appear in the Barclays doc → accepted.
-        """
-        ev_ratio   = _overlap_ratio(evidence, bank) if evidence else 0.0
-        view_ratio = _overlap_ratio(view,     bank) if view     else 0.0
-        # Loosen threshold because Gemini often abstracts heavily.
-        return max(ev_ratio, view_ratio) >= 0.50
-
-    # Per-bank aggregation + grounding.
-    clean_banks_map: dict[str, list[str]] = {}
-    dropped_log: list[str] = []
-    total_seen = 0
-
-    for entry in banks_raw[:10]:
-        if not isinstance(entry, dict):
-            continue
-        raw_bank = str(entry.get("bank") or "")
-        resolved = _resolve_bank(raw_bank)
-        bullets = entry.get("bullets") or []
-        if not isinstance(bullets, list):
-            continue
-
-        for raw_bullet in bullets[:6]:
-            total_seen += 1
-            # Accept either plain string bullets or {text: str} dicts.
-            if isinstance(raw_bullet, dict):
-                bullet = str(raw_bullet.get("view")
-                             or raw_bullet.get("text")
-                             or raw_bullet.get("bullet") or "").strip()
-            else:
-                bullet = str(raw_bullet or "").strip()
-
-            if resolved is None:
-                dropped_log.append(f"bank-not-allowed:{raw_bank[:20]}")
-                continue
-            if not bullet:
-                dropped_log.append(f"empty-bullet:{resolved}")
-                continue
-            # Ground each bullet against that bank's source text only.
-            if _overlap_ratio(bullet, resolved) < 0.50:
-                vw_r = _overlap_ratio(bullet, resolved)
-                dropped_log.append(
-                    f"ungrounded:{resolved} view={vw_r:.2f} — {bullet[:60]}"
-                )
-                continue
-            clean_banks_map.setdefault(resolved, []).append(bullet)
-
-    # Preserve the order of allowed_banks so the render order is stable.
-    clean_banks: list[dict] = []
-    for bank in allowed_banks:
-        if bank in clean_banks_map:
-            clean_banks.append({
-                "bank": bank,
-                "bullets": clean_banks_map[bank][:5],  # cap at 5 per bank
-            })
-
-    # Diagnostic: stash drop reasons in session_state so the sidebar can show
-    # them. Helps debug why research section is empty without grepping logs.
-    try:
-        import streamlit as _st
-        _st.session_state["_research_themes_debug"] = {
-            "seen": total_seen,
-            "kept": sum(len(b["bullets"]) for b in clean_banks),
-            "drops": dropped_log[:10],
-            "allowed_banks": allowed_banks,
-        }
-    except Exception:
-        pass
-
-    if not clean_banks:
-        return empty
-
-    return {"banks": clean_banks, "themes": []}
-
 
 def build_bundle():
     history_frames = []
@@ -3398,6 +3035,44 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     # bullets of its own views. Fallback: a compact per-doc line list when
     # Gemini synthesis returns nothing.
     _banks_list = (research_themes or {}).get("banks") if isinstance(research_themes, dict) else None
+
+    # Debug path: if we HAVE research_docs but NO bank summaries came back,
+    # show the diagnostic in the PDF itself so the user can see exactly why.
+    # Without this we get silent "empty section" with no signal about why.
+    if not _banks_list and research_docs:
+        try:
+            import streamlit as _st
+            _dbg = _st.session_state.get("_research_themes_debug") or {}
+        except Exception:
+            _dbg = {}
+        story += [
+            Spacer(1, 0.06*cm),
+            HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
+            Spacer(1, 0.03*cm),
+            P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
+            Spacer(1, 0.04*cm),
+            P(f"<i>No AI summaries produced. Diagnostic:</i>",
+              sz=4.8, col=GRY, lead=6),
+        ]
+        if _dbg:
+            banks_rendered = _dbg.get("banks_rendered") or []
+            notes = _dbg.get("notes") or []
+            story.append(P(
+                _xs(f"banks rendered: {banks_rendered or 'none'}"),
+                sz=4.6, col=GRY, lead=6,
+            ))
+            for n in notes[:8]:
+                story.append(P(
+                    f"\u00a0\u00a0\u2022 {_xs(str(n))[:180]}",
+                    sz=4.6, col=GRY, lead=5.8,
+                ))
+        else:
+            story.append(P(
+                _xs(f"research_docs count: {len(research_docs)}; "
+                    "no debug info — check if build_research_themes was called."),
+                sz=4.6, col=GRY, lead=6,
+            ))
+
     if _banks_list:
         # Assign a colour per bank — header tint.
         _bank_palette = [BLU, GRN, RED, NAV, MID]

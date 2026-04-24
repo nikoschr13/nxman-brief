@@ -30,10 +30,11 @@ try:
 except Exception:
     _drive_pdf_loader = None
 
-try:
-    from brief_drive_reader import upload_pdf_to_research_inbox as _drive_pdf_uploader
-except Exception:
-    _drive_pdf_uploader = None
+# Drive upload is intentionally disabled: Google service accounts cannot
+# write to personal My Drive folders (Service Accounts do not have storage
+# quota). PDFs are added to Drive manually by the user; the Brief just reads
+# from Research_Inbox.
+_drive_pdf_uploader = None  # kept for any legacy reference sites
 
 load_dotenv()
 
@@ -1767,101 +1768,102 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if len(bank_docs) < 1:
         return empty
 
-    # Simple loop: one Gemini call per document. Each call asks for a
-    # grounded summary of that specific PDF. No cross-bank synthesis, no
-    # post-validator — the tight prompt is the whole defence.
-    per_bank: dict[str, list[str]] = {}
-    debug_drops: list[str] = []
+    # Single Gemini call: feed all banks' texts, ask for per-bank summaries.
+    # No post-validator — the tight prompt IS the grounding. If Gemini
+    # hallucinates, fix the prompt, don't layer validators.
     today_str = datetime.now().strftime("%Y-%m-%d")
+    payload = _safe_json_dumps({
+        "instruction": (
+            f"The CURRENT DATE is {today_str}. "
+            "You will receive a list of broker research documents in "
+            "'research'. Each entry has a 'bank' label and the extracted "
+            "'text' of the document. "
+            "\n\n"
+            "TASK: produce 3 to 5 short bullets per bank, summarising what "
+            "THAT bank's document says. "
+            "\n\n"
+            "RULES:\n"
+            "1. Use ONLY information that literally appears in that bank's "
+            "'text'. Do not add anything from training data.\n"
+            "2. Do not invent numbers, price targets, ratings, analyst "
+            "names, rate forecasts, or GDP calls.\n"
+            "3. Do not mix up central banks (Fed is not ECB is not BoJ). "
+            "Do not attribute one bank's view to another.\n"
+            "4. Each bullet is one tight sentence (10-25 words). Prefer "
+            "concrete specifics where the text has them.\n"
+            "5. If a bank's text is thin (e.g. just a ticker list), return "
+            "just 1-2 bullets for it. Don't pad.\n"
+            "\n"
+            "OUTPUT: raw JSON only, no markdown, no code fences. "
+            "Shape: {\"banks\": [{\"bank\": str, \"bullets\": [str, ...]}]}."
+        ),
+        "research": bank_docs,
+    })
 
-    for doc_entry in bank_docs:
-        bank = doc_entry["bank"]
-        source_text = doc_entry["text"]
-        if not source_text.strip():
-            continue
+    out, reason = ai_generate_json(payload)
 
-        one_doc_payload = _safe_json_dumps({
-            "instruction": (
-                f"The CURRENT DATE is {today_str}. "
-                "Below is the full extracted text of a single broker research "
-                f"document from {bank}. Your job is to produce 3 to 5 short "
-                "bullet-point summaries of what THIS document says. "
-                "\n\n"
-                "HARD RULES:\n"
-                "1. Use ONLY information that literally appears in the "
-                "document text below. Do NOT add anything from your training "
-                "data about what this bank 'usually' says.\n"
-                "2. Do NOT invent price targets, ratings, rate calls, GDP "
-                "forecasts, analyst names, or numbers. If the document doesn't "
-                "state a number, don't include one.\n"
-                "3. Do NOT mix up central banks: the Fed is not the ECB is "
-                "not the BoJ. If the document talks about the ECB, say ECB.\n"
-                "4. Each bullet is one tight sentence (10-25 words). Prefer "
-                "concrete calls (e.g. 'Brent expected to stay above $90/bbl "
-                "through year-end') over vague statements.\n"
-                "5. If the document is thin (e.g. just a list of tickers "
-                "with no commentary), return fewer bullets — even just 1 — "
-                "rather than padding.\n"
-                "\n"
-                "OUTPUT FORMAT: raw JSON only, no markdown, no code fences. "
-                "Shape: {\"bullets\": [str, str, ...]}"
-            ),
-            "document_text": source_text,
-        })
-
-        try:
-            out, reason = ai_generate_json(one_doc_payload)
-        except Exception as e:
-            debug_drops.append(f"{bank}: exception {type(e).__name__}")
-            continue
-
-        if not isinstance(out, dict):
-            debug_drops.append(f"{bank}: non-dict response ({str(reason)[:40]})")
-            continue
-
-        bullets_raw = out.get("bullets")
-        if not isinstance(bullets_raw, list) or not bullets_raw:
-            debug_drops.append(f"{bank}: no bullets in response")
-            continue
-
-        bullets_clean: list[str] = []
-        for b in bullets_raw[:5]:
-            if isinstance(b, str):
-                s = b.strip()
-                if s:
-                    bullets_clean.append(s)
-            elif isinstance(b, dict):
-                s = str(b.get("view") or b.get("text") or b.get("bullet") or "").strip()
-                if s:
-                    bullets_clean.append(s)
-
-        if bullets_clean:
-            per_bank.setdefault(bank, []).extend(bullets_clean)
-
-    # Diagnostic so we can see what happened without grepping Streamlit logs.
+    # Diagnostic — survives as a session_state value even if nothing renders,
+    # so the sidebar can tell us what happened.
     try:
         import streamlit as _st
         _st.session_state["_research_themes_debug"] = {
-            "seen": len(bank_docs),
-            "kept": sum(len(v) for v in per_bank.values()),
-            "drops": debug_drops[:10],
-            "allowed_banks": sorted({d["bank"] for d in bank_docs}),
+            "gemini_reason": str(reason)[:120],
+            "has_banks_key": isinstance(out, dict) and "banks" in out,
+            "n_banks_in": len(bank_docs),
         }
     except Exception:
         pass
 
-    if not per_bank:
+    if not isinstance(out, dict):
         return empty
 
-    # Preserve deterministic bank order (alphabetic) so the render is stable.
-    banks_out = [
-        {"bank": bank, "bullets": per_bank[bank][:5]}
-        for bank in sorted(per_bank.keys())
-    ]
-    return {"banks": banks_out, "themes": []}
+    banks_raw = out.get("banks")
+    if not isinstance(banks_raw, list):
+        # Tolerate legacy 'themes' shape — flatten into banks.
+        themes_raw = out.get("themes")
+        if isinstance(themes_raw, list):
+            regrouped: dict[str, list[str]] = {}
+            for t in themes_raw:
+                if not isinstance(t, dict):
+                    continue
+                for b in (t.get("bullets") or []):
+                    if not isinstance(b, dict):
+                        continue
+                    bank = str(b.get("bank") or "").strip()
+                    view = str(b.get("view") or "").strip()
+                    if bank and view:
+                        regrouped.setdefault(bank, []).append(view)
+            banks_raw = [{"bank": k, "bullets": v} for k, v in regrouped.items()]
+        else:
+            return empty
 
-    # NOTE: the original bulk-prompt / post-validator logic below is left
-    # in place for reference but is unreachable due to the return above.
+    clean_banks: list[dict] = []
+    for entry in banks_raw[:10]:
+        if not isinstance(entry, dict):
+            continue
+        bank = str(entry.get("bank") or "").strip()
+        if not bank:
+            continue
+        raw_bullets = entry.get("bullets") or []
+        bullets_clean: list[str] = []
+        for b in (raw_bullets if isinstance(raw_bullets, list) else [])[:5]:
+            if isinstance(b, str):
+                s = b.strip()
+            elif isinstance(b, dict):
+                s = str(b.get("view") or b.get("text") or b.get("bullet") or "").strip()
+            else:
+                continue
+            if s:
+                bullets_clean.append(s)
+        if bullets_clean:
+            clean_banks.append({"bank": bank, "bullets": bullets_clean})
+
+    if not clean_banks:
+        return empty
+
+    return {"banks": clean_banks, "themes": []}
+
+    # -- unreachable legacy --
     allowed_banks = sorted({d["bank"] for d in bank_docs})
 
     payload_dict = {
@@ -3789,55 +3791,17 @@ with st.sidebar:
         key="research_uploads",
     )
     if uploaded_files:
+        # Session-only uploads. Drive upload is disabled — service accounts
+        # can't write to personal My Drive folders (Google policy). Add PDFs
+        # to Google Drive manually if you want them to persist across
+        # sessions / be picked up by the autopilot.
         if "research_docs" not in st.session_state:
             st.session_state["research_docs"] = {}
-        if "_drive_uploaded" not in st.session_state:
-            st.session_state["_drive_uploaded"] = set()
-        new_count = 0
-        drive_ok = 0
-        drive_fail = 0
         for f in uploaded_files:
             if f.name not in st.session_state["research_docs"]:
                 pdf_bytes = f.read()
                 doc = auto_detect_and_parse(pdf_bytes, f.name)
                 st.session_state["research_docs"][f.name] = doc
-                new_count += 1
-
-                # Also push the PDF to Drive Research_Inbox so the autopilot
-                # picks it up on its next sweep and the file becomes a
-                # permanent research artifact instead of a per-session blob.
-                # Track already-uploaded names so re-reading the same uploader
-                # state doesn't re-POST the same file.
-                if (
-                    _drive_pdf_uploader is not None
-                    and f.name not in st.session_state["_drive_uploaded"]
-                ):
-                    err_msg = ""
-                    try:
-                        new_id = _drive_pdf_uploader(f.name, pdf_bytes)
-                    except Exception as _exc:
-                        new_id = None
-                        err_msg = f"{type(_exc).__name__}: {str(_exc)[:160]}"
-                    if new_id:
-                        drive_ok += 1
-                        st.session_state["_drive_uploaded"].add(f.name)
-                    else:
-                        drive_fail += 1
-                        # Pull the recorded reason from the uploader fn if it
-                        # set one, else use the exception we caught above.
-                        if not err_msg:
-                            err_msg = getattr(
-                                _drive_pdf_uploader, "last_error", "unknown error"
-                            )
-                        st.caption(f"⚠️ {f.name[:40]}: {err_msg[:120]}")
-
-        if drive_ok:
-            st.caption(f"☁️ Uploaded {drive_ok} PDF(s) to Drive Research_Inbox.")
-        if drive_fail:
-            st.caption(
-                f"⚠️ {drive_fail} PDF(s) could not be uploaded to Drive "
-                "(will still be used in this session)."
-            )
 
     # Show the current library (whether loaded from Drive, uploaded, or both).
     docs = st.session_state.get("research_docs", {})

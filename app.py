@@ -1609,6 +1609,73 @@ def ai_generate_json(payload: str):
     return None, "AI failed: " + " | ".join(errors[:6])
 
 
+def _ai_generate_json_uncached(payload: str):
+    """Same as ai_generate_json but NOT wrapped in @st.cache_data. Used for
+    the research-summary loop where we don't want stale None responses from
+    earlier failures to be served for 30 minutes. Cost: may hit Gemini /
+    Groq slightly more often, but research is only called once per Brief."""
+    errors = []
+
+    if GEMINI_API_KEY:
+        models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+        for model_name in models_to_try:
+            for attempt in range(2):
+                try:
+                    r = try_gemini_model(model_name, payload)
+                    if r.ok:
+                        data = r.json()
+                        if data.get("promptFeedback", {}).get("blockReason"):
+                            errors.append(f"Gemini/{model_name}: blocked")
+                            break
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            errors.append(f"Gemini/{model_name}: no candidates")
+                            break
+                        raw = "".join(
+                            p.get("text", "") for p in
+                            candidates[0].get("content", {}).get("parts", [])
+                        ).strip()
+                        cleaned = _strip_json_fences(raw)
+                        if not cleaned:
+                            errors.append(f"Gemini/{model_name}: empty")
+                            break
+                        try:
+                            return json.loads(cleaned), f"Gemini OK ({model_name})"
+                        except Exception:
+                            errors.append(f"Gemini/{model_name}: bad JSON")
+                            break
+                    else:
+                        if r.status_code == 429:
+                            errors.append(f"Gemini/{model_name}: 429 quota")
+                            break
+                        if r.status_code in {500, 503} and attempt == 0:
+                            time.sleep(3)
+                            continue
+                        errors.append(f"Gemini/{model_name}: HTTP {r.status_code}")
+                        break
+                except Exception as e:
+                    errors.append(f"Gemini/{model_name}: {type(e).__name__}")
+                    if attempt == 0:
+                        time.sleep(2)
+                    else:
+                        break
+
+    if GROQ_API_KEY:
+        try:
+            payload_obj = json.loads(payload)
+            r = try_groq(payload_obj)
+            if r.ok:
+                raw = r.json()["choices"][0]["message"]["content"].strip()
+                cleaned = _strip_json_fences(raw)
+                return json.loads(cleaned), f"Groq OK ({GROQ_MODEL})"
+            else:
+                errors.append(f"Groq: HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"Groq: {type(e).__name__}: {str(e)[:80]}")
+
+    return None, "AI failed: " + " | ".join(errors[:6])
+
+
 def build_writing(news_df, snapshot, use_gemini, research_context=""):
     local_summary = build_local_news_summary(news_df)
 
@@ -1815,13 +1882,17 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         })
 
         try:
-            out, reason = ai_generate_json(payload)
+            # Use the UNCACHED version — the cached ai_generate_json was
+            # serving None responses from earlier failed attempts for 30
+            # minutes, which is why the research section kept coming back
+            # empty even after prompt changes.
+            out, reason = _ai_generate_json_uncached(payload)
         except Exception as e:
             debug_info.append(f"{bank}: exception {type(e).__name__}")
             continue
 
         if not isinstance(out, dict):
-            debug_info.append(f"{bank}: no JSON response ({str(reason)[:50]})")
+            debug_info.append(f"{bank}: no JSON ({str(reason)[:80]})")
             continue
 
         raw_bullets = out.get("bullets")

@@ -1713,16 +1713,15 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
 
 
 def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
-    """Produce a cross-bank research synthesis: a small number of themes with
-    attributed bank views. Returns:
-        {"themes": [
-            {"theme": "Oil & Middle East",
-             "bullets": [{"bank": "UBS", "view": "..."},
-                         {"bank": "OCBC", "view": "..."}]},
+    """Per-bank summary of what each uploaded broker says. Returns:
+        {"banks": [
+            {"bank": "UBS", "bullets": ["bullet 1", "bullet 2", ...]},
+            {"bank": "BoS", "bullets": [...]},
             ...]}
+    (The legacy key name 'themes' is kept as an alias for backward compat.)
     Empty dict on failure / no research / Gemini off.
     """
-    empty = {"themes": []}
+    empty = {"banks": [], "themes": []}
     if not research_docs or not use_gemini or not GEMINI_API_KEY:
         return empty
 
@@ -1768,36 +1767,36 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
 
     payload_dict = {
         "instruction": (
-            "You are synthesising broker research for a daily market brief. "
+            "You are summarising broker research for a daily market brief. "
             "The CURRENT DATE is " + datetime.now().strftime("%Y-%m-%d") + ". "
             "\n\n"
+            "TASK: For each bank in 'research', produce 3-5 short bullet "
+            "summaries of THAT BANK's views. Each bullet captures ONE "
+            "specific point the bank makes in its research. Keep bullets "
+            "tight (10-25 words), factual, concrete. Prefer bullets with "
+            "specifics (price targets, rating changes, yield levels, rate "
+            "calls). Avoid generic commentary.\n"
+            "\n"
             "CRITICAL GROUNDING RULES — violations corrupt the brief:\n"
-            "1. The ONLY banks that may appear in 'bank' fields are: "
+            "1. The ONLY banks that may appear in the output are: "
             + ", ".join(allowed_banks) + ". No other banks. No renames.\n"
-            "2. Every 'view' MUST be a direct paraphrase of text that appears "
-            "IN THAT SPECIFIC BANK'S 'text' field. You MUST include an "
-            "'evidence' field with a VERBATIM quote (10-40 words) from that "
-            "bank's 'text' that supports the view. If you cannot find a "
-            "supporting verbatim quote, OMIT the bullet.\n"
-            "3. The 'evidence' quote MUST appear character-for-character "
-            "inside the corresponding bank's 'text' (allowing only whitespace "
-            "normalisation). DO NOT paraphrase the evidence. DO NOT invent "
-            "quotes.\n"
-            "4. NEVER fabricate price targets, rate calls, GDP forecasts, "
-            "ratings. Do NOT mix up central banks (the Fed is NOT the ECB). "
-            "If a bank discusses the ECB, do not rephrase as the Fed. "
-            "If a bank discusses disinflation, do not rephrase as rate hikes.\n"
-            "5. Do NOT use training-data knowledge about what these banks "
-            "'typically' say. ONLY what is literally in the provided text.\n"
-            "6. If only 1 bank covers a theme, include that single bullet. "
-            "Do NOT pad with views from banks whose text doesn't cover it.\n"
+            "2. Every bullet MUST paraphrase text that literally appears in "
+            "that bank's 'text' field. If a claim is not in that bank's "
+            "text, DO NOT include it.\n"
+            "3. NEVER fabricate price targets, rate calls, GDP forecasts, "
+            "ratings, analyst names, or any numbers. Do NOT mix up central "
+            "banks (Fed is NOT ECB). Do NOT rephrase 'disinflation' as "
+            "'rate hike'. Do NOT attribute one bank's view to another.\n"
+            "4. Do NOT use training-data knowledge about what these banks "
+            "'typically' say. Use ONLY what is in the provided text.\n"
+            "5. If a bank's text is thin (e.g. just a list of tickers with "
+            "no commentary), return fewer bullets — even 1 — rather than "
+            "padding with invented commentary.\n"
             "\n"
             "OUTPUT FORMAT — raw JSON only, no markdown, no code fences:\n"
-            "{\"themes\": [{\"theme\": str, \"bullets\": "
-            "[{\"bank\": str, \"view\": str, \"evidence\": str}]}]}\n"
-            "Pick 3 to 5 themes actually present in the inputs. For each "
-            "theme: 1-4 bank-attributed bullets. 'view' is one tight sentence. "
-            "'evidence' is the verbatim supporting quote from the source."
+            "{\"banks\": [{\"bank\": str, \"bullets\": [str, str, ...]}]}\n"
+            "One entry per bank. 3-5 bullets per bank where possible; at "
+            "least 1. Each bullet is a plain string (no nested objects)."
         ),
         "allowed_banks": allowed_banks,
         "research": bank_docs,
@@ -1811,9 +1810,28 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     out, _reason = ai_generate_json(payload)
     if not isinstance(out, dict):
         return empty
-    themes = out.get("themes")
-    if not isinstance(themes, list):
-        return empty
+    # Prefer the new 'banks' key; fall back to 'themes' if Gemini uses the
+    # legacy key. We need SOMETHING iterable to process.
+    banks_raw = out.get("banks")
+    if not isinstance(banks_raw, list):
+        # If Gemini still produced themes, flatten them into banks by taking
+        # each theme's bullets and regrouping by 'bank' field.
+        themes_raw = out.get("themes")
+        if isinstance(themes_raw, list):
+            regrouped: dict[str, list[str]] = {}
+            for t in themes_raw:
+                if not isinstance(t, dict):
+                    continue
+                for b in (t.get("bullets") or []):
+                    if not isinstance(b, dict):
+                        continue
+                    bank = str(b.get("bank") or "").strip()
+                    view = str(b.get("view") or "").strip()
+                    if bank and view:
+                        regrouped.setdefault(bank, []).append(view)
+            banks_raw = [{"bank": k, "bullets": v} for k, v in regrouped.items()]
+        else:
+            return empty
 
     # Hard guardrail: drop any bullet whose bank is not in the allowed set.
     # Matches case-insensitively and tolerates minor variants (e.g. "UBS" vs
@@ -1905,59 +1923,71 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         # Loosen threshold because Gemini often abstracts heavily.
         return max(ev_ratio, view_ratio) >= 0.50
 
-    clean_themes: list[dict] = []
+    # Per-bank aggregation + grounding.
+    clean_banks_map: dict[str, list[str]] = {}
     dropped_log: list[str] = []
     total_seen = 0
-    for t in themes[:5]:
-        if not isinstance(t, dict):
+
+    for entry in banks_raw[:10]:
+        if not isinstance(entry, dict):
             continue
-        theme_name = str(t.get("theme") or "").strip()
-        bullets = t.get("bullets") or []
-        clean_bullets: list[dict] = []
-        for b in (bullets if isinstance(bullets, list) else [])[:4]:
-            if not isinstance(b, dict):
-                continue
+        raw_bank = str(entry.get("bank") or "")
+        resolved = _resolve_bank(raw_bank)
+        bullets = entry.get("bullets") or []
+        if not isinstance(bullets, list):
+            continue
+
+        for raw_bullet in bullets[:6]:
             total_seen += 1
-            raw_bank = str(b.get("bank") or "")
-            view = str(b.get("view") or "").strip()
-            evidence = str(b.get("evidence") or "").strip()
-            resolved = _resolve_bank(raw_bank)
+            # Accept either plain string bullets or {text: str} dicts.
+            if isinstance(raw_bullet, dict):
+                bullet = str(raw_bullet.get("view")
+                             or raw_bullet.get("text")
+                             or raw_bullet.get("bullet") or "").strip()
+            else:
+                bullet = str(raw_bullet or "").strip()
+
             if resolved is None:
                 dropped_log.append(f"bank-not-allowed:{raw_bank[:20]}")
                 continue
-            if not view:
-                dropped_log.append(f"empty-view:{resolved}")
+            if not bullet:
+                dropped_log.append(f"empty-bullet:{resolved}")
                 continue
-            if not _bullet_is_grounded(resolved, view, evidence):
-                ev_r = _overlap_ratio(evidence, resolved) if evidence else 0.0
-                vw_r = _overlap_ratio(view, resolved)
+            # Ground each bullet against that bank's source text only.
+            if _overlap_ratio(bullet, resolved) < 0.50:
+                vw_r = _overlap_ratio(bullet, resolved)
                 dropped_log.append(
-                    f"ungrounded:{resolved} ev={ev_r:.2f} view={vw_r:.2f} — {view[:60]}"
+                    f"ungrounded:{resolved} view={vw_r:.2f} — {bullet[:60]}"
                 )
                 continue
-            clean_bullets.append({"bank": resolved, "view": view})
-        if theme_name and clean_bullets:
-            clean_themes.append({"theme": theme_name, "bullets": clean_bullets})
+            clean_banks_map.setdefault(resolved, []).append(bullet)
+
+    # Preserve the order of allowed_banks so the render order is stable.
+    clean_banks: list[dict] = []
+    for bank in allowed_banks:
+        if bank in clean_banks_map:
+            clean_banks.append({
+                "bank": bank,
+                "bullets": clean_banks_map[bank][:5],  # cap at 5 per bank
+            })
 
     # Diagnostic: stash drop reasons in session_state so the sidebar can show
-    # them. Helps us debug why themes disappear without grepping Streamlit logs.
+    # them. Helps debug why research section is empty without grepping logs.
     try:
         import streamlit as _st
         _st.session_state["_research_themes_debug"] = {
             "seen": total_seen,
-            "kept": sum(len(t["bullets"]) for t in clean_themes),
+            "kept": sum(len(b["bullets"]) for b in clean_banks),
             "drops": dropped_log[:10],
             "allowed_banks": allowed_banks,
         }
     except Exception:
         pass
 
-    # If guardrail killed everything, return empty so the per-doc fallback
-    # kicks in rather than showing a half-empty themed section.
-    if not clean_themes:
+    if not clean_banks:
         return empty
 
-    return {"themes": clean_themes}
+    return {"banks": clean_banks, "themes": []}
 
 
 def build_bundle():
@@ -3044,14 +3074,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     story += [data_r1, Spacer(1, 0.12*cm), data_r2]
 
     # ── 5. RESEARCH HIGHLIGHTS ────────────────────────────────────────────────
-    # Preferred rendering: the Gemini-synthesised `research_themes` — themed
-    # bullets with bank attribution (e.g. "Oil & Middle East: UBS… OCBC…").
-    # Fallback: the per-doc bullet list we used before Gemini synthesis,
-    # used when Gemini fails or is disabled.
-    _themes_list = (research_themes or {}).get("themes") if isinstance(research_themes, dict) else None
-    if _themes_list:
-        # Assign a colour per bank so the eye can group "what each house says".
-        _bank_palette = [BLU, GRN, RED, NAV, MID, GRY]
+    # Per-bank summary: each uploaded broker gets its own section with 3-5
+    # bullets of its own views. Fallback: a compact per-doc line list when
+    # Gemini synthesis returns nothing.
+    _banks_list = (research_themes or {}).get("banks") if isinstance(research_themes, dict) else None
+    if _banks_list:
+        # Assign a colour per bank — header tint.
+        _bank_palette = [BLU, GRN, RED, NAV, MID]
         _bank_colour: dict[str, object] = {}
 
         def _colour_for(bank: str):
@@ -3063,33 +3092,29 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             Spacer(1, 0.06*cm),
             HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
             Spacer(1, 0.03*cm),
-            P("RESEARCH HIGHLIGHTS \u2014 cross-bank view",
+            P("RESEARCH HIGHLIGHTS",
               fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
             Spacer(1, 0.04*cm),
         ]
 
-        for theme in _themes_list[:5]:
-            theme_name = theme.get("theme") or ""
-            bullets = theme.get("bullets") or []
-            if not theme_name or not bullets:
+        for entry in _banks_list[:6]:
+            bank = str(entry.get("bank") or "")
+            bullets = entry.get("bullets") or []
+            if not bank or not bullets:
                 continue
-            # Theme header line — bold, small caps via uppercase.
+            bcol = _colour_for(bank)
+            # Bank header line — coloured, bold, compact.
             story.append(P(
-                f"<b>{_xs(theme_name).upper()}</b>",
-                sz=5.0, col=NAV, lead=6.5,
+                f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
+                sz=5.2, col=NAV, lead=6.5,
             ))
-            # One indented bullet per bank.
-            for b in bullets:
-                bank = str(b.get("bank") or "")
-                view = str(b.get("view") or "")
-                if not bank or not view:
+            for bullet in bullets[:5]:
+                if not isinstance(bullet, str):
                     continue
-                bcol = _colour_for(bank)
-                bullet_line = (
-                    f"\u00a0\u00a0\u2022 <font color=\"{bcol.hexval()}\">"
-                    f"<b>{_xs(bank)}</b></font>: {_xs(view)}"
-                )
-                story.append(P(bullet_line, sz=4.9, col=TXT, lead=6.3))
+                story.append(P(
+                    f"\u00a0\u00a0\u2022 {_xs(bullet)}",
+                    sz=4.9, col=TXT, lead=6.3,
+                ))
             story.append(Spacer(1, 0.05*cm))
 
     elif research_docs:

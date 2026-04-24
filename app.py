@@ -1713,13 +1713,17 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
 
 
 def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
-    """Per-bank summary of what each uploaded broker says. Returns:
-        {"banks": [
-            {"bank": "UBS", "bullets": ["bullet 1", "bullet 2", ...]},
-            {"bank": "BoS", "bullets": [...]},
-            ...]}
-    (The legacy key name 'themes' is kept as an alias for backward compat.)
-    Empty dict on failure / no research / Gemini off.
+    """Per-bank summary of what each uploaded broker says.
+
+    Simplified 2026-04-24: summarise ONE document at a time instead of
+    cross-bank synthesis. That keeps each call to a narrow, grounded task
+    ("summarise this specific PDF") which Gemini handles reliably, and
+    eliminates the cross-bank contamination that caused hallucinations
+    like the 'UBS expects Fed 25bps' fabrication.
+
+    Returns: {"banks": [{"bank": "UBS", "bullets": ["..."]}]}. Empty dict on
+    failure / no research / Gemini off. If a specific bank fails, that bank
+    is omitted — no mechanical fallback.
     """
     empty = {"banks": [], "themes": []}
     if not research_docs or not use_gemini or not GEMINI_API_KEY:
@@ -1763,6 +1767,101 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if len(bank_docs) < 1:
         return empty
 
+    # Simple loop: one Gemini call per document. Each call asks for a
+    # grounded summary of that specific PDF. No cross-bank synthesis, no
+    # post-validator — the tight prompt is the whole defence.
+    per_bank: dict[str, list[str]] = {}
+    debug_drops: list[str] = []
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    for doc_entry in bank_docs:
+        bank = doc_entry["bank"]
+        source_text = doc_entry["text"]
+        if not source_text.strip():
+            continue
+
+        one_doc_payload = _safe_json_dumps({
+            "instruction": (
+                f"The CURRENT DATE is {today_str}. "
+                "Below is the full extracted text of a single broker research "
+                f"document from {bank}. Your job is to produce 3 to 5 short "
+                "bullet-point summaries of what THIS document says. "
+                "\n\n"
+                "HARD RULES:\n"
+                "1. Use ONLY information that literally appears in the "
+                "document text below. Do NOT add anything from your training "
+                "data about what this bank 'usually' says.\n"
+                "2. Do NOT invent price targets, ratings, rate calls, GDP "
+                "forecasts, analyst names, or numbers. If the document doesn't "
+                "state a number, don't include one.\n"
+                "3. Do NOT mix up central banks: the Fed is not the ECB is "
+                "not the BoJ. If the document talks about the ECB, say ECB.\n"
+                "4. Each bullet is one tight sentence (10-25 words). Prefer "
+                "concrete calls (e.g. 'Brent expected to stay above $90/bbl "
+                "through year-end') over vague statements.\n"
+                "5. If the document is thin (e.g. just a list of tickers "
+                "with no commentary), return fewer bullets — even just 1 — "
+                "rather than padding.\n"
+                "\n"
+                "OUTPUT FORMAT: raw JSON only, no markdown, no code fences. "
+                "Shape: {\"bullets\": [str, str, ...]}"
+            ),
+            "document_text": source_text,
+        })
+
+        try:
+            out, reason = ai_generate_json(one_doc_payload)
+        except Exception as e:
+            debug_drops.append(f"{bank}: exception {type(e).__name__}")
+            continue
+
+        if not isinstance(out, dict):
+            debug_drops.append(f"{bank}: non-dict response ({str(reason)[:40]})")
+            continue
+
+        bullets_raw = out.get("bullets")
+        if not isinstance(bullets_raw, list) or not bullets_raw:
+            debug_drops.append(f"{bank}: no bullets in response")
+            continue
+
+        bullets_clean: list[str] = []
+        for b in bullets_raw[:5]:
+            if isinstance(b, str):
+                s = b.strip()
+                if s:
+                    bullets_clean.append(s)
+            elif isinstance(b, dict):
+                s = str(b.get("view") or b.get("text") or b.get("bullet") or "").strip()
+                if s:
+                    bullets_clean.append(s)
+
+        if bullets_clean:
+            per_bank.setdefault(bank, []).extend(bullets_clean)
+
+    # Diagnostic so we can see what happened without grepping Streamlit logs.
+    try:
+        import streamlit as _st
+        _st.session_state["_research_themes_debug"] = {
+            "seen": len(bank_docs),
+            "kept": sum(len(v) for v in per_bank.values()),
+            "drops": debug_drops[:10],
+            "allowed_banks": sorted({d["bank"] for d in bank_docs}),
+        }
+    except Exception:
+        pass
+
+    if not per_bank:
+        return empty
+
+    # Preserve deterministic bank order (alphabetic) so the render is stable.
+    banks_out = [
+        {"bank": bank, "bullets": per_bank[bank][:5]}
+        for bank in sorted(per_bank.keys())
+    ]
+    return {"banks": banks_out, "themes": []}
+
+    # NOTE: the original bulk-prompt / post-validator logic below is left
+    # in place for reference but is unreachable due to the return above.
     allowed_banks = sorted({d["bank"] for d in bank_docs})
 
     payload_dict = {
@@ -3117,57 +3216,85 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                 ))
             story.append(Spacer(1, 0.05*cm))
 
-    elif research_docs:
-        res_lines: list[tuple[str, str, str, object]] = []
-        # IMPORTANT: use `rdoc` as the loop variable — `doc` is already the
-        # outer SimpleDocTemplate; shadowing it breaks the final doc.build().
+    elif False:  # Mechanical fallback disabled per user preference:
+                 # "I prefer to see nothing than to see this mechanical."
+                 # If Gemini returns nothing, the Research Highlights
+                 # section is simply omitted.
+        def _infer_bank_fb(fname: str) -> str:
+            fn = fname.lower()
+            if "morning call" in fn:                         return "BoS"
+            if "barclays"     in fn:                         return "Barclays"
+            if "daily europe" in fn:                         return "UBS"
+            if "equity_coverage" in fn or "universe" in fn:  return "UBS Universe"
+            if "dmo"          in fn or "ocbc" in fn:         return "OCBC"
+            if "goldman"      in fn or fn.startswith("gs_"): return "Goldman"
+            if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
+            if "morgan stanley" in fn or fn.startswith("ms_"): return "Morgan Stanley"
+            return fname.split(".")[0][:24]
+
+        bank_bullets_fb: dict[str, list[str]] = {}
         for fname, rdoc in research_docs.items():
             try:
+                bank  = _infer_bank_fb(fname)
                 dtype = rdoc.get("_doc_type", "generic_research")
-                short = _xs(_t(fname, 35))
-                if dtype == "morning_call":
-                    for vp in (rdoc.get("equity_viewpoints") or [])[:3]:
-                        res_lines.append((short, "Equities", _xs(str(vp)), MID))
-                    rec = rdoc.get("recommendation_changes") or {}
-                    for upg in (rec.get("upgrades") or [])[:3]:
-                        label = f"\u2b06 {upg.get('name','')} {upg.get('rating_old','')}\u2192{upg.get('rating_new','')}"
-                        res_lines.append((short, "Upgrade", _xs(label), GRN))
-                    for dwn in (rec.get("downgrades") or [])[:3]:
-                        label = f"\u2b07 {dwn.get('name','')} {dwn.get('rating_old','')}\u2192{dwn.get('rating_new','')}"
-                        res_lines.append((short, "Downgrade", _xs(label), RED))
-                elif dtype == "equity_coverage":
+                bullets = bank_bullets_fb.setdefault(bank, [])
+                if dtype == "equity_coverage":
                     stocks = rdoc.get("stocks") or []
                     buys  = [s["name"] for s in stocks if s.get("rating") == "Buy"][:6]
                     sells = [s["name"] for s in stocks if s.get("rating") == "Sell"][:4]
                     if buys:
-                        res_lines.append((short, "Buy", _xs(", ".join(buys)), GRN))
+                        bullets.append(f"Buys: {', '.join(buys)}")
                     if sells:
-                        res_lines.append((short, "Sell", _xs(", ".join(sells)), RED))
+                        bullets.append(f"Sells: {', '.join(sells)}")
+                elif dtype == "morning_call":
+                    for vp in (rdoc.get("equity_viewpoints") or [])[:3]:
+                        bullets.append(str(vp))
+                    rec = rdoc.get("recommendation_changes") or {}
+                    for upg in (rec.get("upgrades") or [])[:2]:
+                        bullets.append(
+                            f"Upgrade: {upg.get('name','')} "
+                            f"{upg.get('rating_old','')}\u2192{upg.get('rating_new','')}"
+                        )
+                    for dwn in (rec.get("downgrades") or [])[:2]:
+                        bullets.append(
+                            f"Downgrade: {dwn.get('name','')} "
+                            f"{dwn.get('rating_old','')}\u2192{dwn.get('rating_new','')}"
+                        )
+                    if not bullets:
+                        text = (rdoc.get("text") or "").replace("\n", " ").strip()
+                        if text:
+                            bullets.append(_t(text, 220))
                 else:
-                    # Compact per-doc fallback: hard-capped 180-char snippet.
-                    # Prevents the old "3 pages of raw broker PDF" failure mode
-                    # when Gemini synthesis returns nothing.
                     text = (rdoc.get("text") or "").replace("\n", " ").strip()
                     if text:
-                        snippet = _t(text, 180)
-                        res_lines.append((short, "Research", _xs(snippet), MID))
+                        bullets.append(_t(text, 220))
+                if not bullets:
+                    bank_bullets_fb.pop(bank, None)
             except Exception:
                 continue
 
-        if res_lines:
+        if bank_bullets_fb:
+            _palette_fb = [BLU, GRN, RED, NAV, MID]
             story += [
                 Spacer(1, 0.06*cm),
                 HRFlowable(width=PW*cm, thickness=0.5, color=RUL),
                 Spacer(1, 0.03*cm),
-                P("RESEARCH HIGHLIGHTS", fn="Helvetica-Bold", sz=5.5, col=NAV, lead=6.5),
-                Spacer(1, 0.02*cm),
+                P("RESEARCH HIGHLIGHTS",
+                  fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
+                Spacer(1, 0.04*cm),
             ]
-            for src, cat, body, cat_col in res_lines:
-                tag = f'<font color="{cat_col.hexval()}"><b>{cat}</b></font>'
+            for i, (bank, bullets) in enumerate(list(bank_bullets_fb.items())[:6]):
+                bcol = _palette_fb[i % len(_palette_fb)]
                 story.append(P(
-                    f"<b>{src}</b> \u00b7 {tag} \u00b7 {body}",
-                    sz=4.8, col=TXT, lead=6.2,
+                    f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
+                    sz=5.2, col=NAV, lead=6.5,
                 ))
+                for bullet in bullets[:4]:
+                    story.append(P(
+                        f"\u00a0\u00a0\u2022 {_xs(bullet)}",
+                        sz=4.9, col=TXT, lead=6.3,
+                    ))
+                story.append(Spacer(1, 0.05*cm))
 
     # ── 6. DISCLAIMER ─────────────────────────────────────────────────────────
     disc = ("Disclaimer: This briefing is for informational purposes only and does not "

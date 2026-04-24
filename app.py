@@ -1811,6 +1811,44 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     per_bank: dict[str, list[str]] = {}
     debug_info: list[str] = []
 
+    # Space calls out to stay under Gemini's 15 RPM free-tier limit.
+    # Brief already spends 2-3 Gemini calls on news before reaching here.
+    _call_idx = 0
+
+    def _extract_bullets_deep(obj) -> list[str]:
+        """Find bullets anywhere in Gemini's response — sometimes the model
+        nests them under varied keys (summary, points, key_points, highlights)
+        or wraps them in a top-level {"bank": {...}, "bullets": [...]} dict."""
+        if isinstance(obj, list):
+            strs = [x for x in obj if isinstance(x, str) and x.strip()]
+            if strs:
+                return strs
+            # list of dicts? try to find a 'text'/'bullet'/'view' in each
+            extracted = []
+            for item in obj:
+                if isinstance(item, dict):
+                    v = (item.get("text") or item.get("bullet")
+                         or item.get("view") or item.get("point")
+                         or item.get("summary"))
+                    if isinstance(v, str) and v.strip():
+                        extracted.append(v.strip())
+            return extracted
+        if isinstance(obj, dict):
+            for key in ("bullets", "summary", "summaries", "points",
+                        "key_points", "highlights", "main_points",
+                        "takeaways", "insights"):
+                if key in obj:
+                    out = _extract_bullets_deep(obj[key])
+                    if out:
+                        return out
+            # Recurse one level deep for nested {"bank": {"bullets": [...]}}
+            for v in obj.values():
+                if isinstance(v, (dict, list)):
+                    out = _extract_bullets_deep(v)
+                    if out:
+                        return out
+        return []
+
     for fname, rdoc in research_docs.items():
         if rdoc.get("error"):
             continue
@@ -1881,11 +1919,14 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             "document_text": source_text[:6000],
         })
 
+        # Space Gemini calls out to stay under 15 RPM. First call no delay,
+        # then 4.5s between calls — that's 13 calls/min max before even
+        # counting the 2-3 the Brief has already spent on news / COTD.
+        if _call_idx > 0:
+            time.sleep(4.5)
+        _call_idx += 1
+
         try:
-            # Use the UNCACHED version — the cached ai_generate_json was
-            # serving None responses from earlier failed attempts for 30
-            # minutes, which is why the research section kept coming back
-            # empty even after prompt changes.
             out, reason = _ai_generate_json_uncached(payload)
         except Exception as e:
             debug_info.append(f"{bank}: exception {type(e).__name__}")
@@ -1895,31 +1936,16 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             debug_info.append(f"{bank}: no JSON ({str(reason)[:80]})")
             continue
 
-        raw_bullets = out.get("bullets")
-        if not isinstance(raw_bullets, list) or not raw_bullets:
-            # Tolerate alternate shapes Gemini sometimes returns.
-            raw_bullets = (
-                (out.get("summary") if isinstance(out.get("summary"), list) else None)
-                or (out.get("points") if isinstance(out.get("points"), list) else None)
-                or []
-            )
-        if not raw_bullets:
-            debug_info.append(f"{bank}: empty bullets in JSON")
+        # Deep-extract bullets from whatever shape Gemini returned.
+        bullets_found = _extract_bullets_deep(out)
+
+        if not bullets_found:
+            # Surface the top-level keys so we can see what Gemini gave us.
+            keys = list(out.keys())[:6]
+            debug_info.append(f"{bank}: no bullets found in keys={keys}")
             continue
 
-        cleaned: list[str] = []
-        for b in raw_bullets[:5]:
-            if isinstance(b, str):
-                s = b.strip()
-            elif isinstance(b, dict):
-                s = str(
-                    b.get("text") or b.get("view") or b.get("bullet")
-                    or b.get("point") or ""
-                ).strip()
-            else:
-                continue
-            if s:
-                cleaned.append(s)
+        cleaned = [s for s in bullets_found[:5] if s.strip()]
 
         if cleaned:
             per_bank.setdefault(bank, []).extend(cleaned)

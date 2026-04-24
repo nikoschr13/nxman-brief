@@ -356,19 +356,33 @@ def upload_pdf_to_research_inbox(filename: str, pdf_bytes: bytes) -> str | None:
         logger.error("googleapiclient missing: %s", e)
         return None
 
-    media = MediaInMemoryUpload(pdf_bytes, mimetype="application/pdf", resumable=False)
+    # resumable=True handles big PDFs + transient rate-limit retries
+    # (google-api-python-client retries 429/5xx on resumable uploads).
+    media = MediaInMemoryUpload(pdf_bytes, mimetype="application/pdf", resumable=True)
     metadata = {"name": filename, "parents": [inbox_id]}
-    try:
-        created = drive.files().create(
-            body=metadata,
-            media_body=media,
-            fields="id,name,createdTime",
-        ).execute()
-    except Exception as e:
-        logger.error("Drive upload failed for %s: %s", filename, e)
-        return None
 
-    return created.get("id")
+    # Simple retry loop with backoff for non-retryable-by-library failures
+    import time as _time
+    last_err: str = ""
+    for attempt in range(3):
+        try:
+            created = drive.files().create(
+                body=metadata,
+                media_body=media,
+                fields="id,name,createdTime",
+            ).execute()
+            return created.get("id")
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:200]}"
+            logger.warning("Drive upload attempt %d failed for %s: %s",
+                           attempt + 1, filename, last_err)
+            if attempt < 2:
+                _time.sleep(2 ** attempt)  # 1s, 2s
+
+    logger.error("Drive upload failed for %s after 3 attempts: %s", filename, last_err)
+    # Stash the last error on the fn so the caller can surface it in the UI.
+    upload_pdf_to_research_inbox.last_error = last_err  # type: ignore[attr-defined]
+    return None
 
 
 # --------------------------------------------------------------------------- streamlit caches

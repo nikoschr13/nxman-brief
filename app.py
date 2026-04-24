@@ -1714,18 +1714,19 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
 
 
 def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
-    """Deterministic per-bank summary from parsed document structure.
+    """Per-bank AI summary of each uploaded research PDF.
 
-    2026-04-24 final approach: no AI, no hallucinations. We render the same
-    structured data the website shows — equity viewpoints, rating changes,
-    top Buys / Sells ranked by upside, etc. If a document is generic research
-    we couldn't parse structurally, it's simply omitted from the PDF
-    (better nothing than fabricated summaries).
+    Simple and direct: one Gemini call per document. Feed it the PDF text,
+    ask for 3-5 bullets summarising that specific bank's document. Render
+    whatever comes back, no post-validator. The prompt is the whole defence
+    against hallucination (and it's tight — 'use only text from this doc').
 
-    Returns: {"banks": [{"bank": "UBS", "bullets": ["..."]}]}
+    Returns {"banks": [{"bank": "UBS", "bullets": [...]}, ...]}.
     """
     empty = {"banks": [], "themes": []}
     if not research_docs:
+        return empty
+    if not use_gemini or not GEMINI_API_KEY:
         return empty
 
     def _infer_bank(fname: str) -> str:
@@ -1739,103 +1740,143 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
         return fname.split(".")[0][:24]
 
-    def _num(v) -> float:
-        try:
-            return float(str(v or 0).replace("%", "").replace(",", ""))
-        except Exception:
-            return 0.0
-
+    today_str = datetime.now().strftime("%Y-%m-%d")
     per_bank: dict[str, list[str]] = {}
+    debug_info: list[str] = []
 
     for fname, rdoc in research_docs.items():
-        try:
-            bank  = _infer_bank(fname)
-            dtype = rdoc.get("_doc_type", "generic_research")
-            bullets = per_bank.setdefault(bank, [])
-
-            if dtype == "equity_coverage":
-                stocks = rdoc.get("stocks") or []
-                buys  = [s for s in stocks if s.get("rating") == "Buy"]
-                sells = [s for s in stocks if s.get("rating") == "Sell"]
-                # Sort Buys by upside desc, Sells by upside asc (worst downside first)
-                buys.sort(key=lambda s: _num(s.get("upside")), reverse=True)
-                sells.sort(key=lambda s: _num(s.get("upside")))
-
-                if buys:
-                    top = []
-                    for s in buys[:4]:
-                        nm = str(s.get("name", ""))[:18]
-                        up = _num(s.get("upside"))
-                        dy = _num(s.get("div_yield"))
-                        pieces = [nm]
-                        if up:
-                            pieces.append(f"+{up:.0f}%")
-                        if dy:
-                            pieces.append(f"{dy:.1f}% yld")
-                        top.append(" ".join(pieces))
-                    bullets.append("Top Buys (by upside): " + " · ".join(top))
-                if sells:
-                    top = []
-                    for s in sells[:4]:
-                        nm = str(s.get("name", ""))[:18]
-                        up = _num(s.get("upside"))
-                        if up:
-                            top.append(f"{nm} {up:.0f}%")
-                        else:
-                            top.append(nm)
-                    bullets.append("Top Sells: " + " · ".join(top))
-
-            elif dtype == "morning_call":
-                for vp in (rdoc.get("equity_viewpoints") or [])[:3]:
-                    s = str(vp).strip()
-                    if s:
-                        bullets.append(s[:200])
-                rec = rdoc.get("recommendation_changes") or {}
-                for upg in (rec.get("upgrades") or [])[:3]:
-                    nm = upg.get("name", "")
-                    old = upg.get("rating_old", "")
-                    new = upg.get("rating_new", "")
-                    bullets.append(f"\u2b06 Upgrade: {nm} {old}\u2192{new}".strip())
-                for dwn in (rec.get("downgrades") or [])[:3]:
-                    nm = dwn.get("name", "")
-                    old = dwn.get("rating_old", "")
-                    new = dwn.get("rating_new", "")
-                    bullets.append(f"\u2b07 Downgrade: {nm} {old}\u2192{new}".strip())
-
-            # generic_research and others: skip entirely — no mechanical
-            # text dumps, no AI summaries. User sees these docs in the
-            # website's Research Library but not in the PDF. Better to
-            # omit than to fabricate.
-
-            if not bullets:
-                per_bank.pop(bank, None)
-        except Exception:
+        if rdoc.get("error"):
             continue
+        bank = _infer_bank(fname)
+        source_text = (rdoc.get("text") or "").strip()
+
+        # Morning_call docs may have empty `text` but rich structured fields —
+        # reconstruct text from those so Gemini has something to summarise.
+        if not source_text and rdoc.get("_doc_type") == "morning_call":
+            parts = []
+            for reg, txt in (rdoc.get("regional_summaries") or {}).items():
+                if txt:
+                    parts.append(f"[{reg}] {txt}")
+            for vp in (rdoc.get("equity_viewpoints") or []):
+                parts.append(f"[equity viewpoint] {vp}")
+            rec = rdoc.get("recommendation_changes") or {}
+            for upg in (rec.get("upgrades") or []):
+                parts.append(
+                    f"UPGRADE: {upg.get('name','')} "
+                    f"{upg.get('rating_old','')} to {upg.get('rating_new','')}"
+                )
+            for dwn in (rec.get("downgrades") or []):
+                parts.append(
+                    f"DOWNGRADE: {dwn.get('name','')} "
+                    f"{dwn.get('rating_old','')} to {dwn.get('rating_new','')}"
+                )
+            source_text = "\n".join(parts)
+
+        # Equity coverage: flatten the stocks table into a text blob so
+        # Gemini can summarise the key calls (biggest upsides, biggest
+        # downsides, by sector / region).
+        if not source_text and rdoc.get("_doc_type") == "equity_coverage":
+            stocks = rdoc.get("stocks") or []
+            lines = []
+            for s in stocks[:60]:
+                lines.append(
+                    f"{s.get('rating','')} {s.get('ticker','')} "
+                    f"{s.get('name','')} upside={s.get('upside','')}% "
+                    f"yield={s.get('div_yield','')}% pe={s.get('pe','')}"
+                )
+            source_text = "\n".join(lines)
+
+        if not source_text:
+            debug_info.append(f"{bank}: no text")
+            continue
+
+        payload = _safe_json_dumps({
+            "instruction": (
+                f"Today is {today_str}. Below is the text of a single "
+                f"broker research document from {bank}. Produce 3 to 5 "
+                "bullet points summarising the main points of this "
+                "document. Each bullet one tight sentence, 12-25 words, "
+                "concrete (include specific numbers, tickers, or calls "
+                "where the document has them). "
+                "\n\n"
+                "RULES:\n"
+                "1. Use ONLY information that appears in the document text "
+                "below. Do not add anything from general knowledge.\n"
+                "2. Do not invent numbers, price targets, ratings, analyst "
+                "names, or forecasts not in the text.\n"
+                "3. Do not mix up central banks (Fed is not ECB).\n"
+                "4. If the document is thin, return fewer bullets (even 1).\n"
+                "\n"
+                "OUTPUT: raw JSON only, no markdown. "
+                "Shape: {\"bullets\": [\"bullet 1\", \"bullet 2\", ...]}"
+            ),
+            "bank": bank,
+            "document_text": source_text[:6000],
+        })
+
+        try:
+            out, reason = ai_generate_json(payload)
+        except Exception as e:
+            debug_info.append(f"{bank}: exception {type(e).__name__}")
+            continue
+
+        if not isinstance(out, dict):
+            debug_info.append(f"{bank}: no JSON response ({str(reason)[:50]})")
+            continue
+
+        raw_bullets = out.get("bullets")
+        if not isinstance(raw_bullets, list) or not raw_bullets:
+            # Tolerate alternate shapes Gemini sometimes returns.
+            raw_bullets = (
+                (out.get("summary") if isinstance(out.get("summary"), list) else None)
+                or (out.get("points") if isinstance(out.get("points"), list) else None)
+                or []
+            )
+        if not raw_bullets:
+            debug_info.append(f"{bank}: empty bullets in JSON")
+            continue
+
+        cleaned: list[str] = []
+        for b in raw_bullets[:5]:
+            if isinstance(b, str):
+                s = b.strip()
+            elif isinstance(b, dict):
+                s = str(
+                    b.get("text") or b.get("view") or b.get("bullet")
+                    or b.get("point") or ""
+                ).strip()
+            else:
+                continue
+            if s:
+                cleaned.append(s)
+
+        if cleaned:
+            per_bank.setdefault(bank, []).extend(cleaned)
+            debug_info.append(f"{bank}: {len(cleaned)} bullets ok")
+
+    # Diagnostic — survives in session_state so sidebar can show what happened.
+    try:
+        import streamlit as _st
+        _st.session_state["_research_themes_debug"] = {
+            "source": "per-doc gemini",
+            "banks_seen": len(research_docs),
+            "banks_rendered": list(per_bank.keys()),
+            "notes": debug_info[:12],
+        }
+    except Exception:
+        pass
 
     if not per_bank:
         return empty
 
     banks_out = [
-        {"bank": bank, "bullets": per_bank[bank][:6]}
+        {"bank": bank, "bullets": per_bank[bank][:5]}
         for bank in sorted(per_bank.keys())
     ]
-
-    # Diagnostic stays so the sidebar can still tell us what happened.
-    try:
-        import streamlit as _st
-        _st.session_state["_research_themes_debug"] = {
-            "source": "deterministic (no AI)",
-            "banks_rendered": [b["bank"] for b in banks_out],
-            "total_bullets": sum(len(b["bullets"]) for b in banks_out),
-        }
-    except Exception:
-        pass
-
     return {"banks": banks_out, "themes": []}
 
-    # Gemini-driven path below kept unreachable for possible future reuse.
-    if not use_gemini or not GEMINI_API_KEY:
-        return empty
+    # unreachable legacy
+    _unreachable = None
 
     # Build a clean {bank_label: raw_text_excerpt} map for Gemini.
     # Bank label is inferred from filename heuristics.

@@ -1874,27 +1874,40 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         w = bank_to_words.setdefault(d["bank"], set())
         w.update(_content_words(d["text"]))
 
-    def _evidence_present(bank: str, evidence: str) -> bool:
-        """Check whether the evidence quote is plausibly from the bank's text.
-        Uses content-word overlap rather than exact substring, because:
-          * Gemini often paraphrases the 'evidence' it returns
-          * pdfplumber introduces OCR artifacts (dashes → ■, ligatures, etc.)
-        Rule: >= 60% of the evidence's content words (4+ letters, non-stopword)
-        must appear in the bank's text, AND the evidence must have at least 3
-        content words total (to stop trivial matches)."""
-        ev_words = _content_words(evidence)
-        if len(ev_words) < 3:
-            return False
-        src_words = bank_to_words.get(bank, set())
-        if not src_words:
-            return False
-        overlap = ev_words & src_words
-        if len(overlap) < 3:
-            return False
-        return (len(overlap) / len(ev_words)) >= 0.60
+    def _overlap_ratio(text: str, bank: str) -> float:
+        """Fraction of meaningful words in `text` that appear in bank's source.
+        Returns 0.0 if too few content words to judge."""
+        words = _content_words(text)
+        if len(words) < 3:
+            return 0.0
+        src = bank_to_words.get(bank, set())
+        if not src:
+            return 0.0
+        return len(words & src) / len(words)
+
+    def _bullet_is_grounded(bank: str, view: str, evidence: str) -> bool:
+        """Accept a bullet if EITHER the evidence quote OR the view itself
+        shows enough overlap with the bank's source text. Using max() of
+        the two makes the gate robust to Gemini omitting/paraphrasing
+        evidence, while still catching clean hallucinations (where both
+        view and evidence contain words the bank's PDF doesn't have).
+
+        Example catches:
+          * Fake 'UBS expects Fed to raise rates 25bps': UBS PDF has no
+            content words 'fed','raise','rates','basis','points' together
+            → view overlap < 50% → dropped.
+          * Real paraphrase of a Barclays rating change: both view and
+            evidence contain 'barclays','target','price','overweight' that
+            appear in the Barclays doc → accepted.
+        """
+        ev_ratio   = _overlap_ratio(evidence, bank) if evidence else 0.0
+        view_ratio = _overlap_ratio(view,     bank) if view     else 0.0
+        # Loosen threshold because Gemini often abstracts heavily.
+        return max(ev_ratio, view_ratio) >= 0.50
 
     clean_themes: list[dict] = []
-    dropped_no_evidence: list[str] = []
+    dropped_log: list[str] = []
+    total_seen = 0
     for t in themes[:5]:
         if not isinstance(t, dict):
             continue
@@ -1904,35 +1917,40 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         for b in (bullets if isinstance(bullets, list) else [])[:4]:
             if not isinstance(b, dict):
                 continue
+            total_seen += 1
             raw_bank = str(b.get("bank") or "")
             view = str(b.get("view") or "").strip()
             evidence = str(b.get("evidence") or "").strip()
             resolved = _resolve_bank(raw_bank)
             if resolved is None:
-                continue  # bank not in allowed set
+                dropped_log.append(f"bank-not-allowed:{raw_bank[:20]}")
+                continue
             if not view:
+                dropped_log.append(f"empty-view:{resolved}")
                 continue
-            # Evidence check: the verbatim quote must be in the bank's text.
-            # If absent, the bullet is almost certainly a hallucination.
-            if not _evidence_present(resolved, evidence):
-                dropped_no_evidence.append(f"{resolved}: {view[:60]}")
+            if not _bullet_is_grounded(resolved, view, evidence):
+                ev_r = _overlap_ratio(evidence, resolved) if evidence else 0.0
+                vw_r = _overlap_ratio(view, resolved)
+                dropped_log.append(
+                    f"ungrounded:{resolved} ev={ev_r:.2f} view={vw_r:.2f} — {view[:60]}"
+                )
                 continue
-            clean_bullets.append({
-                "bank": resolved,
-                "view": view,
-                # Don't carry evidence into the render — it's just for gating.
-            })
+            clean_bullets.append({"bank": resolved, "view": view})
         if theme_name and clean_bullets:
             clean_themes.append({"theme": theme_name, "bullets": clean_bullets})
 
-    # Log dropped bullets so they're visible if Nikos checks Streamlit logs.
-    if dropped_no_evidence:
-        try:
-            import streamlit as _st
-            # Stash on session_state so sidebar can optionally surface this.
-            _st.session_state["_research_themes_dropped"] = dropped_no_evidence
-        except Exception:
-            pass
+    # Diagnostic: stash drop reasons in session_state so the sidebar can show
+    # them. Helps us debug why themes disappear without grepping Streamlit logs.
+    try:
+        import streamlit as _st
+        _st.session_state["_research_themes_debug"] = {
+            "seen": total_seen,
+            "kept": sum(len(t["bullets"]) for t in clean_themes),
+            "drops": dropped_log[:10],
+            "allowed_banks": allowed_banks,
+        }
+    except Exception:
+        pass
 
     # If guardrail killed everything, return empty so the per-doc fallback
     # kicks in rather than showing a half-empty themed section.
@@ -3594,6 +3612,18 @@ with st.sidebar:
         if failed_docs:
             for fname, err in list(failed_docs.items())[:5]:
                 st.caption(f"⚠️ {fname[:35]} — {str(err)[:60]}")
+        # Diagnostic: show research-themes grounding debug if a Brief was
+        # generated in this session. Helps spot why cross-bank view is empty.
+        _rt_dbg = st.session_state.get("_research_themes_debug")
+        if _rt_dbg:
+            seen = _rt_dbg.get("seen", 0)
+            kept = _rt_dbg.get("kept", 0)
+            if seen:
+                st.caption(f"🧪 Research themes: {kept}/{seen} bullets passed grounding check")
+                for drop in (_rt_dbg.get("drops") or [])[:5]:
+                    st.caption(f"   ✗ {drop[:90]}")
+            elif _drive_pdf_loader is not None:
+                st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
         if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
             autoload_research_from_drive(force_refresh=True)
             st.rerun()

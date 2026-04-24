@@ -1850,32 +1850,48 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
 
     # Build a bank -> source-text lookup for evidence verification.
     import re as _re
-    def _norm(s: str) -> str:
-        # Collapse whitespace + lowercase for forgiving substring match.
-        return _re.sub(r"\s+", " ", (s or "").lower()).strip()
 
-    bank_to_text: dict[str, str] = {}
+    _stopwords = {
+        "the","a","an","and","or","but","of","in","to","for","on","at","by",
+        "with","is","are","was","were","be","been","being","as","that","this",
+        "it","its","our","we","they","their","from","has","have","had","will",
+        "would","can","could","may","might","should","do","does","did","not",
+        "no","if","than","then","there","here","which","who","what","how",
+        "also","more","most","less","very","some","any","all","us",
+    }
+
+    def _norm(s: str) -> str:
+        # Lowercase, strip non-word chars (including OCR artifacts like ■ from
+        # pdfplumber), collapse whitespace.
+        s2 = _re.sub(r"[^a-z0-9\s]", " ", (s or "").lower())
+        return _re.sub(r"\s+", " ", s2).strip()
+
+    def _content_words(s: str) -> set[str]:
+        return {w for w in _norm(s).split() if len(w) >= 4 and w not in _stopwords}
+
+    bank_to_words: dict[str, set[str]] = {}
     for d in bank_docs:
-        bank_to_text.setdefault(d["bank"], "")
-        bank_to_text[d["bank"]] += " " + _norm(d["text"])
+        w = bank_to_words.setdefault(d["bank"], set())
+        w.update(_content_words(d["text"]))
 
     def _evidence_present(bank: str, evidence: str) -> bool:
-        """Return True if the evidence quote is found inside the bank's text.
-        Allows whitespace normalisation. Quote must be substantial (>=6 words)
-        to avoid trivial matches on common stopwords."""
-        ev = _norm(evidence)
-        if not ev or len(ev.split()) < 6:
+        """Check whether the evidence quote is plausibly from the bank's text.
+        Uses content-word overlap rather than exact substring, because:
+          * Gemini often paraphrases the 'evidence' it returns
+          * pdfplumber introduces OCR artifacts (dashes → ■, ligatures, etc.)
+        Rule: >= 60% of the evidence's content words (4+ letters, non-stopword)
+        must appear in the bank's text, AND the evidence must have at least 3
+        content words total (to stop trivial matches)."""
+        ev_words = _content_words(evidence)
+        if len(ev_words) < 3:
             return False
-        src = bank_to_text.get(bank, "")
-        if not src:
+        src_words = bank_to_words.get(bank, set())
+        if not src_words:
             return False
-        # Direct substring first (most common case)
-        if ev in src:
-            return True
-        # Allow partial match: the first 40 chars of the quote must appear,
-        # which catches cases where Gemini truncated the tail.
-        head = ev[:40] if len(ev) > 40 else ev
-        return head in src and len(ev.split()) >= 8
+        overlap = ev_words & src_words
+        if len(overlap) < 3:
+            return False
+        return (len(overlap) / len(ev_words)) >= 0.60
 
     clean_themes: list[dict] = []
     dropped_no_evidence: list[str] = []
@@ -3085,10 +3101,13 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                     if sells:
                         res_lines.append((short, "Sell", _xs(", ".join(sells)), RED))
                 else:
+                    # Compact per-doc fallback: hard-capped 180-char snippet.
+                    # Prevents the old "3 pages of raw broker PDF" failure mode
+                    # when Gemini synthesis returns nothing.
                     text = (rdoc.get("text") or "").replace("\n", " ").strip()
                     if text:
-                        # full text — paragraph will wrap naturally
-                        res_lines.append((short, "Research", _xs(text), MID))
+                        snippet = _t(text, 180)
+                        res_lines.append((short, "Research", _xs(snippet), MID))
             except Exception:
                 continue
 

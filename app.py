@@ -156,6 +156,12 @@ ASSETS = [
 # Multiple tickers to try for MSCI World (in order of preference)
 MSCI_WORLD_TICKERS = ["^990100-USD-STRD", "^MXWO", "URTH"]
 
+# Multiple tickers to try for MSCI Emerging Markets. The bare-index ticker
+# (^891800-USD-STRD) is unreliable on yfinance, leaving the row blank — which
+# the reviewer flagged as a credibility issue. Fall through to liquid US-listed
+# EM ETFs (EEM/VWO/IEMG) so the row populates daily.
+MSCI_EM_TICKERS = ["^891800-USD-STRD", "EEM", "VWO", "IEMG"]
+
 RATES = [
     ("rates", "us10y", "US 10Y Treasury",
      "Yield on 10-year US government bonds. When the YIELD goes UP, existing bond prices fall (inverse relationship) — bad for bond holders. A rising yield also increases borrowing costs for companies and mortgages, and can pressure equity valuations. When the yield falls, existing bond prices rise.",
@@ -229,7 +235,7 @@ CATEGORY_STYLE = {
 }
 
 
-st.set_page_config(page_title="Daily Market Brief", layout="wide")
+st.set_page_config(page_title="Daily Market Briefing", layout="wide")
 
 st.markdown(
     """
@@ -302,7 +308,7 @@ details summary { font-size: 14px !important; padding: 6px 0 !important; }
 
 st.markdown(
     "<div class='hero'>"
-    "<h1>Daily Market Brief</h1>"
+    "<h1>Daily Market Briefing</h1>"
     "<div class='hero-sub'>Cross-asset · News · Morning snapshot mode</div>"
     "</div>",
     unsafe_allow_html=True,
@@ -1768,6 +1774,7 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
             "Cross-asset performance is mixed, so leadership should be monitored rather than assumed.",
         ],
         "news_bullets": [],
+        "executive_summary": {"lead": "", "bullets": []},
     }
 
     if not use_gemini:
@@ -1804,7 +1811,7 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
         payload_dict = {
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
-                "Keys required: headline, subheadline, news_summary, news_bullets. "
+                "Keys required: headline, subheadline, news_summary, news_bullets, executive_summary. "
                 "\n\n"
                 "HARD GROUNDING RULES — violations corrupt the brief:\n"
                 "* NEVER invent facts. Every factual claim — event, bank name, "
@@ -1823,12 +1830,55 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "figure.\n"
                 "* If a headline is vague or you're not sure of a detail, "
                 "keep the bullet short and factual rather than embellishing.\n"
+                "* NEVER make temporal/historical claims unless they appear "
+                "verbatim in the headlines. Forbidden phrasings without source "
+                "evidence: 'Powell's last meeting', 'final rate decision', "
+                "'farewell', 'first since YYYY', 'highest in N years', "
+                "'biggest move ever', 'record close'. If the headline doesn't "
+                "say it, do not say it.\n"
                 "\n"
-                "news_bullets: 6 to 9 plain-English bullets. Each bullet MUST: "
-                "(1) name the event (from a supplied headline), "
-                "(2) state the market impact using ACTUAL numbers from market_snapshot (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
-                "(3) explain why in plain English, adding a parenthetical clarification for any jargon "
-                "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE) as')."
+                "HOUSE STYLE — this is a private-bank client newsletter, "
+                "not a media wire. Apply rigorously:\n"
+                "* OUTPUT 4 to 5 bullets, NOT more. Quality over volume.\n"
+                "* VARY sentence structure across bullets. Do NOT open every "
+                "bullet with the same template. Specifically, do NOT use the "
+                "pattern '<headline>, with <index> up X%, as investors <verb>...' "
+                "more than once across the bullet set.\n"
+                "* BAN filler phrases: 'as investors assess', 'as investors "
+                "monitor', 'as investors watch', 'investors are watching', "
+                "'amid concerns', 'amid uncertainty', 'amid expectations', "
+                "'all eyes on', 'investors await'. Replace with concrete "
+                "subject-verb-object writing.\n"
+                "* BAN advice language: 'investors should', 'we recommend', "
+                "'this is an opportunity', 'consider buying', 'time to'. "
+                "This brief reports; it does not advise.\n"
+                "* BAN tabloid framing: 'Super Bowl', 'mega week', 'make-or-"
+                "break', 'battle', 'showdown', 'feast or famine', 'roller "
+                "coaster'. Replace with sober factual language.\n"
+                "* PREFER the active voice and concrete subjects. Example of "
+                "house style: 'US equities were supported by technology "
+                "strength ahead of major earnings. The Nasdaq 100 led, rising "
+                "1.95%, while geopolitical talks remained the second-order "
+                "driver.' Avoid: 'with Nasdaq up 1.95% as investors monitor "
+                "US-Iran negotiations.'\n"
+                "\n"
+                "news_bullets: 4 to 5 plain-English bullets. Each bullet should "
+                "(1) name the driver (from a supplied headline), "
+                "(2) state the market impact using ACTUAL numbers from market_snapshot "
+                "where relevant (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
+                "(3) explain the linkage in one short clause. "
+                "Add a parenthetical clarification for any jargon "
+                "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE)').\n"
+                "\n"
+                "executive_summary: a top-of-brief synopsis. Shape: "
+                "{\"lead\": \"<1-2 sentence today's-message paragraph>\", "
+                "\"bullets\": [\"<bullet 1>\", \"<bullet 2>\", \"<bullet 3>\"]}. "
+                "The lead is a single calm paragraph (max ~40 words) describing "
+                "the prevailing market tone and the dominant driver. The 3 bullets "
+                "are: (1) the key equity-market driver, (2) the main risk to watch, "
+                "(3) the key data/event on the calendar. Each bullet ≤ 18 words. "
+                "Same grounding rules apply: only use facts from headlines / "
+                "market_snapshot / research_context. No advice phrasing."
                 + research_note +
                 " Be factual and concise. No preamble, no filler."
             ),
@@ -1843,14 +1893,34 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
 
     out, reason = ai_generate_json(payload)
     if isinstance(out, dict) and isinstance(out.get("news_bullets"), list) and len(out["news_bullets"]) >= 3:
+        # Normalise executive_summary into {lead: str, bullets: list[str]} —
+        # tolerate the model returning a flat list, a single string, or
+        # nothing at all.
+        es_raw = out.get("executive_summary")
+        if isinstance(es_raw, dict):
+            es = {
+                "lead": str(es_raw.get("lead", "") or "").strip(),
+                "bullets": [
+                    str(b).strip()
+                    for b in (es_raw.get("bullets") or [])
+                    if isinstance(b, str) and b.strip()
+                ][:3],
+            }
+        elif isinstance(es_raw, list):
+            es = {"lead": "", "bullets": [str(b).strip() for b in es_raw if isinstance(b, str)][:3]}
+        elif isinstance(es_raw, str):
+            es = {"lead": es_raw.strip(), "bullets": []}
+        else:
+            es = {"lead": "", "bullets": []}
         return (
             {
-                "headline":       out.get("headline")    or fallback["headline"],
-                "subheadline":    out.get("subheadline") or fallback["subheadline"],
-                "news_summary":   out.get("news_summary") or fallback["news_summary"],
-                "what_matters":   [],
-                "news_bullets":   out.get("news_bullets") or [],
-                "article_angles": out.get("article_angles") or [],
+                "headline":          out.get("headline")    or fallback["headline"],
+                "subheadline":       out.get("subheadline") or fallback["subheadline"],
+                "news_summary":      out.get("news_summary") or fallback["news_summary"],
+                "what_matters":      [],
+                "news_bullets":      out.get("news_bullets") or [],
+                "article_angles":    out.get("article_angles") or [],
+                "executive_summary": es,
             },
             {"gemini_used": True, "reason": reason},
         )
@@ -1887,11 +1957,59 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     per_bank: dict[str, list[str]] = {}
+    # Parallel structure: structured items {key_message, portfolio_implication}.
+    # Falls back to plain bullets if the model doesn't return the structured shape.
+    per_bank_items: dict[str, list[dict]] = {}
     debug_info: list[str] = []
 
     # Space calls out to stay under Gemini's 15 RPM free-tier limit.
     # Brief already spends 2-3 Gemini calls on news before reaching here.
     _call_idx = 0
+
+    def _extract_items_deep(obj) -> list[dict]:
+        """Find structured {key_message, portfolio_implication} items in
+        the model response. Tolerates field-name variations the model
+        sometimes produces (message/implication, view/portfolio_view, etc.).
+        Returns a list of dicts with at minimum a 'key_message' field."""
+        out: list[dict] = []
+        def _first_str(d: dict, *keys: str) -> str:
+            for k in keys:
+                v = d.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return ""
+        def _norm_one(d) -> dict | None:
+            if not isinstance(d, dict):
+                return None
+            km = _first_str(d, "key_message", "message", "view", "summary", "point")
+            pi = _first_str(d, "portfolio_implication", "implication",
+                            "portfolio_view", "consequence")
+            if not km:
+                return None
+            return {"key_message": km, "portfolio_implication": pi}
+        if isinstance(obj, list):
+            for it in obj:
+                norm = _norm_one(it)
+                if norm:
+                    out.append(norm)
+            return out
+        if isinstance(obj, dict):
+            for key in ("items", "views", "key_messages", "highlights", "messages"):
+                if key in obj and isinstance(obj[key], list):
+                    sub = _extract_items_deep(obj[key])
+                    if sub:
+                        return sub
+            # Sometimes the whole object IS one item — try that.
+            single = _norm_one(obj)
+            if single:
+                return [single]
+            # Recurse one level for nested {"bank": {"items": [...]}}
+            for v in obj.values():
+                if isinstance(v, (dict, list)):
+                    sub = _extract_items_deep(v)
+                    if sub:
+                        return sub
+        return []
 
     def _extract_bullets_deep(obj) -> list[str]:
         """Find bullets anywhere in Gemini's response — sometimes the model
@@ -1976,22 +2094,45 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         payload = _safe_json_dumps({
             "instruction": (
                 f"Today is {today_str}. Below is the text of a single "
-                f"broker research document from {bank}. Produce 3 to 5 "
-                "bullet points summarising the main points of this "
-                "document. Each bullet one tight sentence, 12-25 words, "
-                "concrete (include specific numbers, tickers, or calls "
-                "where the document has them). "
-                "\n\n"
+                f"broker research document from {bank}. Produce 3 to 4 "
+                "structured items summarising the main views in this "
+                "document. Each item has TWO short fields:\n"
+                "  - key_message: 12-22 words. The bank's view, paraphrased "
+                "concretely. Include specific numbers, tickers, or rating "
+                "changes where the document has them.\n"
+                "  - portfolio_implication: 8-18 words. What this view "
+                "means for a portfolio in plain language. NOT advice "
+                "language ('investors should…'). Frame as a consequence "
+                "or relevance ('points to continued duration risk', "
+                "'supports defensive sector tilt', 'inflation risk remains "
+                "live for fixed income'). Leave empty string if the "
+                "document does not naturally suggest one.\n"
+                "\n"
                 "RULES:\n"
                 "1. Use ONLY information that appears in the document text "
                 "below. Do not add anything from general knowledge.\n"
                 "2. Do not invent numbers, price targets, ratings, analyst "
                 "names, or forecasts not in the text.\n"
                 "3. Do not mix up central banks (Fed is not ECB).\n"
-                "4. If the document is thin, return fewer bullets (even 1).\n"
+                "4. If the document is thin, return fewer items (even 1).\n"
+                "5. Faithfully paraphrase the document — including its "
+                "ratings/calls/recommendations — but do NOT sensationalise. "
+                "Avoid tabloid framing ('Super Bowl', 'showdown', 'mega "
+                "week', 'all eyes on'). Avoid filler ('amid concerns', "
+                "'investors are watching'). Use sober, concrete writing.\n"
+                "6. Do not editorialise on top of the document. If the "
+                "document recommends something, attribute the recommendation "
+                "(e.g. 'UBS reiterates Buy on X') rather than asserting it as "
+                "your own view.\n"
+                "7. The portfolio_implication field is a CONSEQUENCE for a "
+                "reader's portfolio, not a recommendation. Do NOT write "
+                "'buy', 'sell', 'overweight X', 'we recommend' in this "
+                "field unless the bank's own document uses those exact "
+                "words about that exact view.\n"
                 "\n"
                 "OUTPUT: raw JSON only, no markdown. "
-                "Shape: {\"bullets\": [\"bullet 1\", \"bullet 2\", ...]}"
+                "Shape: {\"items\": [{\"key_message\": \"...\", "
+                "\"portfolio_implication\": \"...\"}, ...]}"
             ),
             "bank": bank,
             # 2500 chars ≈ 700 tokens — stays well under Groq's 6k TPM free-tier
@@ -2017,20 +2158,44 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             debug_info.append(f"{bank}: no JSON ({str(reason)[:220]})")
             continue
 
-        # Deep-extract bullets from whatever shape Gemini returned.
-        bullets_found = _extract_bullets_deep(out)
+        # Prefer the structured {key_message, portfolio_implication} shape.
+        # Fall back to flat bullets only if no items came back.
+        items_found = _extract_items_deep(out)
 
+        if items_found:
+            cleaned_items = [
+                {
+                    "key_message": it["key_message"][:240].strip(),
+                    "portfolio_implication": (it.get("portfolio_implication") or "")[:160].strip(),
+                }
+                for it in items_found[:4]
+                if it.get("key_message")
+            ]
+            if cleaned_items:
+                per_bank_items.setdefault(bank, []).extend(cleaned_items)
+                # Also populate flat bullets for downstream consumers that
+                # still expect the old shape (e.g. _research_themes_debug).
+                per_bank.setdefault(bank, []).extend(
+                    it["key_message"] for it in cleaned_items
+                )
+                debug_info.append(f"{bank}: {len(cleaned_items)} items ok")
+                continue
+
+        # No structured items — try flat bullets as fallback.
+        bullets_found = _extract_bullets_deep(out)
         if not bullets_found:
-            # Surface the top-level keys so we can see what Gemini gave us.
             keys = list(out.keys())[:6]
-            debug_info.append(f"{bank}: no bullets found in keys={keys}")
+            debug_info.append(f"{bank}: no items/bullets found in keys={keys}")
             continue
 
         cleaned = [s for s in bullets_found[:5] if s.strip()]
-
         if cleaned:
             per_bank.setdefault(bank, []).extend(cleaned)
-            debug_info.append(f"{bank}: {len(cleaned)} bullets ok")
+            # Synthesize items with empty implication so render path works uniformly.
+            per_bank_items.setdefault(bank, []).extend(
+                {"key_message": s, "portfolio_implication": ""} for s in cleaned[:4]
+            )
+            debug_info.append(f"{bank}: {len(cleaned)} bullets-only ok")
 
     # Diagnostic — survives in session_state so sidebar can show what happened.
     try:
@@ -2048,7 +2213,11 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         return empty
 
     banks_out = [
-        {"bank": bank, "bullets": per_bank[bank][:5]}
+        {
+            "bank":    bank,
+            "bullets": per_bank[bank][:5],            # legacy shape, kept
+            "items":   per_bank_items.get(bank, [])[:4],  # new structured shape
+        }
         for bank in sorted(per_bank.keys())
     ]
     return {"banks": banks_out, "themes": []}
@@ -2067,6 +2236,8 @@ def build_bundle():
             # MSCI World: try multiple tickers in order
             if key == "msci_world":
                 s, _ = fetch_yf_series_with_fallback(MSCI_WORLD_TICKERS, "MSCI World")
+            elif key == "msci_em":
+                s, _ = fetch_yf_series_with_fallback(MSCI_EM_TICKERS, "MSCI EM")
             else:
                 s = fetch_yf_series(ticker)
             history_frames.append(pd.DataFrame({
@@ -2144,7 +2315,11 @@ def build_bundle():
     today = pd.Timestamp.today().normalize()
     year_start = pd.Timestamp(today.year, 1, 1)
     month_start = pd.Timestamp(today.year, today.month, 1)
-    week_start = today - pd.Timedelta(days=today.weekday())
+    # Rolling 7-day return (T vs T-7) instead of week-to-date.
+    # WTD reads +0.00% across the board on Mondays, which the reviewer flagged
+    # as uninformative. The column key stays "wtd" to avoid plumbing changes;
+    # the displayed header is updated to "7d" in _dtbl().
+    seven_days_ago = today - pd.Timedelta(days=7)
 
     for group, key, label, desc in metas:
         g = history[history["key"] == key].sort_values("date")
@@ -2175,7 +2350,7 @@ def build_bundle():
                 "description": desc,
                 "level": latest,
                 "d1": pct_change(latest, prev),
-                "wtd": pct_change(latest, value_on_or_before(series, week_start)),
+                "wtd": pct_change(latest, value_on_or_before(series, seven_days_ago)),
                 "mtd": pct_change(latest, value_on_or_before(series, month_start)),
                 "ytd": pct_change(latest, value_on_or_before(series, year_start)),
             }
@@ -2296,6 +2471,18 @@ def pick_chart_of_day(history, news_df):
                     "* Do NOT fabricate links between the asset and news topics — only "
                     "mention a connection if the asset naturally relates to one of the "
                     "supplied top_news_keywords.\n"
+                    "* NEVER make temporal/historical claims unless directly supported "
+                    "by the input. Forbidden without source: 'first since YYYY', "
+                    "'highest in N years', 'biggest move ever', 'record close', "
+                    "'last/final/farewell meeting'.\n"
+                    "\n"
+                    "HOUSE STYLE — client newsletter, not a media wire:\n"
+                    "* No advice language: 'investors should', 'we recommend', "
+                    "'opportunity', 'time to buy/sell'. Report; do not prescribe.\n"
+                    "* No tabloid framing: 'Super Bowl', 'mega week', 'showdown', "
+                    "'make-or-break', 'battle'. Use sober factual language.\n"
+                    "* No filler: 'all eyes on', 'investors are watching', "
+                    "'amid concerns'. Use concrete subject-verb-object writing.\n"
                     "\n"
                     "The reason field must be 2-3 sentences explaining: (1) what the chart shows "
                     "(using the d1_pct and zscore from the input), "
@@ -2793,7 +2980,7 @@ def render_news_bullets(writing, news_df):
                 keep = [h for h, v in selections.items() if v]
                 filtered = news_df[news_df["headline"].isin(keep)].copy()
                 new_pdf = build_pdf(
-                    "Daily Market Brief",
+                    "Daily Market Briefing",
                     st.session_state.get("pdf_chart_png"),
                     st.session_state["equities_df"],
                     st.session_state["rates_df"],
@@ -2890,6 +3077,38 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     ]))
     story += [hdr, Spacer(1, 0.12*cm)]
 
+    # ── 1b. EXECUTIVE SUMMARY ────────────────────────────────────────────────
+    # Reviewer's "nice-to-have #1": a 3-bullet exec summary at the top so the
+    # client sees the brief's message before drowning in tables. Rendered as
+    # a single bordered card: lead paragraph + 3 short bullets.
+    _es = (writing or {}).get("executive_summary") or {}
+    _es_lead = (_es.get("lead") or "").strip()
+    _es_bullets = [b for b in (_es.get("bullets") or []) if isinstance(b, str) and b.strip()][:3]
+    if _es_lead or _es_bullets:
+        es_flows = [
+            P("EXECUTIVE SUMMARY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
+            HRFlowable(width=(PW-1.0)*cm, thickness=0.4, color=RUL),
+            Spacer(1, 0.04*cm),
+        ]
+        if _es_lead:
+            es_flows.append(P(_xs(_es_lead), sz=6.2, col=TXT, lead=8))
+        if _es_bullets:
+            if _es_lead:
+                es_flows.append(Spacer(1, 0.05*cm))
+            for b in _es_bullets:
+                es_flows.append(P(f"\u2022 {_xs(b)}", sz=5.8, col=TXT, lead=7.2))
+        es_tbl = Table([[es_flows]], colWidths=[PW*cm])
+        es_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1), LIT),
+            ("BOX",          (0,0),(-1,-1), 0.5, BLU),
+            ("LEFTPADDING",  (0,0),(-1,-1), 8),
+            ("RIGHTPADDING", (0,0),(-1,-1), 8),
+            ("TOPPADDING",   (0,0),(-1,-1), 6),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 6),
+            ("VALIGN",       (0,0),(-1,-1), "TOP"),
+        ]))
+        story += [es_tbl, Spacer(1, 0.12*cm)]
+
     # ── 2. KPI STRIP — last trading day moves, flat 2-row table ──────────────
     kpis = [
         ("Global Eq 1D",    metrics.get("global_equities_d1")),
@@ -2968,9 +3187,12 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
     nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
-    # Chart cell — no box border (avoids misalignment when left column is taller)
+    # Chart cell — no box border (avoids misalignment when left column is taller).
+    # Height bumped from 6.5cm to 7.5cm to fit the two stacked subplots (Risk
+    # / Defensive). ReportLab Image stretches to width+height, so the cell
+    # aspect ratio must match the PNG aspect ratio (~940x480).
     if chart_png:
-        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=6.5*cm)
+        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=7.5*cm)
     else:
         chart_cell = P("<i>Chart unavailable</i>", sz=6, col=GRY)
 
@@ -3059,7 +3281,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             [P("Instrument", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("Level",      fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("1D",         fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
-             P("WTD",        fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+             P("7d",         fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("YTD",        fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7)],
         ]
         cmds = [
@@ -3075,6 +3297,20 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             ("BOX",          (0,0),(-1,-1), 0.4, RUL),
             ("LINEBELOW",    (0,1),(-1,-1), 0.3, RUL),
         ]
+        # Drop rows where level is None/NaN — these render as "N/A | N/A | N/A | N/A"
+        # and erode credibility (reviewer's #1 complaint). Keep rows where level
+        # exists but a single return column is missing — partial data is fine.
+        def _has_level(row) -> bool:
+            v = row.get("level")
+            if v is None:
+                return False
+            try:
+                f = float(v)
+                return f == f  # NaN check
+            except Exception:
+                return False
+        df = df[df.apply(_has_level, axis=1)] if not df.empty else df
+
         for ri, (_, row) in enumerate(df.iterrows()):
             d1 = row.get("d1"); wtd = row.get("wtd"); ytd = row.get("ytd")
             bg = WHT if ri%2==0 else STR
@@ -3189,7 +3425,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             ))
 
     if _banks_list:
-        # Assign a colour per bank — header tint.
+        # Assign a colour per bank — used in the SOURCE column.
         _bank_palette = [BLU, GRN, RED, NAV, MID]
         _bank_colour: dict[str, object] = {}
 
@@ -3197,6 +3433,15 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             if bank not in _bank_colour:
                 _bank_colour[bank] = _bank_palette[len(_bank_colour) % len(_bank_palette)]
             return _bank_colour[bank]
+
+        # Reviewer's nice-to-have #3: render Research Highlights as a
+        # 3-column table — Source | Key Message | Portfolio Implication —
+        # so the section reads like an advisory note, not a summary feed.
+        # Falls back to the legacy bullet list if no items came through.
+        _has_items = any(
+            isinstance(entry.get("items"), list) and entry.get("items")
+            for entry in _banks_list
+        )
 
         story += [
             Spacer(1, 0.06*cm),
@@ -3207,25 +3452,91 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             Spacer(1, 0.04*cm),
         ]
 
-        for entry in _banks_list[:6]:
-            bank = str(entry.get("bank") or "")
-            bullets = entry.get("bullets") or []
-            if not bank or not bullets:
-                continue
-            bcol = _colour_for(bank)
-            # Bank header line — coloured, bold, compact.
-            story.append(P(
-                f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
-                sz=5.2, col=NAV, lead=6.5,
-            ))
-            for bullet in bullets[:5]:
-                if not isinstance(bullet, str):
+        if _has_items:
+            # Build a flat list of rows: [Source, Key Message, Portfolio Implication].
+            # Source cell is shown only on the FIRST row of each bank to avoid visual repetition.
+            rh_cw = [PW*0.16*cm, PW*0.50*cm, PW*0.34*cm]
+            rh_rows = [[
+                P("Source",                fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+                P("Key Message",           fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+                P("Portfolio Implication", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+            ]]
+            rh_cmds = [
+                ("BACKGROUND",   (0,0),(-1,0),  NAV),
+                ("TEXTCOLOR",    (0,0),(-1,0),  WHT),
+                ("LINEBELOW",    (0,0),(-1,0),  1.0, BLU),
+                ("VALIGN",       (0,0),(-1,-1), "TOP"),
+                ("LEFTPADDING",  (0,0),(-1,-1), 4),
+                ("RIGHTPADDING", (0,0),(-1,-1), 4),
+                ("TOPPADDING",   (0,0),(-1,-1), 2.5),
+                ("BOTTOMPADDING",(0,0),(-1,-1), 2.5),
+                ("BOX",          (0,0),(-1,-1), 0.3, RUL),
+            ]
+            ri = 1  # data row index (row 0 is header)
+            for entry in _banks_list[:6]:
+                bank = str(entry.get("bank") or "")
+                items = entry.get("items") or []
+                if not bank or not items:
+                    # If a bank has only legacy bullets, synthesise items so
+                    # they still appear in the table.
+                    bullets = entry.get("bullets") or []
+                    if bank and bullets:
+                        items = [{"key_message": b, "portfolio_implication": ""}
+                                 for b in bullets[:4] if isinstance(b, str)]
+                    else:
+                        continue
+                bcol = _colour_for(bank)
+                first_row_for_bank = ri
+                for idx, it in enumerate(items[:4]):
+                    km = (it.get("key_message") or "").strip()
+                    pi = (it.get("portfolio_implication") or "").strip()
+                    if not km:
+                        continue
+                    src_cell = (
+                        P(f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
+                          sz=5.4, col=NAV, lead=6.6)
+                        if idx == 0 else P("", sz=5.0)
+                    )
+                    rh_rows.append([
+                        src_cell,
+                        P(_xs(km), sz=4.9, col=TXT, lead=6.3),
+                        P(_xs(pi) if pi else "<i>—</i>",
+                          sz=4.9, col=(TXT if pi else GRY), lead=6.3),
+                    ])
+                    bg = WHT if (ri % 2 == 1) else STR
+                    rh_cmds.append(("BACKGROUND", (0,ri),(-1,ri), bg))
+                    # Suppress the inter-row line within a bank's group, draw a heavier rule between banks.
+                    if idx > 0:
+                        rh_cmds.append(("LINEABOVE", (0,ri),(-1,ri), 0.0, WHT))
+                    ri += 1
+                # After last row of this bank, draw a thin separator below.
+                if ri > first_row_for_bank:
+                    rh_cmds.append(("LINEBELOW", (0,ri-1),(-1,ri-1), 0.4, RUL))
+
+            if len(rh_rows) > 1:
+                rh_tbl = Table(rh_rows, colWidths=rh_cw, repeatRows=1)
+                rh_tbl.setStyle(TableStyle(rh_cmds))
+                story.append(rh_tbl)
+        else:
+            # Legacy path: bank-headed bullet list (used when no items returned at all).
+            for entry in _banks_list[:6]:
+                bank = str(entry.get("bank") or "")
+                bullets = entry.get("bullets") or []
+                if not bank or not bullets:
                     continue
+                bcol = _colour_for(bank)
                 story.append(P(
-                    f"\u00a0\u00a0\u2022 {_xs(bullet)}",
-                    sz=4.9, col=TXT, lead=6.3,
+                    f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
+                    sz=5.2, col=NAV, lead=6.5,
                 ))
-            story.append(Spacer(1, 0.05*cm))
+                for bullet in bullets[:5]:
+                    if not isinstance(bullet, str):
+                        continue
+                    story.append(P(
+                        f"\u00a0\u00a0\u2022 {_xs(bullet)}",
+                        sz=4.9, col=TXT, lead=6.3,
+                    ))
+                story.append(Spacer(1, 0.05*cm))
 
     elif False:  # Mechanical fallback disabled per user preference:
                  # "I prefer to see nothing than to see this mechanical."
@@ -3307,7 +3618,22 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                     ))
                 story.append(Spacer(1, 0.05*cm))
 
-    # ── 6. DISCLAIMER ─────────────────────────────────────────────────────────
+    # ── 6. DATA TIMESTAMP + SOURCES ───────────────────────────────────────────
+    # Reviewer's must-fix #3: every client-facing brief needs an explicit
+    # "as-of" timestamp and a sources note, otherwise stale or partial data
+    # has no anchor.
+    try:
+        _ts = now_zurich().strftime("%d %B %Y, %H:%M %Z")
+    except Exception:
+        _ts = datetime.now().strftime("%d %B %Y, %H:%M")
+    footer_meta = (
+        f"<b>Market data as of:</b> {_xs(_ts)}. "
+        "<b>Sources:</b> market data providers (Yahoo Finance, FRED), "
+        "public news sources, and internal research summaries from "
+        "uploaded broker documents."
+    )
+
+    # ── 7. DISCLAIMER ─────────────────────────────────────────────────────────
     disc = ("Disclaimer: This briefing is for informational purposes only and does not "
             "constitute investment advice or a recommendation to buy or sell any financial "
             "instrument. Information is believed reliable but accuracy cannot be guaranteed. "
@@ -3316,6 +3642,8 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     story += [
         Spacer(1, 0.04*cm),
         HRFlowable(width=PW*cm, thickness=0.4, color=RUL),
+        Spacer(1, 0.02*cm),
+        P(footer_meta, sz=4.4, col=GRY, lead=5.4),
         Spacer(1, 0.02*cm),
         P(disc, sz=4.2, col=GRY, lead=5.2),
     ]
@@ -3636,6 +3964,10 @@ def add_render_outputs(base_state, chart_window="YTD"):
 
         pdf_df = pdf_chart_subset(weekly_df)
         if not pdf_df.empty:
+            # Reviewer's nice-to-have #2: split the central chart into two
+            # stacked panels — Risk Assets on top, Defensive/Macro below.
+            # The single-panel version had too many overlapping lines for a
+            # client newsletter. Same total footprint, fewer lines per panel.
             pdf_df = pdf_df.copy()
             pdf_short_labels = {
                 "msci_world": "World",
@@ -3647,31 +3979,65 @@ def add_render_outputs(base_state, chart_window="YTD"):
                 "global_bonds": "Global Bonds",
             }
             pdf_df["short_label"] = pdf_df["key"].map(pdf_short_labels).fillna(pdf_df["label"])
-            pdf_fig = px.line(
-                pdf_df,
-                x="date",
-                y="return_pct",
-                color="short_label",
-                title="Core Cross-Asset YTD Performance (Start of Year = 0%)",
-                color_discrete_sequence=["#103B73", "#1E88E5", "#38A3FF", "#26A69A", "#EF6C00", "#7E57C2", "#6D4C41"],
+
+            # Group keys into panels. "Risk" = directional equity exposure;
+            # "Defensive/Macro" = bonds, gold, oil, rates.
+            risk_keys      = {"msci_world", "sp500", "stoxx600"}
+            defensive_keys = {"global_bonds", "us10y", "gold", "wti"}
+            risk_df      = pdf_df[pdf_df["key"].isin(risk_keys)].copy()
+            defensive_df = pdf_df[pdf_df["key"].isin(defensive_keys)].copy()
+
+            # Stable colour map so the same series always gets the same colour.
+            colour_for_key = {
+                "msci_world":   "#103B73",
+                "sp500":        "#1E88E5",
+                "stoxx600":     "#38A3FF",
+                "global_bonds": "#26A69A",
+                "us10y":        "#7E57C2",
+                "gold":         "#EF6C00",
+                "wti":          "#6D4C41",
+            }
+
+            from plotly.subplots import make_subplots
+            pdf_fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True,
+                vertical_spacing=0.10,
+                subplot_titles=("Risk Assets — YTD (%)", "Defensive & Macro — YTD (%)"),
             )
-            pdf_fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>")
+            for sub_df, row in ((risk_df, 1), (defensive_df, 2)):
+                if sub_df.empty:
+                    continue
+                for key, g in sub_df.groupby("key"):
+                    g = g.sort_values("date")
+                    pdf_fig.add_trace(
+                        go.Scatter(
+                            x=g["date"], y=g["return_pct"], mode="lines",
+                            name=g["short_label"].iloc[0],
+                            line=dict(width=1.6, color=colour_for_key.get(key, "#444")),
+                            hovertemplate="<b>%{fullData.name}</b><br>%{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>",
+                            legendgroup=("risk" if row == 1 else "defensive"),
+                            showlegend=True,
+                        ),
+                        row=row, col=1,
+                    )
+                pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C", row=row, col=1)
+
             pdf_fig.update_layout(
-                xaxis_title="",
-                yaxis_title="",
-                height=360,
-                legend_title="",
+                height=420,
                 hovermode="closest",
                 plot_bgcolor="white",
                 paper_bgcolor="white",
-                margin=dict(l=20, r=15, t=30, b=20),
+                margin=dict(l=20, r=15, t=35, b=15),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                            xanchor="center", x=0.5, font=dict(size=9)),
             )
             pdf_fig.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
             pdf_fig.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
-            add_event_marker(pdf_fig, IRAN_WAR_START_DATE, "Iran conflict start<br>28 Feb 2026", "#C62828", 0.12, 10)
-            add_event_marker(pdf_fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 10)
-            pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
-            pdf_chart_png = _fig_to_png(pdf_fig, width=940, height=400)
+            # Subplot title font size — make a touch smaller for the cramped PDF cell.
+            for ann in pdf_fig.layout.annotations:
+                ann.font = dict(size=10, color="#103B73")
+
+            pdf_chart_png = _fig_to_png(pdf_fig, width=940, height=480)
 
     # Chart of the Day — compute before build_pdf so it can appear in PDF
     cotd = pick_chart_of_day(history, base_state.get("news_df"))
@@ -3703,7 +4069,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
             cotd_png = None
 
     pdf_bytes = build_pdf(
-        "Daily Market Brief",
+        "Daily Market Briefing",
         pdf_chart_png,
         base_state["equities_df"],
         base_state["rates_df"],

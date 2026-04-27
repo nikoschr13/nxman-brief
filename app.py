@@ -1718,6 +1718,26 @@ _HOUSE_STYLE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bPowell's\s+last\s+(?:Fed\s+)?meeting\b", re.IGNORECASE),
      "Powell's upcoming Fed meeting"),
 
+    # ── Single-stock framing (reviewer flagged Qualcomm/Nvidia/Verizon) ─────
+    # Rewrite tabloid-style mega-cap headlines to sector-level framing.
+    # The brief discusses market behaviour, not single-stock storylines.
+    (re.compile(r"\b(?:Qualcomm|Nvidia|NVDA|QCOM)\s+stock\s+soars\b", re.IGNORECASE),
+     "AI and semiconductor shares are firm"),
+    (re.compile(r"\b(?:Nvidia|NVDA)\s+tops\s+\$\d+(?:\.\d+)?\s*trillion(?:\s+again)?\b", re.IGNORECASE),
+     "AI and semiconductor shares lead technology gains"),
+    (re.compile(r"\b(?:Apple|Microsoft|Alphabet|Google|Meta|Amazon|Tesla|Nvidia|Qualcomm)\s+stock\s+(?:soars|surges|jumps|rallies)\b", re.IGNORECASE),
+     "mega-cap technology shares are supportive"),
+
+    # ── Truncation artefacts ─────────────────────────────────────────────────
+    # Catch sentences that end on a dangling conjunction with a period
+    # appended (e.g. "Watch whether this move continues or."). These are
+    # almost always artefacts of an upstream char-cut — strip the dangle
+    # and the orphan period.
+    (re.compile(r",?\s+(?:or|and|but|while|whether|with|to|in|of)\s*\.\s*$",
+                re.IGNORECASE), "."),
+    (re.compile(r",?\s+(?:or|and|but|while|whether|with|to|in|of)\s*$",
+                re.IGNORECASE), "."),
+
     # ── Advice phrasings ─────────────────────────────────────────────────────
     (re.compile(r"\binvestors\s+should\b", re.IGNORECASE),
      "the data suggests"),
@@ -1758,6 +1778,58 @@ def _scrub_ai_text(text: str) -> tuple[str, list[str]]:
     cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
     cleaned = cleaned.strip()
     return cleaned, fixes
+
+
+def _smart_truncate_at_sentence(text: str, max_chars: int) -> str:
+    """Truncate text at the last complete sentence boundary at or before
+    max_chars. Falls back to the last word boundary if no sentence end is
+    available, then strips dangling conjunctions/prepositions so the result
+    never reads like a chopped fragment.
+
+    The reviewer flagged a CotD output cut mid-clause: 'Watch whether this
+    move continues or.' — that came from a naive [:350] cut on a longer
+    paragraph. This helper makes the truncation aware of sentence and word
+    boundaries so the close always reads as complete copy.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    # Prefer a sentence boundary if one exists at >= 60% of allowed length.
+    best = -1
+    for terminator in (". ", "! ", "? "):
+        idx = truncated.rfind(terminator)
+        if idx > best:
+            best = idx
+    if best >= int(max_chars * 0.6):
+        return text[:best + 1].rstrip()
+    # No good sentence boundary — fall back to the last word boundary.
+    last_space = truncated.rfind(" ")
+    if last_space > 0:
+        truncated = truncated[:last_space]
+    truncated = truncated.rstrip(",;:")
+    # Strip dangling conjunctions / prepositions / articles that signal an
+    # incomplete clause. Iterating because some endings are stacked
+    # ("...as the move continues or whether the").
+    DANGLING = (
+        " or", " and", " but", " while", " whether", " with", " of",
+        " to", " in", " on", " as", " from", " for", " by", " at",
+        " a", " an", " the", " is", " are", " was", " were", " has",
+        " have", " be", " been",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for trail in DANGLING:
+            if truncated.lower().endswith(trail):
+                truncated = truncated[: -len(trail)].rstrip(",;: ")
+                changed = True
+                break
+    if truncated and truncated[-1] not in ".!":
+        truncated += "."
+    return truncated
 
 
 def _scrub_writing_dict(out: dict) -> list[str]:
@@ -2263,6 +2335,21 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "drop the single-stock item and use the slot for a macro "
                 "point. If only single-stock headlines are available, drop "
                 "to 3 bullets rather than padding.\n"
+                "\n"
+                "FRAME MEGA-CAP MOVES AT THE SECTOR LEVEL, NOT THE COMPANY "
+                "LEVEL. Even when an individual mega-cap (Nvidia, Apple, "
+                "Microsoft, Amazon, Alphabet, Meta, Tesla, Qualcomm, etc.) "
+                "is the catalyst, the bullet must speak about the "
+                "sector/index, not the company. The brief discusses market "
+                "behaviour, not single-stock storylines. Bad: 'Qualcomm "
+                "stock soars as Nvidia tops $5 trillion again' (sounds "
+                "like a tabloid headline). Good: 'AI and semiconductor "
+                "shares continue to support technology sentiment ahead of "
+                "major earnings.' If the headline is mega-cap-specific, "
+                "rewrite it as: 'Mega-cap technology strength supports "
+                "equities ahead of earnings, with the Nasdaq 100 up 1.95%.' "
+                "Do NOT name the individual company unless its earnings "
+                "print is THE day's main scheduled event.\n"
                 "\n"
                 "Each bullet must "
                 "(1) name the driver (from a supplied headline), "
@@ -3842,17 +3929,20 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
         tf          = int(cotd.get("timeframe_days", 60))
-        reason_text = (cotd.get("reason","") or "")[:350].rstrip()
-        # Belt-and-suspenders: ensure the closing sentence is terminated and
-        # is NOT an open question. The reviewer asked for an analytical
-        # conclusion, not a hanging "What does this mean?" — so we coerce
-        # any unterminated tail into a period, and convert any trailing
-        # "?" into "." so the close reads as a confident statement.
-        if reason_text and reason_text[-1] not in ".!":
-            if reason_text[-1] == "?":
-                reason_text = reason_text[:-1] + "."
-            else:
-                reason_text += "."
+        # Smart-truncate at a sentence boundary (450 chars cap, was 350).
+        # The naive [:350] cut produced fragments like 'Watch whether this
+        # move continues or.' when the AI's third sentence ran past the
+        # limit. The new helper finds the last complete sentence end, falls
+        # back to the last word, and trims dangling conjunctions before
+        # adding terminal punctuation.
+        reason_text = _smart_truncate_at_sentence(
+            cotd.get("reason", "") or "", 450,
+        )
+        # Convert any trailing "?" into "." (analytical conclusion, not
+        # an open question — the prompt rule already says this, this is
+        # just belt-and-suspenders).
+        if reason_text and reason_text.endswith("?"):
+            reason_text = reason_text[:-1] + "."
         cotd_flows += [
             P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
             Spacer(1, 0.04*cm),

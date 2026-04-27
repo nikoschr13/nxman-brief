@@ -1470,7 +1470,12 @@ def build_local_news_summary(news_df):
     groups = {}
     for _, row in news_df.iterrows():
         cat = row.get("category", "Other")
-        groups.setdefault(cat, []).append(row.get("headline", ""))
+        # Clean headlines through the same media-y filter used on the bullet
+        # fallback path, so the recap doesn't carry "Wall Street's Super Bowl
+        # Wednesday:" or "Markets morning briefing:" prefixes either.
+        cleaned = _clean_headline_for_bullet(row.get("headline", ""))
+        if cleaned:
+            groups.setdefault(cat, []).append(cleaned)
 
     ordered = []
     for cat in ["Macro / Rates", "Geopolitics", "Equities", "Commodities", "Crypto", "Other"]:
@@ -1514,6 +1519,92 @@ def _strip_json_fences(raw: str) -> str:
     if raw.endswith("```"):
         raw = raw.rsplit("```", 1)[0]
     return raw.strip()
+
+
+# ── Deterministic headline cleanup for the WHAT'S MOVING MARKETS fallback ────
+# When the Gemini→Groq cascade fails, the brief used to dump raw news headlines
+# verbatim — which let media-y phrasing ("Wall Street's Super Bowl Wednesday",
+# "Markets morning briefing:") leak through to clients despite the prompt
+# work elsewhere. This pass is a low-tech but always-on safety net: no AI,
+# pure string manipulation, predictable output.
+_MEDIA_PREFIXES = [
+    # Order matters — longer/more-specific prefixes first.
+    "Wall Street's Super Bowl Wednesday:",
+    "Wall Street's Super Bowl:",
+    "Markets morning briefing:",
+    "Morning briefing:",
+    "Stock market today:",
+    "Stocks today:",
+    "Market wrap:",
+    "Mid-day update:",
+    "Closing bell:",
+    "Live updates:",
+    "Live blog:",
+    "Breaking:",
+    "Exclusive:",
+]
+# Tabloid / sensational vocabulary to strip wholesale (case-insensitive).
+_MEDIA_PHRASES = [
+    "all eyes on ",
+    "Super Bowl ",
+    "make-or-break ",
+    "make or break ",
+    "mega week ",
+    "showdown ",
+    "feast or famine ",
+    "roller coaster ",
+    "all-eyes-on ",
+]
+
+def _clean_headline_for_bullet(text: str) -> str:
+    """Strip media-y prefixes / phrases / trailing artefacts from a headline
+    so it reads as a sober factual line in the brief's WHAT'S MOVING MARKETS
+    section. Used only on the fallback path when AI bullets aren't available.
+    Pure string manipulation — never makes anything up."""
+    if not isinstance(text, str):
+        return ""
+    s = text.strip()
+    if not s:
+        return s
+    # Drop leading media prefixes (e.g. "Markets morning briefing: …").
+    for pref in _MEDIA_PREFIXES:
+        if s.lower().startswith(pref.lower()):
+            s = s[len(pref):].lstrip(" :-—–")
+            break
+    # Strip tabloid phrases inside the body (case-insensitive).
+    low = s.lower()
+    for phrase in _MEDIA_PHRASES:
+        idx = low.find(phrase.lower())
+        if idx != -1:
+            s = (s[:idx] + s[idx + len(phrase):]).strip()
+            low = s.lower()
+    # Trailing artefacts: ellipses, source-of-source markers, …
+    while s.endswith(("...", "…", " -", " –", " —")):
+        s = s.rstrip(".… -–—").strip()
+    # Capitalise first letter if we trimmed it off via a prefix removal.
+    if s and not s[0].isupper() and s[0].isalpha():
+        s = s[0].upper() + s[1:]
+    return s
+
+
+def _dedupe_headlines(headlines: list[str], limit: int = 5) -> list[str]:
+    """Drop near-duplicate headlines (same first 6 significant words). The raw
+    news feed often carries the same story from multiple sources with slightly
+    different wording; client newsletter should only show each story once."""
+    seen_keys: set[str] = set()
+    out: list[str] = []
+    for h in headlines:
+        if not h:
+            continue
+        words = [w for w in h.lower().split() if len(w) > 2][:6]
+        key = " ".join(words)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(h)
+        if len(out) >= limit:
+            break
+    return out
     return requests.post(
         url,
         headers={"Content-Type": "application/json"},
@@ -1946,7 +2037,12 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
 
     def _infer_bank(fname: str) -> str:
         fn = fname.lower()
+        # Bank of Singapore publication families. Confirmed 2026-04-27 — the
+        # CIO_WEEKLY_* and FX_WEEKLY_* documents that previously rendered as
+        # raw filenames are BoS publications.
         if "morning call" in fn:                        return "BoS"
+        if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
+        if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
         if "barclays"     in fn:                        return "Barclays"
         if "daily europe" in fn:                        return "UBS"
         if "equity_coverage" in fn or "universe" in fn: return "UBS Universe"
@@ -2095,18 +2191,10 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             "instruction": (
                 f"Today is {today_str}. Below is the text of a single "
                 f"broker research document from {bank}. Produce 3 to 4 "
-                "structured items summarising the main views in this "
-                "document. Each item has TWO short fields:\n"
-                "  - key_message: 12-22 words. The bank's view, paraphrased "
-                "concretely. Include specific numbers, tickers, or rating "
+                "concrete bullets summarising the main views in this "
+                "document. Each bullet is one tight sentence, 12-22 "
+                "words, with specific numbers, tickers, levels, or rating "
                 "changes where the document has them.\n"
-                "  - portfolio_implication: 8-18 words. What this view "
-                "means for a portfolio in plain language. NOT advice "
-                "language ('investors should…'). Frame as a consequence "
-                "or relevance ('points to continued duration risk', "
-                "'supports defensive sector tilt', 'inflation risk remains "
-                "live for fixed income'). Leave empty string if the "
-                "document does not naturally suggest one.\n"
                 "\n"
                 "RULES:\n"
                 "1. Use ONLY information that appears in the document text "
@@ -2114,25 +2202,18 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
                 "2. Do not invent numbers, price targets, ratings, analyst "
                 "names, or forecasts not in the text.\n"
                 "3. Do not mix up central banks (Fed is not ECB).\n"
-                "4. If the document is thin, return fewer items (even 1).\n"
+                "4. If the document is thin, return fewer bullets (even 1).\n"
                 "5. Faithfully paraphrase the document — including its "
                 "ratings/calls/recommendations — but do NOT sensationalise. "
                 "Avoid tabloid framing ('Super Bowl', 'showdown', 'mega "
                 "week', 'all eyes on'). Avoid filler ('amid concerns', "
                 "'investors are watching'). Use sober, concrete writing.\n"
-                "6. Do not editorialise on top of the document. If the "
-                "document recommends something, attribute the recommendation "
-                "(e.g. 'UBS reiterates Buy on X') rather than asserting it as "
+                "6. Attribute the bank's calls ('UBS reiterates Buy on X', "
+                "'BoS upgrades Y') rather than asserting recommendations as "
                 "your own view.\n"
-                "7. The portfolio_implication field is a CONSEQUENCE for a "
-                "reader's portfolio, not a recommendation. Do NOT write "
-                "'buy', 'sell', 'overweight X', 'we recommend' in this "
-                "field unless the bank's own document uses those exact "
-                "words about that exact view.\n"
                 "\n"
                 "OUTPUT: raw JSON only, no markdown. "
-                "Shape: {\"items\": [{\"key_message\": \"...\", "
-                "\"portfolio_implication\": \"...\"}, ...]}"
+                "Shape: {\"bullets\": [\"bullet 1\", \"bullet 2\", ...]}"
             ),
             "bank": bank,
             # 2500 chars ≈ 700 tokens — stays well under Groq's 6k TPM free-tier
@@ -2484,12 +2565,17 @@ def pick_chart_of_day(history, news_df):
                     "* No filler: 'all eyes on', 'investors are watching', "
                     "'amid concerns'. Use concrete subject-verb-object writing.\n"
                     "\n"
-                    "The reason field must be 2-3 sentences explaining: (1) what the chart shows "
-                    "(using the d1_pct and zscore from the input), "
+                    "The reason field must be 2-3 GRAMMATICALLY COMPLETE sentences explaining: "
+                    "(1) what the chart shows (using the d1_pct and zscore from the input), "
                     "(2) why this asset was chosen over others today (link to top_news_keywords if relevant), "
                     "(3) what to watch for — phrased as an open question, not a prediction. "
+                    "EVERY sentence (including the closing question) MUST end with terminal "
+                    "punctuation (period, question mark, or exclamation mark). Do NOT return "
+                    "fragments like 'What this means for emerging markets' with no question "
+                    "mark — the closing thought must be a full sentence ending in '?'. "
                     "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
-                    "\"reason\": \"<2-3 sentence explanation>\", \"timeframe_days\": <30|60|90|180>}"
+                    "\"reason\": \"<2-3 sentence explanation, every sentence terminated>\", "
+                    "\"timeframe_days\": <30|60|90|180>}"
                 ),
                 "top_movers_by_zscore": movers,
                 "top_news_keywords":    [{"keyword": k, "mentions": v} for k, v in top_kws],
@@ -3146,10 +3232,19 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     CHART_W = PW * 0.44
     COTD_W  = PW - NAR_W - CHART_W
 
-    # Build bullet list as a flat table (2 cols: arrow+text | meta)
+    # Build bullet list as a flat table (2 cols: arrow+text | meta).
+    # AI path: writing.news_bullets are already in house style.
+    # Fallback path: AI failed — clean raw headlines via deterministic pass
+    # (strip "Wall Street's Super Bowl Wednesday:" etc., dedupe, cap at 5)
+    # before showing, so we never ship raw media-y text to clients.
     bullets = writing.get("news_bullets") or []
+    _ai_bullets_used = bool(bullets)
     if not bullets and not news_df.empty:
-        bullets = [r.get("headline","") for _,r in news_df.head(8).iterrows()]
+        raw_headlines = [r.get("headline", "") for _, r in news_df.head(15).iterrows()]
+        bullets = _dedupe_headlines(
+            [_clean_headline_for_bullet(h) for h in raw_headlines if h],
+            limit=5,
+        )
 
     bul_rows, bul_cmds = [], [
         ("VALIGN",       (0,0),(-1,-1), "TOP"),
@@ -3184,15 +3279,20 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     nar_title = P("Market Recap", fn="Helvetica-Bold", sz=7.5, col=NAV, lead=9)
     _summ_txt = (writing.get("news_summary","") or writing.get("subheadline","")).strip()
     nar_summ  = P(_xs(_summ_txt[:600]), sz=5.5, col=GRY, lead=7.0) if _summ_txt else None
-    nar_sec   = P("WHAT'S MOVING MARKETS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
+    # Surface AI status: when the cascade failed and we fell back to cleaned
+    # raw headlines, label the section so the reader knows this is edited
+    # headline copy, not curated AI commentary.
+    _nar_sec_text = (
+        "WHAT'S MOVING MARKETS"
+        if _ai_bullets_used
+        else "WHAT'S MOVING MARKETS — edited headlines (AI summary unavailable)"
+    )
+    nar_sec   = P(_nar_sec_text, fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7)
     nar_rule  = HRFlowable(width=(NAR_W-0.6)*cm, thickness=0.5, color=RUL)
 
-    # Chart cell — no box border (avoids misalignment when left column is taller).
-    # Height bumped from 6.5cm to 7.5cm to fit the two stacked subplots (Risk
-    # / Defensive). ReportLab Image stretches to width+height, so the cell
-    # aspect ratio must match the PNG aspect ratio (~940x480).
+    # Chart cell — no box border (avoids misalignment when left column is taller)
     if chart_png:
-        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=7.5*cm)
+        chart_cell = Image(BytesIO(chart_png), width=CHART_W*cm, height=6.5*cm)
     else:
         chart_cell = P("<i>Chart unavailable</i>", sz=6, col=GRY)
 
@@ -3208,7 +3308,18 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     if cotd and isinstance(cotd, dict):
         cotd_label  = cotd.get("label", "Notable Move")
         tf          = int(cotd.get("timeframe_days", 60))
-        reason_text = (cotd.get("reason","") or "")[:350]
+        reason_text = (cotd.get("reason","") or "")[:350].rstrip()
+        # Belt-and-suspenders: ensure terminal punctuation. The prompt asks
+        # for it but models occasionally still return fragments like
+        # "What this means for emerging markets" with no question mark.
+        if reason_text and reason_text[-1] not in ".?!":
+            # Heuristic: if the closing clause looks like an open question
+            # (starts with What/Will/How/Why/etc. — possibly mid-sentence),
+            # close with "?", otherwise close with ".".
+            tail = reason_text.rsplit(".", 1)[-1].lstrip().lower()
+            qstart = ("what ", "will ", "how ", "why ", "where ",
+                      "whether ", "can ", "should ", "is ", "are ", "does ", "do ")
+            reason_text += "?" if tail.startswith(qstart) else "."
         cotd_flows += [
             P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
             Spacer(1, 0.04*cm),
@@ -3453,13 +3564,21 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ]
 
         if _has_items:
-            # Build a flat list of rows: [Source, Key Message, Portfolio Implication].
-            # Source cell is shown only on the FIRST row of each bank to avoid visual repetition.
-            rh_cw = [PW*0.16*cm, PW*0.50*cm, PW*0.34*cm]
+            # 2-column table — Source | Key Message.
+            # The Portfolio Implication column was dropped 2026-04-27: with no
+            # client-portfolio context the AI was reusing a small set of stock
+            # phrases ("supports defensive sector tilt", "points to continued
+            # duration risk") across unrelated points, eroding credibility.
+            # Bank research is already opinionated; the Key Message carries
+            # the bank's own view. The brief reports; it does not advise.
+            #
+            # The bank source label is repeated on EVERY row (not just the
+            # first row of a bank's group) so that page breaks don't leave
+            # rows orphaned without an attribution.
+            rh_cw = [PW*0.18*cm, PW*0.82*cm]
             rh_rows = [[
-                P("Source",                fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
-                P("Key Message",           fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
-                P("Portfolio Implication", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+                P("Source",      fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+                P("Key Message", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
             ]]
             rh_cmds = [
                 ("BACKGROUND",   (0,0),(-1,0),  NAV),
@@ -3472,46 +3591,29 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                 ("BOTTOMPADDING",(0,0),(-1,-1), 2.5),
                 ("BOX",          (0,0),(-1,-1), 0.3, RUL),
             ]
-            ri = 1  # data row index (row 0 is header)
+            ri = 1
             for entry in _banks_list[:6]:
                 bank = str(entry.get("bank") or "")
                 items = entry.get("items") or []
                 if not bank or not items:
-                    # If a bank has only legacy bullets, synthesise items so
-                    # they still appear in the table.
                     bullets = entry.get("bullets") or []
                     if bank and bullets:
-                        items = [{"key_message": b, "portfolio_implication": ""}
-                                 for b in bullets[:4] if isinstance(b, str)]
+                        items = [{"key_message": b} for b in bullets[:4] if isinstance(b, str)]
                     else:
                         continue
                 bcol = _colour_for(bank)
-                first_row_for_bank = ri
-                for idx, it in enumerate(items[:4]):
+                for it in items[:4]:
                     km = (it.get("key_message") or "").strip()
-                    pi = (it.get("portfolio_implication") or "").strip()
                     if not km:
                         continue
-                    src_cell = (
-                        P(f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
-                          sz=5.4, col=NAV, lead=6.6)
-                        if idx == 0 else P("", sz=5.0)
-                    )
                     rh_rows.append([
-                        src_cell,
+                        P(f'<font color="{bcol.hexval()}"><b>{_xs(bank).upper()}</b></font>',
+                          sz=5.4, col=NAV, lead=6.6),
                         P(_xs(km), sz=4.9, col=TXT, lead=6.3),
-                        P(_xs(pi) if pi else "<i>—</i>",
-                          sz=4.9, col=(TXT if pi else GRY), lead=6.3),
                     ])
                     bg = WHT if (ri % 2 == 1) else STR
                     rh_cmds.append(("BACKGROUND", (0,ri),(-1,ri), bg))
-                    # Suppress the inter-row line within a bank's group, draw a heavier rule between banks.
-                    if idx > 0:
-                        rh_cmds.append(("LINEABOVE", (0,ri),(-1,ri), 0.0, WHT))
                     ri += 1
-                # After last row of this bank, draw a thin separator below.
-                if ri > first_row_for_bank:
-                    rh_cmds.append(("LINEBELOW", (0,ri-1),(-1,ri-1), 0.4, RUL))
 
             if len(rh_rows) > 1:
                 rh_tbl = Table(rh_rows, colWidths=rh_cw, repeatRows=1)
@@ -3964,10 +4066,6 @@ def add_render_outputs(base_state, chart_window="YTD"):
 
         pdf_df = pdf_chart_subset(weekly_df)
         if not pdf_df.empty:
-            # Reviewer's nice-to-have #2: split the central chart into two
-            # stacked panels — Risk Assets on top, Defensive/Macro below.
-            # The single-panel version had too many overlapping lines for a
-            # client newsletter. Same total footprint, fewer lines per panel.
             pdf_df = pdf_df.copy()
             pdf_short_labels = {
                 "msci_world": "World",
@@ -3979,65 +4077,31 @@ def add_render_outputs(base_state, chart_window="YTD"):
                 "global_bonds": "Global Bonds",
             }
             pdf_df["short_label"] = pdf_df["key"].map(pdf_short_labels).fillna(pdf_df["label"])
-
-            # Group keys into panels. "Risk" = directional equity exposure;
-            # "Defensive/Macro" = bonds, gold, oil, rates.
-            risk_keys      = {"msci_world", "sp500", "stoxx600"}
-            defensive_keys = {"global_bonds", "us10y", "gold", "wti"}
-            risk_df      = pdf_df[pdf_df["key"].isin(risk_keys)].copy()
-            defensive_df = pdf_df[pdf_df["key"].isin(defensive_keys)].copy()
-
-            # Stable colour map so the same series always gets the same colour.
-            colour_for_key = {
-                "msci_world":   "#103B73",
-                "sp500":        "#1E88E5",
-                "stoxx600":     "#38A3FF",
-                "global_bonds": "#26A69A",
-                "us10y":        "#7E57C2",
-                "gold":         "#EF6C00",
-                "wti":          "#6D4C41",
-            }
-
-            from plotly.subplots import make_subplots
-            pdf_fig = make_subplots(
-                rows=2, cols=1, shared_xaxes=True,
-                vertical_spacing=0.10,
-                subplot_titles=("Risk Assets — YTD (%)", "Defensive & Macro — YTD (%)"),
+            pdf_fig = px.line(
+                pdf_df,
+                x="date",
+                y="return_pct",
+                color="short_label",
+                title="Core Cross-Asset YTD Performance (Start of Year = 0%)",
+                color_discrete_sequence=["#103B73", "#1E88E5", "#38A3FF", "#26A69A", "#EF6C00", "#7E57C2", "#6D4C41"],
             )
-            for sub_df, row in ((risk_df, 1), (defensive_df, 2)):
-                if sub_df.empty:
-                    continue
-                for key, g in sub_df.groupby("key"):
-                    g = g.sort_values("date")
-                    pdf_fig.add_trace(
-                        go.Scatter(
-                            x=g["date"], y=g["return_pct"], mode="lines",
-                            name=g["short_label"].iloc[0],
-                            line=dict(width=1.6, color=colour_for_key.get(key, "#444")),
-                            hovertemplate="<b>%{fullData.name}</b><br>%{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>",
-                            legendgroup=("risk" if row == 1 else "defensive"),
-                            showlegend=True,
-                        ),
-                        row=row, col=1,
-                    )
-                pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C", row=row, col=1)
-
+            pdf_fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>")
             pdf_fig.update_layout(
-                height=420,
+                xaxis_title="",
+                yaxis_title="",
+                height=360,
+                legend_title="",
                 hovermode="closest",
                 plot_bgcolor="white",
                 paper_bgcolor="white",
-                margin=dict(l=20, r=15, t=35, b=15),
-                legend=dict(orientation="h", yanchor="bottom", y=-0.18,
-                            xanchor="center", x=0.5, font=dict(size=9)),
+                margin=dict(l=20, r=15, t=30, b=20),
             )
             pdf_fig.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
             pdf_fig.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
-            # Subplot title font size — make a touch smaller for the cramped PDF cell.
-            for ann in pdf_fig.layout.annotations:
-                ann.font = dict(size=10, color="#103B73")
-
-            pdf_chart_png = _fig_to_png(pdf_fig, width=940, height=480)
+            add_event_marker(pdf_fig, IRAN_WAR_START_DATE, "Iran conflict start<br>28 Feb 2026", "#C62828", 0.12, 10)
+            add_event_marker(pdf_fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 10)
+            pdf_fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
+            pdf_chart_png = _fig_to_png(pdf_fig, width=940, height=400)
 
     # Chart of the Day — compute before build_pdf so it can appear in PDF
     cotd = pick_chart_of_day(history, base_state.get("news_df"))

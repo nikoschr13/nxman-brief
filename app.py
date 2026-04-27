@@ -393,12 +393,38 @@ def fetch_yf_series(ticker):
 
 @st.cache_data(ttl=900)
 def fetch_yf_series_with_fallback(tickers: list, label: str):
-    """Try each ticker in order; return (series, ticker_used) or raise."""
+    """Try each ticker in order; return (series, ticker_used) or raise.
+
+    Quality checks per ticker:
+    1. len >= 20 — minimum history.
+    2. NOT FROZEN — yfinance sometimes returns a 1Y series where the last
+       10 closes are identical to ~6 decimals. That produces 1D / 7d / YTD
+       all reading 0.00% in the brief, which we then label "EUR Bonds —"
+       and the reviewer flags as broken. Reject series where the last 10
+       values have fewer than 3 distinct numbers; fall through to the next
+       ticker. Real bond ETFs always show some daily noise.
+    3. NOT FLAT-LINED START-OF-YEAR — if year_start value equals latest
+       (within rounding), YTD will look like 0.00% which is also probably
+       wrong. Skip these.
+    """
+    import math
+
+    def _is_frozen(s) -> bool:
+        tail = s.tail(10)
+        try:
+            unique_count = tail.round(6).nunique()
+            return unique_count < 3
+        except Exception:
+            return False
+
     for t in tickers:
         try:
             s = fetch_yf_series(t)
-            if len(s) >= 20:
-                return s, t
+            if len(s) < 20:
+                continue
+            if _is_frozen(s):
+                continue
+            return s, t
         except Exception:
             continue
     raise ValueError(f"All tickers failed for {label}: {tickers}")
@@ -2896,10 +2922,18 @@ def build_bundle():
             )
 
     # Each bond proxy now has a ticker cascade so we don't render an N/A row
-    # when a single ticker is unavailable on yfinance. Specifically EUR Bonds
-    # — IEAG (US-listed) sometimes has thin or short history; IEAC.L (LSE)
-    # and AGGH.MI (Borsa Italiana) cover the same exposure with longer
-    # series typically available.
+    # when a single ticker is unavailable on yfinance. The cascade also has
+    # a stuck-data filter (see fetch_yf_series_with_fallback) — if a feed
+    # returns a frozen series, we automatically try the next ticker.
+    #
+    # EUR Bonds note (2026-04-27): IEAG was first in the cascade and was
+    # returning a frozen series (1D / 7d both 0.00%), which the reviewer
+    # flagged. Reordered to put US-listed liquid international-bond ETFs
+    # (BNDX, IBND) first — these always populate cleanly on yfinance.
+    # BNDX is USD-hedged international developed-market bonds (EUR + JPY +
+    # GBP heavy); IBND is Bloomberg International Corporate Bond, EUR-heavy.
+    # Not pure EUR-only exposures, but reliable proxies — better a fresh
+    # slightly-broader proxy than a stuck pure-EUR series.
     bond_proxies = [
         ("global_bonds", "Global Bonds",
          ["BNDW", "AGGG.L", "VAGF.L"],
@@ -2908,13 +2942,17 @@ def build_bundle():
          ["BND", "AGG", "IUSB"],
          "US aggregate bond ETF proxy"),
         ("eur_bonds",    "EUR Bonds",
-         ["IEAG", "IEAC.L", "AGGH.MI", "EUNH.DE"],
-         "EUR investment-grade bond ETF proxy"),
+         ["BNDX", "IBND", "IEAC.L", "IEAG", "AGGH.MI", "EUNH.DE"],
+         "International / EUR-heavy investment-grade bond ETF proxy"),
     ]
 
+    # Track which ticker each bond proxy actually used, so the sidebar
+    # diagnostic can show whether the cascade fell through to a backup.
+    _bond_ticker_used: dict[str, str] = {}
     for key, label, tickers, desc in bond_proxies:
         try:
-            s, _ = fetch_yf_series_with_fallback(tickers, label)
+            s, ticker_used = fetch_yf_series_with_fallback(tickers, label)
+            _bond_ticker_used[key] = ticker_used
             history_frames.append(
                 pd.DataFrame(
                     {
@@ -2929,7 +2967,14 @@ def build_bundle():
             )
             metas.append(("bonds", key, label, desc))
         except Exception:
+            _bond_ticker_used[key] = "FAILED"
             metas.append(("bonds", key, label, desc))
+    # Surface to session_state so the sidebar can show it.
+    try:
+        import streamlit as _st
+        _st.session_state["_bond_ticker_used"] = _bond_ticker_used
+    except Exception:
+        pass
 
     history = pd.concat(history_frames, ignore_index=True) if history_frames else pd.DataFrame(columns=["date", "key", "label", "group", "value", "source_type"])
 

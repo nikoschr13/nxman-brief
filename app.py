@@ -1587,6 +1587,239 @@ def _clean_headline_for_bullet(text: str) -> str:
     return s
 
 
+# ── House-style validator (post-AI scrubber) ────────────────────────────────
+# Catches banned phrases the prompt rules occasionally miss. Conservative —
+# only rewrites EXACT patterns we know are wrong; doesn't touch unfamiliar
+# text. Each substitution gets logged for sidebar visibility, so we can see
+# what's slipping past the prompt and tune accordingly.
+#
+# Pairs are (compiled_regex, replacement_string).
+_HOUSE_STYLE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # ── Technical jargon — replace with plain-English equivalents ────────────
+    (re.compile(r"\bterminal[- ]rate(?:\s+pricing)?(?:\s+higher)?\b", re.IGNORECASE),
+     "less room for central banks to cut rates"),
+    (re.compile(r"\bbreakeven inflation\b", re.IGNORECASE),
+     "market-implied inflation"),
+    (re.compile(r"\bbreakevens?\s+widened\b", re.IGNORECASE),
+     "market-implied inflation rose"),
+    (re.compile(r"\bforward\s+OIS\s+curve\b", re.IGNORECASE),
+     "market-implied rate path"),
+    (re.compile(r"\bOIS[- ]implied\b", re.IGNORECASE),
+     "market-implied"),
+    (re.compile(r"\bbelly\s+of\s+the\s+curve\b", re.IGNORECASE),
+     "medium-dated bonds"),
+    (re.compile(r"\brisk[- ]off\b", re.IGNORECASE),
+     "cautious"),
+    (re.compile(r"\brisk[- ]on\b", re.IGNORECASE),
+     "improved risk appetite"),
+    (re.compile(r"\bduration risk\b", re.IGNORECASE),
+     "interest-rate sensitivity"),
+    (re.compile(r"\bcarry decomposition\b", re.IGNORECASE),
+     "return analysis"),
+    (re.compile(r"\bhigh[- ]beta\b", re.IGNORECASE),
+     "market-sensitive"),
+
+    # ── Statistical / meta language (mostly Chart of the Day) ───────────────
+    # "1.6× the usual daily variation" → "well above its normal daily range"
+    (re.compile(
+        r"\b\d+(?:\.\d+)?\s*[xX×]\s*(?:the\s+)?"
+        r"(?:usual|normal|typical|average)\s+(?:daily\s+)?"
+        r"(?:variation|volatility|range|move|movement)\b",
+        re.IGNORECASE,
+    ), "well above its normal daily range"),
+    # "z-score of 1.58" or just "z-score" alone
+    (re.compile(r"\bwith\s+a\s+z[- ]score\s+of\s+[\d.]+\b", re.IGNORECASE),
+     "in an unusually large move"),
+    (re.compile(r"\bz[- ]score\b", re.IGNORECASE),
+     "an unusually large move"),
+    # "a 2.5 sigma move" → "an unusually large move" (consume the leading
+    # article and the trailing "move" so article agreement and word
+    # repetition are both clean).
+    (re.compile(r"\b(?:a|an)\s+\d+(?:\.\d+)?\s*sigma\s+move\b", re.IGNORECASE),
+     "an unusually large move"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s*sigma\s+move\b", re.IGNORECASE),
+     "an unusually large move"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s*sigma\b", re.IGNORECASE),
+     "an unusually large move"),
+    (re.compile(r"\bstatistical\s+deviation\b", re.IGNORECASE),
+     "unusual move"),
+    (re.compile(r"\bstandard\s+deviations?\b", re.IGNORECASE),
+     "normal daily range"),
+    (re.compile(r"\btop[- ]news[- ]keywords?\b", re.IGNORECASE),
+     "headline themes"),
+    (re.compile(r"\btop_news_keywords?\b"),
+     "headline themes"),
+    (re.compile(r"\btop[_ ]movers(?:[_ ]by[_ ]zscore)?\b", re.IGNORECASE),
+     "biggest movers"),
+    (re.compile(r"\bd1_pct\b"), "daily move"),
+
+    # ── Filler phrasings ─────────────────────────────────────────────────────
+    (re.compile(r"\bas\s+investors\s+(?:assess|monitor|watch|wait|await)\b", re.IGNORECASE),
+     "as the market focuses on"),
+    (re.compile(r"\binvestors\s+are\s+watching\b", re.IGNORECASE),
+     "the market is focused on"),
+    # "amid concerns" → "with concerns about" — but if "about" already
+    # follows, just remove "amid " and let the existing "about" do the work,
+    # otherwise we get "with concerns about about ...".
+    (re.compile(r"\bamid\s+concerns\s+about\b", re.IGNORECASE),
+     "with concerns about"),
+    (re.compile(r"\bamid\s+concerns\b", re.IGNORECASE),
+     "with concerns about"),
+    (re.compile(r"\bamid\s+uncertainty\b", re.IGNORECASE),
+     "with uncertainty"),
+    (re.compile(r"\ball[- ]eyes[- ]on\b", re.IGNORECASE),
+     "focus on"),
+    (re.compile(r"\bWall\s+Street's\s+Super\s+Bowl(?:\s+Wednesday)?\b", re.IGNORECASE),
+     "concentrated US tech earnings session"),
+    (re.compile(r"\bSuper\s+Bowl\s+Wednesday\b", re.IGNORECASE),
+     "concentrated earnings session"),
+    (re.compile(r"\bmake[- ]or[- ]break\b", re.IGNORECASE),
+     "key"),
+    (re.compile(r"\bmega\s+week\b", re.IGNORECASE),
+     "key week"),
+    # Generic "may impact X" filler the reviewer flagged repeatedly
+    (re.compile(r"\bmay\s+impact\s+inflation\s+and\s+(?:economic\s+)?growth\b", re.IGNORECASE),
+     "could affect inflation and growth"),
+    (re.compile(r"\bmay\s+affect\s+the\s+global\s+economy\b", re.IGNORECASE),
+     "could affect global growth"),
+    (re.compile(r"\bmay\s+influence\s+trade\s+and\s+investment\s+decisions\b", re.IGNORECASE),
+     "could affect cross-border flows"),
+    (re.compile(r"\bhas\s+implications\s+for\s+markets\b", re.IGNORECASE),
+     "matters for cross-asset positioning"),
+
+    # ── Vague attributions (CotD reviewer flagged these) ─────────────────────
+    (re.compile(r"\bdriven\s+by\s+(?:an\s+)?improving\s+economic\s+outlook\b", re.IGNORECASE),
+     "supported by today's news flow"),
+    (re.compile(r"\bhelped\s+by\s+favou?rable\s+conditions\b", re.IGNORECASE),
+     "supported by today's news flow"),
+    (re.compile(r"\bsupported\s+by\s+positive\s+sentiment\b", re.IGNORECASE),
+     "supported by improved risk appetite"),
+    (re.compile(r"\bon\s+global\s+growth\s+optimism\b", re.IGNORECASE),
+     "on improved growth expectations"),
+    (re.compile(r"\bamid\s+a\s+constructive\s+backdrop\b", re.IGNORECASE),
+     "in a constructive market environment"),
+
+    # ── Geopolitical absolutism ──────────────────────────────────────────────
+    (re.compile(
+        r"\b(?:US[- ]Iran\s+)?peace\s+talks\s+"
+        r"(?:were|are|have\s+been)?\s*"
+        r"(?:reportedly\s+)?"
+        r"(?:canceled|cancelled|called\s+off)\b",
+        re.IGNORECASE,
+    ), "hopes for near-term US-Iran de-escalation weakened"),
+    (re.compile(r"\b(?:the\s+)?war\s+(?:has\s+)?ended\b", re.IGNORECASE),
+     "tensions reportedly eased"),
+    (re.compile(r"\bceasefire\s+(?:was\s+|has\s+been\s+)?agreed\b", re.IGNORECASE),
+     "reports of de-escalation"),
+    (re.compile(r"\bsanctions\s+(?:were\s+|have\s+been\s+)?lifted\b", re.IGNORECASE),
+     "reports of sanctions review"),
+
+    # ── Powell "last meeting" claim (unverified) ─────────────────────────────
+    (re.compile(r"\bPowell's\s+last\s+(?:Fed\s+)?meeting\b", re.IGNORECASE),
+     "Powell's upcoming Fed meeting"),
+
+    # ── Advice phrasings ─────────────────────────────────────────────────────
+    (re.compile(r"\binvestors\s+should\b", re.IGNORECASE),
+     "the data suggests"),
+    (re.compile(r"\bwe\s+recommend\b", re.IGNORECASE),
+     "research suggests"),
+    (re.compile(r"\bthis\s+is\s+an?\s+opportunity\s+to\b", re.IGNORECASE),
+     "the data points to"),
+    (re.compile(r"\btime\s+to\s+(?:buy|sell|consider)\b", re.IGNORECASE),
+     "worth monitoring"),
+]
+
+
+def _scrub_ai_text(text: str) -> tuple[str, list[str]]:
+    """Apply the banned-phrase regex pass to a piece of AI-generated text.
+    Returns (cleaned_text, list_of_human_readable_replacement_notes).
+
+    This is a safety net for the prompt rules — when the model occasionally
+    produces a banned phrase despite the instructions, the validator
+    rewrites it before render. Conservative: only touches exact patterns
+    we know are wrong. Anything not in the pattern table passes through
+    unchanged. Result is post-processed to collapse any double-spaces and
+    fix space-before-punctuation that substitutions can leave behind.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return (text or ""), []
+    cleaned = text
+    fixes: list[str] = []
+    for pat, repl in _HOUSE_STYLE_PATTERNS:
+        new_cleaned, n = pat.subn(repl, cleaned)
+        if n:
+            # Show the first match so we can see what got rewritten.
+            sample = pat.search(cleaned)
+            sample_str = sample.group(0) if sample else pat.pattern
+            fixes.append(f"{sample_str!r} → {repl!r} ({n}x)")
+            cleaned = new_cleaned
+    # Whitespace / punctuation cleanup after substitutions.
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned, fixes
+
+
+def _scrub_writing_dict(out: dict) -> list[str]:
+    """Scrub the AI-returned `writing` dict in-place. Returns a flat log of
+    every substitution made across all string fields, for surfacing in
+    diagnostics. Mutates `out` so callers see the cleaned strings."""
+    log: list[str] = []
+    if not isinstance(out, dict):
+        return log
+    # Top-level string fields.
+    for fld in ("headline", "subheadline", "news_summary"):
+        v = out.get(fld)
+        if isinstance(v, str):
+            cleaned, fixes = _scrub_ai_text(v)
+            if cleaned != v:
+                out[fld] = cleaned
+                log.extend(f"{fld}: {fx}" for fx in fixes)
+    # news_bullets (list of strings).
+    nb = out.get("news_bullets")
+    if isinstance(nb, list):
+        new_list = []
+        for i, b in enumerate(nb):
+            if isinstance(b, str):
+                cleaned, fixes = _scrub_ai_text(b)
+                new_list.append(cleaned)
+                log.extend(f"news_bullets[{i}]: {fx}" for fx in fixes)
+            else:
+                new_list.append(b)
+        out["news_bullets"] = new_list
+    # portfolio_implications (list of strings).
+    pi = out.get("portfolio_implications")
+    if isinstance(pi, list):
+        new_list = []
+        for i, b in enumerate(pi):
+            if isinstance(b, str):
+                cleaned, fixes = _scrub_ai_text(b)
+                new_list.append(cleaned)
+                log.extend(f"portfolio_implications[{i}]: {fx}" for fx in fixes)
+            else:
+                new_list.append(b)
+        out["portfolio_implications"] = new_list
+    # executive_summary {lead, bullets}.
+    es = out.get("executive_summary")
+    if isinstance(es, dict):
+        if isinstance(es.get("lead"), str):
+            cleaned, fixes = _scrub_ai_text(es["lead"])
+            if cleaned != es["lead"]:
+                es["lead"] = cleaned
+                log.extend(f"executive_summary.lead: {fx}" for fx in fixes)
+        if isinstance(es.get("bullets"), list):
+            new_b = []
+            for i, b in enumerate(es["bullets"]):
+                if isinstance(b, str):
+                    cleaned, fixes = _scrub_ai_text(b)
+                    new_b.append(cleaned)
+                    log.extend(f"executive_summary.bullets[{i}]: {fx}" for fx in fixes)
+                else:
+                    new_b.append(b)
+            es["bullets"] = new_b
+    return log
+
+
 def _dedupe_headlines(headlines: list[str], limit: int = 5) -> list[str]:
     """Drop near-duplicate headlines (same first 6 significant words). The raw
     news feed often carries the same story from multiple sources with slightly
@@ -2014,7 +2247,24 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "driver.' Avoid: 'with Nasdaq up 1.95% as investors monitor "
                 "US-Iran negotiations.'\n"
                 "\n"
-                "news_bullets: 4 to 5 plain-English bullets. Each bullet must "
+                "news_bullets: 4 to 5 plain-English bullets.\n"
+                "\n"
+                "BULLET TOPIC SELECTION — bias toward macro / cross-asset, "
+                "NOT individual stocks. The brief is a market briefing, not "
+                "a stock-pick newsletter. Prefer headlines about: central "
+                "banks, payrolls / CPI / PMI / GDP releases, oil and "
+                "commodities, currencies, geopolitics affecting markets, "
+                "credit spreads, broad sector themes (e.g. 'mega-cap "
+                "technology earnings season'). Single-stock items (e.g. "
+                "'Verizon Q1 results', 'Booking Holdings price target cut') "
+                "should NOT take a bullet slot UNLESS the move is "
+                "index-moving (a Mag-7 mega-cap earnings print, a >$50bn "
+                "M&A deal, a sector-defining product launch). When in doubt, "
+                "drop the single-stock item and use the slot for a macro "
+                "point. If only single-stock headlines are available, drop "
+                "to 3 bullets rather than padding.\n"
+                "\n"
+                "Each bullet must "
                 "(1) name the driver (from a supplied headline), "
                 "(2) state the market impact using ACTUAL numbers from market_snapshot "
                 "where relevant (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
@@ -2088,6 +2338,17 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "Good: 'as technology strength supports equities while elevated "
                 "oil prices keep inflation risk in focus'.\n"
                 "\n"
+                "INTRA-CLASS DIVERGENCE — handle oil benchmarks specially. "
+                "When WTI Crude and Brent Crude move in opposite directions "
+                "in the day's market_snapshot (one positive, one negative), "
+                "or when their 1D values differ by more than ~3 percentage "
+                "points, do NOT describe oil as moving in one direction. "
+                "Instead use level-based framing tied to the LEVEL, not the "
+                "1D move: 'oil remains elevated despite mixed daily moves "
+                "in crude benchmarks' or 'crude benchmarks were mixed "
+                "intraday but levels stayed elevated'. The same applies to "
+                "Gold vs Silver if they diverge sharply.\n"
+                "\n"
                 "Avoid bland openings like 'Markets are mixed today' — be "
                 "specific about WHY. Example of GOOD lead: 'Global markets "
                 "start the week with a mixed but resilient tone, as technology "
@@ -2136,6 +2397,17 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
         return {**fallback, "news_bullets": [], "article_angles": []}, {"gemini_used": False, "reason": f"Payload build error: {e}"}
 
     out, reason = ai_generate_json(payload)
+    # House-style validator: scrub banned phrases before they reach render.
+    # Mutates `out` in place. Log is stashed in session_state for sidebar
+    # diagnostics so we can see what's slipping past the prompt rules.
+    if isinstance(out, dict):
+        scrub_log = _scrub_writing_dict(out)
+        if scrub_log:
+            try:
+                import streamlit as _st
+                _st.session_state["_house_style_scrub_log"] = scrub_log
+            except Exception:
+                pass
     if isinstance(out, dict) and isinstance(out.get("news_bullets"), list) and len(out["news_bullets"]) >= 3:
         # Normalise executive_summary into {lead: str, bullets: list[str]} —
         # tolerate the model returning a flat list, a single string, or
@@ -2584,17 +2856,16 @@ def build_bundle():
     # the displayed header is updated to "7d" in _dtbl().
     seven_days_ago = today - pd.Timedelta(days=7)
 
-    # Stale-data guard: find the latest date that any series has refreshed to,
-    # then flag rows whose last data point is more than 1 calendar day older
-    # than that. This catches cases like Brent vs WTI where one feed lags
-    # the other by a session — comparing today's level to a stale base
-    # produces a misleading 1D% (the reviewer flagged WTI +2% vs Brent -3.7%
-    # divergence). Stale rows get d1 suppressed so the column reads "—"
-    # rather than a misleading number.
-    if not history.empty:
-        global_latest = pd.to_datetime(history["date"]).max().normalize()
-    else:
-        global_latest = today
+    # NOTE: an earlier version of this loop suppressed d1 when a series'
+    # last data point looked stale (>1 calendar day older than the global
+    # latest). That was over-aggressive — Friday-close US index data on a
+    # Monday morning Europe-time run was getting flagged as stale even
+    # though it's the correct "1D" reference for an EU reader at that hour.
+    # Reverted 2026-04-27. The trade-off is that occasional WTI/Brent
+    # feed-lag divergence will leak through, but blanking core indices'
+    # 1D column is a much worse credibility hit than the rare divergence.
+    # The narrative-side prompt now handles oil divergence by describing
+    # "mixed daily benchmark moves" rather than pretending they agree.
 
     for group, key, label, desc in metas:
         g = history[history["key"] == key].sort_values("date")
@@ -2617,12 +2888,6 @@ def build_bundle():
         series = pd.Series(g["value"].values, index=pd.to_datetime(g["date"]))
         latest = float(series.iloc[-1])
         prev = float(series.iloc[-2]) if len(series) >= 2 else None
-        # Suppress 1D% if this series' latest data point is more than 1
-        # calendar day older than the global latest — it means the feed
-        # didn't refresh today, so the 1D move is stale.
-        last_ts = pd.to_datetime(series.index[-1]).normalize()
-        is_stale = (global_latest - last_ts).days > 1
-        d1_val = None if is_stale else pct_change(latest, prev)
         snapshot_rows.append(
             {
                 "group": group,
@@ -2630,7 +2895,7 @@ def build_bundle():
                 "label": label,
                 "description": desc,
                 "level": latest,
-                "d1": d1_val,
+                "d1": pct_change(latest, prev),
                 "wtd": pct_change(latest, value_on_or_before(series, seven_days_ago)),
                 "mtd": pct_change(latest, value_on_or_before(series, month_start)),
                 "ytd": pct_change(latest, value_on_or_before(series, year_start)),
@@ -2779,9 +3044,14 @@ def pick_chart_of_day(history, news_df):
                     "Forbidden phrasings (these read as raw machine output):\n"
                     "* 'potentially related to the X top news keyword'\n"
                     "* 'top_news_keywords suggest…'\n"
-                    "* 'with a z-score of N.NN' (use 'a notable move' or "
-                    "'an unusually large move' instead)\n"
+                    "* 'with a z-score of N.NN'\n"
+                    "* 'N.N× the usual daily variation' / 'N.N× normal "
+                    "volatility' (any 'N.N×' or 'N.NN sigma' framing — "
+                    "private-bank clients do not parse this. Replace with "
+                    "'well above its normal daily range' or 'an unusually "
+                    "large move for the index' or 'a meaningful move '\n"
                     "* 'd1_pct of X.XX' (use the value naturally: '+2.23%')\n"
+                    "* 'standard deviation' / 'statistical deviation'\n"
                     "* 'top movers by zscore'\n"
                     "* any reference to the input field names\n"
                     "\n"
@@ -2818,6 +3088,24 @@ def pick_chart_of_day(history, news_df):
             })
             out, _ = ai_generate_json(payload)
             if isinstance(out, dict) and out.get("key") and out.get("reason"):
+                # Scrub banned phrases in the reason text (z-score / "1.6×
+                # the usual daily variation" / vague attributions / etc.)
+                # before returning. The reason field is the only string
+                # output that ships to clients from this function.
+                reason_str = out.get("reason") or ""
+                if isinstance(reason_str, str):
+                    cleaned, fixes = _scrub_ai_text(reason_str)
+                    if cleaned != reason_str:
+                        out["reason"] = cleaned
+                        try:
+                            import streamlit as _st
+                            existing = _st.session_state.get(
+                                "_house_style_scrub_log", []
+                            )
+                            existing.extend(f"cotd.reason: {fx}" for fx in fixes)
+                            _st.session_state["_house_style_scrub_log"] = existing
+                        except Exception:
+                            pass
                 # Only accept keys that actually exist in history — ignore invented tickers
                 valid_keys = set(history["key"].unique())
                 ai_key = out.get("key", "")

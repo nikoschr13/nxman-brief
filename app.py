@@ -1927,6 +1927,14 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "'farewell', 'first since YYYY', 'highest in N years', "
                 "'biggest move ever', 'record close'. If the headline doesn't "
                 "say it, do not say it.\n"
+                "* NEVER assert geopolitical events as definite unless a "
+                "supplied headline confirms them in those exact terms. "
+                "Forbidden absent verbatim source: 'peace talks were "
+                "canceled', 'war ended', 'ceasefire agreed', 'sanctions "
+                "lifted', 'X attacked Y'. Use HEDGED framing tied to the "
+                "headlines: 'hopes for de-escalation faded', 'talks "
+                "reportedly stalled', 'reports of …'. If you can't see the "
+                "claim in the input, do not make it.\n"
                 "\n"
                 "HOUSE STYLE — this is a private-bank client newsletter, "
                 "not a media wire. Apply rigorously:\n"
@@ -1953,23 +1961,63 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "driver.' Avoid: 'with Nasdaq up 1.95% as investors monitor "
                 "US-Iran negotiations.'\n"
                 "\n"
-                "news_bullets: 4 to 5 plain-English bullets. Each bullet should "
+                "news_bullets: 4 to 5 plain-English bullets. Each bullet must "
                 "(1) name the driver (from a supplied headline), "
                 "(2) state the market impact using ACTUAL numbers from market_snapshot "
                 "where relevant (e.g. 'S&P 500 +0.80%, Nasdaq +1.40%'), "
-                "(3) explain the linkage in one short clause. "
+                "(3) state a SPECIFIC causal mechanism — not a generic 'may impact' "
+                "filler. The mechanism must name a real channel "
+                "(rate-cut path, disinflation narrative, equity-risk premium, "
+                "credit spreads, growth forecasts, terminal-rate expectations, "
+                "currency-hedging cost, refinancing wall, earnings revisions). "
                 "Add a parenthetical clarification for any jargon "
                 "(e.g. 'Treasury yields fell (meaning existing bond PRICES ROSE)').\n"
                 "\n"
-                "executive_summary: a top-of-brief synopsis. Shape: "
-                "{\"lead\": \"<1-2 sentence today's-message paragraph>\", "
+                "BANNED FILLER CLAUSES (do not produce these — they teach "
+                "clients nothing):\n"
+                "* 'may impact inflation and economic growth'\n"
+                "* 'may affect the global economy'\n"
+                "* 'may influence trade and investment decisions'\n"
+                "* 'has implications for markets'\n"
+                "* 'macroeconomic factors at play'\n"
+                "* 'global developments'\n"
+                "* 'investors are watching'\n"
+                "Replace these with concrete mechanisms. Example of GOOD style: "
+                "'Higher oil prices complicate the disinflation narrative, "
+                "narrowing the path for ECB easing and pushing the euro-area "
+                "terminal-rate pricing higher.' Example of BAD style: 'Higher "
+                "oil prices may impact inflation and growth.'\n"
+                "\n"
+                "executive_summary: the top-of-brief investment synopsis. "
+                "Shape: {\"lead\": \"<2 sentence today's-message paragraph>\", "
                 "\"bullets\": [\"<bullet 1>\", \"<bullet 2>\", \"<bullet 3>\"]}. "
-                "The lead is a single calm paragraph (max ~40 words) describing "
-                "the prevailing market tone and the dominant driver. The 3 bullets "
-                "are: (1) the key equity-market driver, (2) the main risk to watch, "
-                "(3) the key data/event on the calendar. Each bullet ≤ 18 words. "
-                "Same grounding rules apply: only use facts from headlines / "
-                "market_snapshot / research_context. No advice phrasing."
+                "\n"
+                "The lead is TWO sentences (35-55 words total) written in "
+                "investment-professional voice. Sentence 1 names the prevailing "
+                "market tone with a colour adjective ('mixed but resilient', "
+                "'cautious risk-on', 'defensively positioned') and the single "
+                "dominant driver. Sentence 2 names the next-watch items "
+                "(earnings / central banks / macro data / specific events). "
+                "Avoid bland openings like 'Markets are mixed today' — be "
+                "specific about WHY they're mixed. Example of tone: 'Global "
+                "markets start the week with a constructive tone, supported "
+                "by US technology strength while elevated oil prices keep "
+                "inflation risk live. Attention turns to mega-cap earnings, "
+                "central-bank communication, and the US payrolls print.'\n"
+                "\n"
+                "The 3 bullets are: (1) the dominant equity-market driver, "
+                "(2) the principal cross-asset risk to monitor, (3) the key "
+                "data/event on the calendar. Each bullet ≤ 22 words, ends "
+                "with a period, and contains a specific noun (sector, asset, "
+                "data print, central bank) — never abstract phrasing like "
+                "'macroeconomic factors' or 'global developments'. "
+                "\n"
+                "Same grounding rules as the rest of the brief: only use "
+                "facts from headlines / market_snapshot / research_context. "
+                "No advice phrasing ('investors should…'). No definitive "
+                "geopolitical claims ('peace talks were canceled') unless a "
+                "headline says so verbatim — use hedged framing ('hopes for "
+                "de-escalation faded', 'talks reportedly stalled')."
                 + research_note +
                 " Be factual and concise. No preamble, no filler."
             ),
@@ -2365,15 +2413,26 @@ def build_bundle():
                 )
             )
 
+    # Each bond proxy now has a ticker cascade so we don't render an N/A row
+    # when a single ticker is unavailable on yfinance. Specifically EUR Bonds
+    # — IEAG (US-listed) sometimes has thin or short history; IEAC.L (LSE)
+    # and AGGH.MI (Borsa Italiana) cover the same exposure with longer
+    # series typically available.
     bond_proxies = [
-        ("global_bonds", "Global Bonds", "BNDW", "Global aggregate bond ETF proxy"),
-        ("usd_bonds", "USD Bonds", "BND", "US aggregate bond ETF proxy"),
-        ("eur_bonds", "EUR Bonds", "IEAG", "EUR investment-grade bond ETF proxy"),
+        ("global_bonds", "Global Bonds",
+         ["BNDW", "AGGG.L", "VAGF.L"],
+         "Global aggregate bond ETF proxy"),
+        ("usd_bonds",    "USD Bonds",
+         ["BND", "AGG", "IUSB"],
+         "US aggregate bond ETF proxy"),
+        ("eur_bonds",    "EUR Bonds",
+         ["IEAG", "IEAC.L", "AGGH.MI", "EUNH.DE"],
+         "EUR investment-grade bond ETF proxy"),
     ]
 
-    for key, label, ticker, desc in bond_proxies:
+    for key, label, tickers, desc in bond_proxies:
         try:
-            s = fetch_yf_series(ticker)
+            s, _ = fetch_yf_series_with_fallback(tickers, label)
             history_frames.append(
                 pd.DataFrame(
                     {
@@ -2565,16 +2624,21 @@ def pick_chart_of_day(history, news_df):
                     "* No filler: 'all eyes on', 'investors are watching', "
                     "'amid concerns'. Use concrete subject-verb-object writing.\n"
                     "\n"
-                    "The reason field must be 2-3 GRAMMATICALLY COMPLETE sentences explaining: "
-                    "(1) what the chart shows (using the d1_pct and zscore from the input), "
-                    "(2) why this asset was chosen over others today (link to top_news_keywords if relevant), "
-                    "(3) what to watch for — phrased as an open question, not a prediction. "
-                    "EVERY sentence (including the closing question) MUST end with terminal "
-                    "punctuation (period, question mark, or exclamation mark). Do NOT return "
-                    "fragments like 'What this means for emerging markets' with no question "
-                    "mark — the closing thought must be a full sentence ending in '?'. "
+                    "The reason field must be 2-3 GRAMMATICALLY COMPLETE sentences. "
+                    "Sentence 1: what the chart shows — name the asset and the move "
+                    "using d1_pct from the input, and one concrete contextual driver "
+                    "if a top_news_keyword is naturally related (don't force the link). "
+                    "Sentence 2: a concrete what-to-watch — name the SPECIFIC factors "
+                    "that will determine whether the move sustains (e.g. 'oil prices, "
+                    "China-related news flow, and the direction of the US dollar'). "
+                    "EVERY sentence ends with a period. Do NOT close with an open "
+                    "question — produce a confident analytical conclusion, not "
+                    "speculation. Bad close: 'What will be the impact of global "
+                    "events?'. Good close: 'The sustainability of the move depends "
+                    "on oil prices, China-related news flow, and the direction of "
+                    "the US dollar.' "
                     "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
-                    "\"reason\": \"<2-3 sentence explanation, every sentence terminated>\", "
+                    "\"reason\": \"<2-3 sentence explanation, all periods, no open questions>\", "
                     "\"timeframe_days\": <30|60|90|180>}"
                 ),
                 "top_movers_by_zscore": movers,
@@ -3124,19 +3188,24 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         s = "" if s is None else str(s)
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    # Reviewer asked to hide "N/A" cells — they erode credibility even when
+    # they're a single missing data point. Use an em-dash placeholder that
+    # reads as "data not applicable / not available" without the harsh "N/A".
+    _NA_CELL = "—"
+
     def _pct(v):
-        if v is None: return "N/A"
+        if v is None: return _NA_CELL
         try:
             f=float(v)
-            return "N/A" if f!=f else f"{f:+.2f}%"
-        except: return "N/A"
+            return _NA_CELL if f!=f else f"{f:+.2f}%"
+        except: return _NA_CELL
 
     def _num(v):
-        if v is None: return "N/A"
+        if v is None: return _NA_CELL
         try:
             f=float(v)
-            return "N/A" if f!=f else f"{f:,.2f}"
-        except: return "N/A"
+            return _NA_CELL if f!=f else f"{f:,.2f}"
+        except: return _NA_CELL
 
     def _pc(v):   # colour for pct value
         try:
@@ -3171,29 +3240,34 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     _es_lead = (_es.get("lead") or "").strip()
     _es_bullets = [b for b in (_es.get("bullets") or []) if isinstance(b, str) and b.strip()][:3]
     if _es_lead or _es_bullets:
+        # Reviewer asked for the exec summary to be more prominent.
+        # Bumped: section title 5.8→6.6, lead 6.2→7.2, bullets 5.8→6.6 bold.
         es_flows = [
-            P("EXECUTIVE SUMMARY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
-            HRFlowable(width=(PW-1.0)*cm, thickness=0.4, color=RUL),
-            Spacer(1, 0.04*cm),
+            P("EXECUTIVE SUMMARY", fn="Helvetica-Bold", sz=6.6, col=BLU, lead=8),
+            HRFlowable(width=(PW-1.0)*cm, thickness=0.5, color=BLU),
+            Spacer(1, 0.05*cm),
         ]
         if _es_lead:
-            es_flows.append(P(_xs(_es_lead), sz=6.2, col=TXT, lead=8))
+            es_flows.append(P(_xs(_es_lead), fn="Helvetica", sz=7.2, col=TXT, lead=9.2))
         if _es_bullets:
             if _es_lead:
-                es_flows.append(Spacer(1, 0.05*cm))
+                es_flows.append(Spacer(1, 0.07*cm))
             for b in _es_bullets:
-                es_flows.append(P(f"\u2022 {_xs(b)}", sz=5.8, col=TXT, lead=7.2))
+                es_flows.append(
+                    P(f"<b>\u25aa</b>&nbsp;&nbsp;{_xs(b)}",
+                      fn="Helvetica-Bold", sz=6.6, col=NAV, lead=8.2)
+                )
         es_tbl = Table([[es_flows]], colWidths=[PW*cm])
         es_tbl.setStyle(TableStyle([
             ("BACKGROUND",   (0,0),(-1,-1), LIT),
-            ("BOX",          (0,0),(-1,-1), 0.5, BLU),
-            ("LEFTPADDING",  (0,0),(-1,-1), 8),
-            ("RIGHTPADDING", (0,0),(-1,-1), 8),
-            ("TOPPADDING",   (0,0),(-1,-1), 6),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 6),
+            ("BOX",          (0,0),(-1,-1), 0.7, BLU),
+            ("LEFTPADDING",  (0,0),(-1,-1), 10),
+            ("RIGHTPADDING", (0,0),(-1,-1), 10),
+            ("TOPPADDING",   (0,0),(-1,-1), 7),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 7),
             ("VALIGN",       (0,0),(-1,-1), "TOP"),
         ]))
-        story += [es_tbl, Spacer(1, 0.12*cm)]
+        story += [es_tbl, Spacer(1, 0.14*cm)]
 
     # ── 2. KPI STRIP — last trading day moves, flat 2-row table ──────────────
     kpis = [
@@ -3309,17 +3383,16 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         cotd_label  = cotd.get("label", "Notable Move")
         tf          = int(cotd.get("timeframe_days", 60))
         reason_text = (cotd.get("reason","") or "")[:350].rstrip()
-        # Belt-and-suspenders: ensure terminal punctuation. The prompt asks
-        # for it but models occasionally still return fragments like
-        # "What this means for emerging markets" with no question mark.
-        if reason_text and reason_text[-1] not in ".?!":
-            # Heuristic: if the closing clause looks like an open question
-            # (starts with What/Will/How/Why/etc. — possibly mid-sentence),
-            # close with "?", otherwise close with ".".
-            tail = reason_text.rsplit(".", 1)[-1].lstrip().lower()
-            qstart = ("what ", "will ", "how ", "why ", "where ",
-                      "whether ", "can ", "should ", "is ", "are ", "does ", "do ")
-            reason_text += "?" if tail.startswith(qstart) else "."
+        # Belt-and-suspenders: ensure the closing sentence is terminated and
+        # is NOT an open question. The reviewer asked for an analytical
+        # conclusion, not a hanging "What does this mean?" — so we coerce
+        # any unterminated tail into a period, and convert any trailing
+        # "?" into "." so the close reads as a confident statement.
+        if reason_text and reason_text[-1] not in ".!":
+            if reason_text[-1] == "?":
+                reason_text = reason_text[:-1] + "."
+            else:
+                reason_text += "."
         cotd_flows += [
             P("CHART OF THE DAY", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
             Spacer(1, 0.04*cm),
@@ -3591,18 +3664,29 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                 ("BOTTOMPADDING",(0,0),(-1,-1), 2.5),
                 ("BOX",          (0,0),(-1,-1), 0.3, RUL),
             ]
+            # Reviewer asked for a curated 5-7 row table, not a dump of every
+            # bullet from every bank. Cap items per bank to 2 (down from 4)
+            # and total table rows to 7. The prompt already orders bullets
+            # by importance, so the first 2 are the strongest views.
+            MAX_ITEMS_PER_BANK = 2
+            MAX_TOTAL_ROWS     = 7
             ri = 1
+            rows_added = 0
             for entry in _banks_list[:6]:
+                if rows_added >= MAX_TOTAL_ROWS:
+                    break
                 bank = str(entry.get("bank") or "")
                 items = entry.get("items") or []
                 if not bank or not items:
                     bullets = entry.get("bullets") or []
                     if bank and bullets:
-                        items = [{"key_message": b} for b in bullets[:4] if isinstance(b, str)]
+                        items = [{"key_message": b} for b in bullets if isinstance(b, str)]
                     else:
                         continue
                 bcol = _colour_for(bank)
-                for it in items[:4]:
+                for it in items[:MAX_ITEMS_PER_BANK]:
+                    if rows_added >= MAX_TOTAL_ROWS:
+                        break
                     km = (it.get("key_message") or "").strip()
                     if not km:
                         continue
@@ -3614,6 +3698,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                     bg = WHT if (ri % 2 == 1) else STR
                     rh_cmds.append(("BACKGROUND", (0,ri),(-1,ri), bg))
                     ri += 1
+                    rows_added += 1
 
             if len(rh_rows) > 1:
                 rh_tbl = Table(rh_rows, colWidths=rh_cw, repeatRows=1)
@@ -3729,6 +3814,8 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     except Exception:
         _ts = datetime.now().strftime("%d %B %Y, %H:%M")
     footer_meta = (
+        "<b>Prepared for professional/informational use. Not intended as "
+        "individualized investment advice.</b> "
         f"<b>Market data as of:</b> {_xs(_ts)}. "
         "<b>Sources:</b> market data providers (Yahoo Finance, FRED), "
         "public news sources, and internal research summaries from "

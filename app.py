@@ -1866,6 +1866,7 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
         ],
         "news_bullets": [],
         "executive_summary": {"lead": "", "bullets": []},
+        "portfolio_implications": [],
     }
 
     if not use_gemini:
@@ -1902,7 +1903,8 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
         payload_dict = {
             "instruction": (
                 "Return ONLY raw JSON — no markdown, no code fences, no preamble. "
-                "Keys required: headline, subheadline, news_summary, news_bullets, executive_summary. "
+                "Keys required: headline, subheadline, news_summary, news_bullets, "
+                "executive_summary, portfolio_implications. "
                 "\n\n"
                 "HARD GROUNDING RULES — violations corrupt the brief:\n"
                 "* NEVER invent facts. Every factual claim — event, bank name, "
@@ -1936,9 +1938,35 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "reportedly stalled', 'reports of …'. If you can't see the "
                 "claim in the input, do not make it.\n"
                 "\n"
+                "AUDIENCE — this is read by educated private-bank clients, "
+                "NOT by sell-side fixed-income desk specialists. Write at "
+                "investor-letter level, not at trading-desk research level. "
+                "Avoid jargon stacks ('terminal-rate pricing', 'carry "
+                "decomposition', 'forward OIS curve', 'belly of the curve'). "
+                "Prefer plain-English equivalents:\n"
+                "* 'terminal-rate pricing higher' → 'less room for the ECB "
+                "to cut rates' or 'pushes the implied end-point of rate cuts "
+                "higher'\n"
+                "* 'breakevens widened' → 'market-implied inflation rose'\n"
+                "* 'duration risk' → 'sensitivity of bond prices to rate "
+                "moves'\n"
+                "* 'risk-off' → 'cautious tone' or 'defensive positioning'\n"
+                "If a technical term is unavoidable, attach a 5-8 word plain "
+                "explanation in parentheses on first use. Test: would a "
+                "sophisticated client without a finance degree understand "
+                "this on first read?\n"
+                "\n"
                 "HOUSE STYLE — this is a private-bank client newsletter, "
                 "not a media wire. Apply rigorously:\n"
-                "* OUTPUT 4 to 5 bullets, NOT more. Quality over volume.\n"
+                "* OUTPUT 4 to 5 bullets, NOT more. Quality over volume. "
+                "Drop to 4 (or even 3) if the day's themes overlap.\n"
+                "* DO NOT REPEAT THEMES across bullets. If oil, ECB easing, "
+                "and inflation are interconnected, COMBINE them into a single "
+                "tighter bullet rather than producing two near-duplicates. "
+                "Bad: bullet 1 = 'higher oil pressures ECB easing path', "
+                "bullet 2 = 'inflation risk reduces room for rate cuts'. "
+                "Good: a single bullet 'Higher oil keeps inflation risk live "
+                "and narrows the room for the ECB to cut rates'.\n"
                 "* VARY sentence structure across bullets. Do NOT open every "
                 "bullet with the same template. Specifically, do NOT use the "
                 "pattern '<headline>, with <index> up X%, as investors <verb>...' "
@@ -1988,6 +2016,24 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "terminal-rate pricing higher.' Example of BAD style: 'Higher "
                 "oil prices may impact inflation and growth.'\n"
                 "\n"
+                "portfolio_implications: 3 to 4 cross-asset implication "
+                "bullets at the macro level — NOT one-per-research-row, NOT "
+                "individualized advice. Each bullet captures a single broad "
+                "consequence of the day's themes for diversified portfolios. "
+                "Each bullet ≤ 18 words, ends with a period. Worked examples:\n"
+                "* 'Oil strength supports inflation hedges but pressures "
+                "consumers and import-sensitive economies.'\n"
+                "* 'Technology earnings remain the key test for equity "
+                "momentum this week.'\n"
+                "* 'A more resilient USD could pressure emerging markets "
+                "and non-US currencies.'\n"
+                "* 'High-yield credit looks less attractive while oil "
+                "volatility and rate uncertainty persist.'\n"
+                "Same grounding rules apply (only headlines / market_snapshot "
+                "/ research_context; no advice phrasing; no definitive "
+                "geopolitical claims). The implications must follow from the "
+                "day's actual data, not from general market knowledge.\n"
+                "\n"
                 "executive_summary: the top-of-brief investment synopsis. "
                 "Shape: {\"lead\": \"<2 sentence today's-message paragraph>\", "
                 "\"bullets\": [\"<bullet 1>\", \"<bullet 2>\", \"<bullet 3>\"]}. "
@@ -2007,10 +2053,25 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "\n"
                 "The 3 bullets are: (1) the dominant equity-market driver, "
                 "(2) the principal cross-asset risk to monitor, (3) the key "
-                "data/event on the calendar. Each bullet ≤ 22 words, ends "
+                "data/event on the calendar. Each bullet is SHORT — strictly "
+                "8 to 12 words — written as a punchy at-a-glance line, ends "
                 "with a period, and contains a specific noun (sector, asset, "
-                "data print, central bank) — never abstract phrasing like "
-                "'macroeconomic factors' or 'global developments'. "
+                "data print, central bank). Never abstract phrasing like "
+                "'macroeconomic factors' or 'global developments'.\n"
+                "\n"
+                "Worked examples of GOOD bullets (8-12 words each):\n"
+                "* 'Technology resilience is supporting equity sentiment.'\n"
+                "* 'Oil remains the main cross-asset risk this week.'\n"
+                "* 'US payrolls are the key macro data point on Friday.'\n"
+                "Worked examples of BAD bullets (too long, too vague, "
+                "preachy):\n"
+                "* 'Investors should monitor technology stocks given the "
+                "earnings calendar and broader macro environment, with the "
+                "Nasdaq 100 rising 1.95% as the principal driver.' (too long)\n"
+                "* 'Macroeconomic factors remain in focus.' (too vague — no "
+                "specific noun)\n"
+                "* 'Investors should consider the implications of higher "
+                "oil.' (advice phrasing)\n"
                 "\n"
                 "Same grounding rules as the rest of the brief: only use "
                 "facts from headlines / market_snapshot / research_context. "
@@ -2051,6 +2112,23 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
             es = {"lead": es_raw.strip(), "bullets": []}
         else:
             es = {"lead": "", "bullets": []}
+        # Normalise portfolio_implications into a list[str]. Tolerate the
+        # model returning a single string, a dict-list, or nothing.
+        pi_raw = out.get("portfolio_implications")
+        if isinstance(pi_raw, list):
+            pi_list = [str(x).strip() for x in pi_raw if isinstance(x, str) and x.strip()][:4]
+        elif isinstance(pi_raw, str) and pi_raw.strip():
+            # Sometimes the model returns a single concatenated string.
+            pi_list = [pi_raw.strip()]
+        elif isinstance(pi_raw, dict):
+            # E.g. {"bullets": [...]} — fish the list out.
+            pi_list = [
+                str(x).strip()
+                for x in (pi_raw.get("bullets") or pi_raw.get("items") or [])
+                if isinstance(x, str) and x.strip()
+            ][:4]
+        else:
+            pi_list = []
         return (
             {
                 "headline":          out.get("headline")    or fallback["headline"],
@@ -2060,6 +2138,7 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "news_bullets":      out.get("news_bullets") or [],
                 "article_angles":    out.get("article_angles") or [],
                 "executive_summary": es,
+                "portfolio_implications": pi_list,
             },
             {"gemini_used": True, "reason": reason},
         )
@@ -2627,18 +2706,32 @@ def pick_chart_of_day(history, news_df):
                     "The reason field must be 2-3 GRAMMATICALLY COMPLETE sentences. "
                     "Sentence 1: what the chart shows — name the asset and the move "
                     "using d1_pct from the input, and one concrete contextual driver "
-                    "if a top_news_keyword is naturally related (don't force the link). "
-                    "Sentence 2: a concrete what-to-watch — name the SPECIFIC factors "
-                    "that will determine whether the move sustains (e.g. 'oil prices, "
-                    "China-related news flow, and the direction of the US dollar'). "
-                    "EVERY sentence ends with a period. Do NOT close with an open "
-                    "question — produce a confident analytical conclusion, not "
-                    "speculation. Bad close: 'What will be the impact of global "
-                    "events?'. Good close: 'The sustainability of the move depends "
+                    "described in NATURAL ANALYST LANGUAGE. Sentence 2: a concrete "
+                    "what-to-watch — name the SPECIFIC factors that will determine "
+                    "whether the move sustains (e.g. 'oil prices, China-related news "
+                    "flow, and the direction of the US dollar'). EVERY sentence ends "
+                    "with a period. Do NOT close with an open question — produce a "
+                    "confident analytical conclusion, not speculation.\n"
+                    "\n"
+                    "CRITICAL — DO NOT REVEAL THE PROMPT'S INTERNAL STRUCTURE. "
+                    "Forbidden phrasings (these read as raw machine output):\n"
+                    "* 'potentially related to the X top news keyword'\n"
+                    "* 'top_news_keywords suggest…'\n"
+                    "* 'with a z-score of N.NN' (use 'a notable move' or "
+                    "'an unusually large move' instead)\n"
+                    "* 'd1_pct of X.XX' (use the value naturally: '+2.23%')\n"
+                    "* 'top movers by zscore'\n"
+                    "* any reference to the input field names\n"
+                    "Write as if you are an analyst summarising the day, not as if "
+                    "you are processing structured input. Bad close (machine-like): "
+                    "'What will be the impact of global events on emerging markets?'. "
+                    "Bad mid (meta-reference): 'helped by oil, the top news keyword'. "
+                    "Good close (analyst): 'The sustainability of the move depends "
                     "on oil prices, China-related news flow, and the direction of "
-                    "the US dollar.' "
+                    "the US dollar.'\n"
                     "Required JSON: {\"key\": \"<asset_key>\", \"label\": \"<asset_label>\", "
-                    "\"reason\": \"<2-3 sentence explanation, all periods, no open questions>\", "
+                    "\"reason\": \"<2-3 sentence analyst commentary, all periods, "
+                    "no meta-references, no open questions>\", "
                     "\"timeframe_days\": <30|60|90|180>}"
                 ),
                 "top_movers_by_zscore": movers,
@@ -3564,6 +3657,37 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         ("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0),
     ]))
     story += [data_r1, Spacer(1, 0.12*cm), data_r2]
+
+    # ── 4b. PORTFOLIO IMPLICATIONS ────────────────────────────────────────────
+    # 3-4 cross-asset implication bullets at the macro level. NOT individualized
+    # advice — these are general consequences of the day's themes covered by
+    # the disclaimer + professional-use footer. Renders as a small bordered
+    # block above Research Highlights so page 2 has analytical value, not just
+    # tables of bank views. AI-generated; suppressed entirely if no AI output.
+    _pi_list = (writing or {}).get("portfolio_implications") or []
+    _pi_list = [b for b in _pi_list if isinstance(b, str) and b.strip()][:4]
+    if _pi_list:
+        pi_flows = [
+            P("PORTFOLIO IMPLICATIONS", fn="Helvetica-Bold", sz=5.8, col=BLU, lead=7),
+            HRFlowable(width=(PW-1.0)*cm, thickness=0.5, color=BLU),
+            Spacer(1, 0.04*cm),
+        ]
+        for b in _pi_list:
+            pi_flows.append(
+                P(f"<b>\u25aa</b>&nbsp;&nbsp;{_xs(b)}",
+                  sz=5.6, col=TXT, lead=7.0)
+            )
+        pi_tbl = Table([[pi_flows]], colWidths=[PW*cm])
+        pi_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1), LIT),
+            ("BOX",          (0,0),(-1,-1), 0.5, BLU),
+            ("LEFTPADDING",  (0,0),(-1,-1), 9),
+            ("RIGHTPADDING", (0,0),(-1,-1), 9),
+            ("TOPPADDING",   (0,0),(-1,-1), 6),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 6),
+            ("VALIGN",       (0,0),(-1,-1), "TOP"),
+        ]))
+        story += [Spacer(1, 0.12*cm), pi_tbl]
 
     # ── 5. RESEARCH HIGHLIGHTS ────────────────────────────────────────────────
     # Per-bank summary: each uploaded broker gets its own section with 3-5

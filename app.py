@@ -1929,32 +1929,57 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "'farewell', 'first since YYYY', 'highest in N years', "
                 "'biggest move ever', 'record close'. If the headline doesn't "
                 "say it, do not say it.\n"
-                "* NEVER assert geopolitical events as definite unless a "
-                "supplied headline confirms them in those exact terms. "
-                "Forbidden absent verbatim source: 'peace talks were "
-                "canceled', 'war ended', 'ceasefire agreed', 'sanctions "
-                "lifted', 'X attacked Y'. Use HEDGED framing tied to the "
-                "headlines: 'hopes for de-escalation faded', 'talks "
-                "reportedly stalled', 'reports of …'. If you can't see the "
-                "claim in the input, do not make it.\n"
+                "* NEVER state geopolitical events as definite outcomes — "
+                "even with the word 'reportedly' as a softener. The "
+                "following phrasings are HARD-FORBIDDEN regardless of what "
+                "any individual headline appears to say:\n"
+                "  - 'peace talks were canceled'  →  use 'hopes for "
+                "near-term de-escalation weakened'\n"
+                "  - 'peace talks were reportedly canceled'  →  same, the "
+                "'reportedly' does NOT make it acceptable\n"
+                "  - 'war ended' / 'war started'  →  use 'tensions "
+                "intensified' / 'tensions eased' tied to a specific event\n"
+                "  - 'ceasefire agreed'  →  use 'reports of de-escalation "
+                "talks' or quote the headline source explicitly\n"
+                "  - 'sanctions lifted'  →  use 'reports of sanctions "
+                "review' unless the headline is explicit\n"
+                "  - 'X attacked Y'  →  use 'reports of strikes between "
+                "X and Y'\n"
+                "Frame ALL geopolitical content as MARKET REACTIONS to "
+                "evolving narratives, not as confirmed events. Bad: "
+                "'oil rose after US-Iran peace talks were canceled'. "
+                "Good: 'oil rose as hopes for near-term US-Iran "
+                "de-escalation weakened'. The brief reports market behaviour "
+                "tied to news flow; it does not adjudicate the news.\n"
                 "\n"
                 "AUDIENCE — this is read by educated private-bank clients, "
-                "NOT by sell-side fixed-income desk specialists. Write at "
-                "investor-letter level, not at trading-desk research level. "
-                "Avoid jargon stacks ('terminal-rate pricing', 'carry "
-                "decomposition', 'forward OIS curve', 'belly of the curve'). "
-                "Prefer plain-English equivalents:\n"
-                "* 'terminal-rate pricing higher' → 'less room for the ECB "
-                "to cut rates' or 'pushes the implied end-point of rate cuts "
-                "higher'\n"
-                "* 'breakevens widened' → 'market-implied inflation rose'\n"
-                "* 'duration risk' → 'sensitivity of bond prices to rate "
+                "NOT by sell-side fixed-income desk specialists. The brief "
+                "is at INVESTOR-LETTER level, not trading-desk research level. "
+                "\n"
+                "HARD-FORBIDDEN TECHNICAL JARGON. Do NOT use any of these "
+                "phrases — substitute the plain-English version every time:\n"
+                "* 'terminal-rate pricing' / 'terminal rate pricing' / "
+                "'pushing terminal rates higher'  →  use 'less room for the "
+                "ECB/Fed to cut rates' or 'narrowing the path for rate cuts'\n"
+                "* 'breakevens widened' / 'breakeven inflation rose'  →  use "
+                "'market-implied inflation rose'\n"
+                "* 'duration risk' / 'long duration'  →  use 'sensitivity "
+                "of bond prices to rate moves' or 'long-dated bonds'\n"
+                "* 'forward OIS curve' / 'OIS-implied'  →  use 'market-implied "
+                "rate path'\n"
+                "* 'belly of the curve' / 'curve steepener' / 'curve flattener'"
+                "  →  describe as 'medium-dated bonds' / 'short rates fell "
+                "more than long' etc.\n"
+                "* 'carry decomposition' / 'carry trade'  →  describe what "
+                "the trade IS in plain terms\n"
+                "* 'risk-off' / 'risk-on'  →  use 'cautious / defensive "
+                "positioning' or 'risk appetite improved'\n"
+                "* 'beta to risk' / 'high-beta'  →  use 'sensitive to market "
                 "moves'\n"
-                "* 'risk-off' → 'cautious tone' or 'defensive positioning'\n"
-                "If a technical term is unavoidable, attach a 5-8 word plain "
-                "explanation in parentheses on first use. Test: would a "
-                "sophisticated client without a finance degree understand "
-                "this on first read?\n"
+                "If a technical term is unavoidable AND not on the banned "
+                "list, attach a 5-8 word plain explanation in parentheses on "
+                "first use. Test: would a sophisticated client without a "
+                "finance degree understand this on first read?\n"
                 "\n"
                 "HOUSE STYLE — this is a private-bank client newsletter, "
                 "not a media wire. Apply rigorously:\n"
@@ -2040,16 +2065,35 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "\n"
                 "The lead is TWO sentences (35-55 words total) written in "
                 "investment-professional voice. Sentence 1 names the prevailing "
-                "market tone with a colour adjective ('mixed but resilient', "
-                "'cautious risk-on', 'defensively positioned') and the single "
-                "dominant driver. Sentence 2 names the next-watch items "
-                "(earnings / central banks / macro data / specific events). "
+                "market tone with a colour adjective AND the dominant driver(s). "
+                "Sentence 2 names the next-watch items (earnings / central "
+                "banks / macro data / specific events).\n"
+                "\n"
+                "TONE ADJECTIVE MUST MATCH THE DATA. Look at market_snapshot:\n"
+                "* Most major equity indices green AND vol low → 'constructive', "
+                "'resilient', 'risk-on'.\n"
+                "* Equities mixed, some up some down → 'mixed but resilient' "
+                "(if leaders are up) or 'mixed with crosscurrents'.\n"
+                "* Most indices red, vol up → 'cautious', 'defensive', "
+                "'risk-off'.\n"
+                "Do NOT call the day 'cautious' if S&P, Nasdaq, and global "
+                "equities are positive — that contradicts the tape. Pick the "
+                "adjective FROM the data, not from a generic vocabulary.\n"
+                "\n"
+                "SEPARATE DIVERGENT DRIVERS. When two drivers push in OPPOSITE "
+                "directions (oil pressures, tech supports), use a 'while/with' "
+                "framing — never collapse them into 'driven by X and Y'. "
+                "Bad: 'driven by elevated oil prices and technology strength' "
+                "(implies both push the same way). "
+                "Good: 'as technology strength supports equities while elevated "
+                "oil prices keep inflation risk in focus'.\n"
+                "\n"
                 "Avoid bland openings like 'Markets are mixed today' — be "
-                "specific about WHY they're mixed. Example of tone: 'Global "
-                "markets start the week with a constructive tone, supported "
-                "by US technology strength while elevated oil prices keep "
-                "inflation risk live. Attention turns to mega-cap earnings, "
-                "central-bank communication, and the US payrolls print.'\n"
+                "specific about WHY. Example of GOOD lead: 'Global markets "
+                "start the week with a mixed but resilient tone, as technology "
+                "strength supports equities while elevated oil prices keep "
+                "inflation risk in focus. Attention turns to mega-cap earnings, "
+                "central-bank communication, and Friday's US payrolls print.'\n"
                 "\n"
                 "The 3 bullets are: (1) the dominant equity-market driver, "
                 "(2) the principal cross-asset risk to monitor, (3) the key "
@@ -2540,6 +2584,18 @@ def build_bundle():
     # the displayed header is updated to "7d" in _dtbl().
     seven_days_ago = today - pd.Timedelta(days=7)
 
+    # Stale-data guard: find the latest date that any series has refreshed to,
+    # then flag rows whose last data point is more than 1 calendar day older
+    # than that. This catches cases like Brent vs WTI where one feed lags
+    # the other by a session — comparing today's level to a stale base
+    # produces a misleading 1D% (the reviewer flagged WTI +2% vs Brent -3.7%
+    # divergence). Stale rows get d1 suppressed so the column reads "—"
+    # rather than a misleading number.
+    if not history.empty:
+        global_latest = pd.to_datetime(history["date"]).max().normalize()
+    else:
+        global_latest = today
+
     for group, key, label, desc in metas:
         g = history[history["key"] == key].sort_values("date")
         if g.empty:
@@ -2561,6 +2617,12 @@ def build_bundle():
         series = pd.Series(g["value"].values, index=pd.to_datetime(g["date"]))
         latest = float(series.iloc[-1])
         prev = float(series.iloc[-2]) if len(series) >= 2 else None
+        # Suppress 1D% if this series' latest data point is more than 1
+        # calendar day older than the global latest — it means the feed
+        # didn't refresh today, so the 1D move is stale.
+        last_ts = pd.to_datetime(series.index[-1]).normalize()
+        is_stale = (global_latest - last_ts).days > 1
+        d1_val = None if is_stale else pct_change(latest, prev)
         snapshot_rows.append(
             {
                 "group": group,
@@ -2568,7 +2630,7 @@ def build_bundle():
                 "label": label,
                 "description": desc,
                 "level": latest,
-                "d1": pct_change(latest, prev),
+                "d1": d1_val,
                 "wtd": pct_change(latest, value_on_or_before(series, seven_days_ago)),
                 "mtd": pct_change(latest, value_on_or_before(series, month_start)),
                 "ytd": pct_change(latest, value_on_or_before(series, year_start)),
@@ -2722,6 +2784,23 @@ def pick_chart_of_day(history, news_df):
                     "* 'd1_pct of X.XX' (use the value naturally: '+2.23%')\n"
                     "* 'top movers by zscore'\n"
                     "* any reference to the input field names\n"
+                    "\n"
+                    "EVERY CAUSAL CLAIM MUST POINT TO A CONCRETE INPUT. The "
+                    "'reason' field can only attribute the move to factors that "
+                    "are visibly supported by the supplied data — a top news "
+                    "keyword, a specific named market (Asia / Europe / US), a "
+                    "specific asset (USD / oil / yields), or a specific country. "
+                    "Forbidden VAGUE attributions (these read as filler with no "
+                    "evidence):\n"
+                    "* 'driven by an improving economic outlook'\n"
+                    "* 'helped by favourable conditions'\n"
+                    "* 'supported by positive sentiment'\n"
+                    "* 'on global growth optimism'\n"
+                    "* 'amid a constructive backdrop'\n"
+                    "If the supplied data does not name a specific driver, do "
+                    "NOT invent one. Say 'the move came in the absence of a "
+                    "single dominant headline' or 'no single news catalyst is "
+                    "evident in today's flow' instead.\n"
                     "Write as if you are an analyst summarising the day, not as if "
                     "you are processing structured input. Bad close (machine-like): "
                     "'What will be the impact of global events on emerging markets?'. "

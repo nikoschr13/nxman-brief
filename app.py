@@ -1233,10 +1233,77 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
         st.session_state["research_docs"] = {}
     if "_drive_research_failed" not in st.session_state:
         st.session_state["_drive_research_failed"] = {}
+    if "_drive_research_skipped_stale" not in st.session_state:
+        st.session_state["_drive_research_skipped_stale"] = []
+
+    # Staleness filter: drop docs whose filename date is older than yesterday
+    # in Europe/Zurich. Prevents zombie data — e.g. a UBS PDF from last week
+    # persisting in research_docs and feeding today's brief while the user
+    # believes "no UBS uploaded today". 1-day tolerance handles the
+    # Singapore→Zurich timezone gap (BoS Morning Call dated DD often arrives
+    # Zurich-evening of DD-1). Files whose names have NO parseable date are
+    # kept (we don't err on side of dropping legit content).
+    _MONTH_TO_NUM = {
+        "jan":1,"january":1, "feb":2,"february":2, "mar":3,"march":3,
+        "apr":4,"april":4, "may":5, "jun":6,"june":6, "jul":7,"july":7,
+        "aug":8,"august":8, "sep":9,"september":9,"sept":9, "oct":10,"october":10,
+        "nov":11,"november":11, "dec":12,"december":12,
+    }
+
+    def _filename_date(fname: str):
+        """Extract a publication date from common broker-PDF filename patterns.
+        Returns datetime.date or None."""
+        if not fname:
+            return None
+        base = fname.rsplit(".", 1)[0]
+        # ISO YYYY-MM-DD
+        m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", base)
+        if m:
+            try:
+                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+            except ValueError:
+                pass
+        # "DD Month YYYY" e.g. "Morning Call_22 April 2026"
+        m = re.search(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b", base)
+        if m:
+            mo = _MONTH_TO_NUM.get(m.group(2).lower()[:3])
+            if mo:
+                try:
+                    return datetime(int(m.group(3)), mo, int(m.group(1))).date()
+                except ValueError:
+                    pass
+        # "DD-MM-YYYY" or "DD_MM_YYYY"
+        m = re.search(r"\b(\d{1,2})[\-_](\d{1,2})[\-_](\d{4})\b", base)
+        if m:
+            try:
+                return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).date()
+            except ValueError:
+                pass
+        return None
+
+    try:
+        _today_zh = datetime.now(ZoneInfo("Europe/Zurich")).date()
+    except Exception:
+        _today_zh = datetime.now().date()
+    _stale_cutoff = _today_zh - timedelta(days=1)
 
     loaded = 0
     failed = 0
+    skipped_stale = 0
     for fname, pdf_bytes in (pdfs or {}).items():
+        # Staleness gate first — applies even on force_refresh, since the
+        # whole point is to keep stale content out of today's brief.
+        fdate = _filename_date(fname)
+        if fdate is not None and fdate < _stale_cutoff:
+            st.session_state["_drive_research_skipped_stale"].append(
+                f"{fname} (dated {fdate.isoformat()})"
+            )
+            # Also evict any prior load of this file from research_docs so it
+            # can't survive in session state from an earlier brief run.
+            st.session_state["research_docs"].pop(fname, None)
+            skipped_stale += 1
+            continue
+
         already_loaded = fname in st.session_state["research_docs"]
         already_failed = fname in st.session_state["_drive_research_failed"]
         if not force_refresh and (already_loaded or already_failed):
@@ -2959,11 +3026,37 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if not use_gemini or not GEMINI_API_KEY:
         return empty
 
-    def _infer_bank(fname: str) -> str:
-        fn = fname.lower()
-        # Bank of Singapore publication families. Confirmed 2026-04-27 — the
-        # CIO_WEEKLY_* and FX_WEEKLY_* documents that previously rendered as
-        # raw filenames are BoS publications.
+    # 2026-05-04: was filename-only. Filename matching let docs whose name
+    # contained a trigger ("daily europe" → "UBS") get the wrong bank label
+    # even when the actual content was from a different house, which is
+    # how a non-UBS doc produced a "UBS rates BBWI Buy 192% upside" line in
+    # the daily brief. Now we sniff the first 3000 chars of the source PDF
+    # for an explicit letterhead first; filename is the fallback.
+    _LETTERHEAD_PATTERNS = [
+        (re.compile(r"(?i)\bbank\s+of\s+singapore\b"),                       "BoS"),
+        (re.compile(r"(?i)\bubs\s+(group|ag|wealth|investment|research|cio)\b"), "UBS"),
+        (re.compile(r"(?i)\bjulius\s+ba[eë]r\b"),                            "Julius Baer"),
+        (re.compile(r"(?i)\bgoldman\s+sachs\b"),                             "Goldman"),
+        (re.compile(r"(?i)\bmorgan\s+stanley\b"),                            "Morgan Stanley"),
+        (re.compile(r"(?i)\bbarclays\b"),                                    "Barclays"),
+        (re.compile(r"(?i)\bjp\s*morgan\b"),                                 "JPMorgan"),
+        (re.compile(r"(?i)\bocbc\s+bank\b|\boversea[\-\s]chinese\s+banking\b"), "OCBC"),
+        (re.compile(r"(?i)\bcitigroup\b|\bciti\s+research\b"),               "Citi"),
+        (re.compile(r"(?i)\bmorningstar\b"),                                 "Morningstar"),
+        (re.compile(r"(?i)ajk\b.*\binvestor\s+compass\b|\binvestor\s+compass\b.*ajk"),
+                                                                             "AJK"),
+    ]
+
+    def _infer_bank(fname: str, source_text: str = "") -> str:
+        # Step 1 — content-based: look for an explicit letterhead in the
+        # first 3000 chars. Authoritative when present.
+        head = (source_text or "")[:3000]
+        for pat, label in _LETTERHEAD_PATTERNS:
+            if pat.search(head):
+                return label
+
+        # Step 2 — filename fallback (preserved behaviour).
+        fn = (fname or "").lower()
         if "morning call" in fn:                        return "BoS"
         if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
         if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
@@ -3068,8 +3161,10 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     for fname, rdoc in research_docs.items():
         if rdoc.get("error"):
             continue
-        bank = _infer_bank(fname)
         source_text = (rdoc.get("text") or "").strip()
+        # Pass source_text so _infer_bank can use the actual letterhead
+        # rather than relying solely on filename triggers.
+        bank = _infer_bank(fname, source_text)
 
         # Morning_call docs may have empty `text` but rich structured fields —
         # reconstruct text from those so Gemini has something to summarise.
@@ -4546,7 +4641,12 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     # the disclaimer + professional-use footer. Renders as a small bordered
     # block above Research Highlights so page 2 has analytical value, not just
     # tables of bank views. AI-generated; suppressed entirely if no AI output.
-    _pi_list = (writing or {}).get("portfolio_implications") or []
+    # Disabled 2026-05-04 — section emitted macro-level "implications" without
+    # any knowledge of the user's actual portfolio, which can read as advice.
+    # The AI still generates portfolio_implications upstream; we simply don't
+    # render them. Re-enable by reverting this stub if real portfolio context
+    # becomes available.
+    _pi_list = []
     _pi_list = [b for b in _pi_list if isinstance(b, str) and b.strip()][:4]
     if _pi_list:
         pi_flows = [

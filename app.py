@@ -24,15 +24,21 @@ from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 
 # Optional: Drive-backed research library feed. If brief_drive_reader isn't
-# importable (e.g. dep not installed locally), Brief falls back to manual upload.
+# importable (e.g. dep not installed locally, or only an older version of
+# brief_drive_reader.py is deployed), Brief falls back to manual upload.
+# Flat try/except blocks so each variable is unconditionally defined no
+# matter which import succeeds — a nested arrangement could leave the
+# metadata loader name undefined when the outer import failed, which
+# crashed the app on the sidebar's autoload call.
 try:
     from brief_drive_reader import load_research_pdfs_dict_cached as _drive_pdf_loader
-    try:
-        from brief_drive_reader import load_research_pdfs_with_meta_cached as _drive_pdf_loader_meta
-    except ImportError:
-        _drive_pdf_loader_meta = None  # graceful fallback to filename-date staleness
 except Exception:
     _drive_pdf_loader = None
+
+try:
+    from brief_drive_reader import load_research_pdfs_with_meta_cached as _drive_pdf_loader_meta
+except Exception:
+    _drive_pdf_loader_meta = None
 
 # Drive upload is intentionally disabled: Google service accounts cannot
 # write to personal My Drive folders (Service Accounts do not have storage

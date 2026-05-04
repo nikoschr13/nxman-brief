@@ -3118,23 +3118,36 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             if pat.search(head):
                 return label
 
-        # Step 2 — filename fallback (PRE-Unknown-fallback variant, restored
-        # 2026-05-04 as a safe revert because the stricter version was
-        # crashing the app for an unidentified reason). This version still
-        # produces the UBS hallucination if a doc filename matches "daily
-        # europe" / "universe" / "equity_coverage" without UBS letterhead,
-        # but at least the brief actually generates.
+        # Step 2 — filename fallback, BUT ONLY for patterns that literally
+        # contain the bank's name. Heuristic patterns ("universe", "daily
+        # europe", "equity_coverage", etc.) used to bind to UBS / UBS Universe
+        # here, and let non-UBS docs whose filename happened to contain those
+        # words get UBS attribution — that's the path the BBWI/KMX/FLUT
+        # 2026-05-04 hallucination took. Removed the heuristic triggers
+        # entirely; only literal-name filename matches are accepted, and
+        # everything else falls through to "Unknown". The render block skips
+        # Unknown banks so confabulated content can't be attributed.
         fn = (fname or "").lower()
+        # Morning Call IS specific to Bank of Singapore in this user's setup
+        # (and the BoS letterhead would normally match anyway).
         if "morning call" in fn:                        return "BoS"
         if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
         if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
+        # Literal bank-name matches only — these are unambiguous.
         if "barclays"     in fn:                        return "Barclays"
-        if "daily europe" in fn:                        return "UBS"
-        if "equity_coverage" in fn or "universe" in fn: return "UBS Universe"
-        if "dmo"          in fn or "ocbc" in fn:        return "OCBC"
+        if "ubs"          in fn:                        return "UBS"
+        if "ocbc"         in fn:                        return "OCBC"
         if "goldman"      in fn:                        return "Goldman"
-        if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
-        return fname.split(".")[0][:24]
+        if "morgan stanley" in fn:                      return "Morgan Stanley"
+        if "jpmorgan"     in fn or "jp morgan" in fn or fn.startswith("jpm"):
+                                                        return "JPMorgan"
+        if "julius baer"  in fn or "julius bär" in fn:  return "Julius Baer"
+        if "morningstar"  in fn:                        return "Morningstar"
+        if "citi"         in fn:                        return "Citi"
+        # Heuristic patterns ("daily europe", "universe", "equity_coverage",
+        # "dmo") deliberately removed — they were the BBWI hallucination
+        # pathway. Anything that survives to here gets the neutral label.
+        return "Unknown"
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     per_bank: dict[str, list[str]] = {}
@@ -3233,6 +3246,15 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         # Pass source_text so _infer_bank can use the actual letterhead
         # rather than relying solely on filename triggers.
         bank = _infer_bank(fname, source_text)
+        if bank == "Unknown":
+            # No bank could be confidently identified from either content
+            # letterhead OR a literal-name filename match. Skip this doc
+            # entirely rather than feeding it to the LLM with a guessed
+            # bank label — that path produced the BBWI / KMX / FLUT
+            # confabulation on 2026-05-04. Surfaced via debug_info so the
+            # sidebar can show what was skipped.
+            debug_info.append(f"{fname}: skipped (no confident bank attribution)")
+            continue
 
         # Morning_call docs may have empty `text` but rich structured fields —
         # reconstruct text from those so Gemini has something to summarise.

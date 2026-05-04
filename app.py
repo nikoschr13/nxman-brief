@@ -27,6 +27,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Tabl
 # importable (e.g. dep not installed locally), Brief falls back to manual upload.
 try:
     from brief_drive_reader import load_research_pdfs_dict_cached as _drive_pdf_loader
+    try:
+        from brief_drive_reader import load_research_pdfs_with_meta_cached as _drive_pdf_loader_meta
+    except ImportError:
+        _drive_pdf_loader_meta = None  # graceful fallback to filename-date staleness
 except Exception:
     _drive_pdf_loader = None
 
@@ -1223,8 +1227,18 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
     if st.session_state.get(flag) and not force_refresh:
         return (0, 0)
 
+    # Prefer the metadata-aware loader so we can filter by Drive modifiedTime
+    # (when the file was uploaded) instead of by a date parsed from the
+    # filename (when the publishing house wrote the document). The two are
+    # often days or weeks apart for broker research.
+    pdf_meta: dict[str, dict] = {}
+    pdfs: dict[str, bytes] = {}
     try:
-        pdfs = _drive_pdf_loader()
+        if _drive_pdf_loader_meta is not None:
+            pdf_meta = _drive_pdf_loader_meta() or {}
+            pdfs = {name: m.get("bytes", b"") for name, m in pdf_meta.items()}
+        else:
+            pdfs = _drive_pdf_loader() or {}
     except Exception:
         st.session_state[flag] = True  # don't loop-retry on error
         return (0, 0)
@@ -1236,13 +1250,23 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
     if "_drive_research_skipped_stale" not in st.session_state:
         st.session_state["_drive_research_skipped_stale"] = []
 
-    # Staleness filter: drop docs whose filename date is older than yesterday
-    # in Europe/Zurich. Prevents zombie data — e.g. a UBS PDF from last week
-    # persisting in research_docs and feeding today's brief while the user
-    # believes "no UBS uploaded today". 1-day tolerance handles the
-    # Singapore→Zurich timezone gap (BoS Morning Call dated DD often arrives
-    # Zurich-evening of DD-1). Files whose names have NO parseable date are
-    # kept (we don't err on side of dropping legit content).
+    # Staleness filter: drop docs older than the configured window. Prevents
+    # zombie data — a UBS PDF that lingered in Drive from a previous session
+    # shouldn't feed today's brief once it's been moved out of the day's
+    # focus.
+    #
+    # Filter signal, in priority order:
+    #   1. Drive modifiedTime (when the file was uploaded/touched) — preferred
+    #   2. Filename date — fallback when the metadata loader is unavailable
+    #
+    # Window default = 1 day. Tunable via env var BRIEF_RESEARCH_STALE_DAYS:
+    #   BRIEF_RESEARCH_STALE_DAYS=1   → today's drops only (default)
+    #   BRIEF_RESEARCH_STALE_DAYS=7   → last week
+    #   BRIEF_RESEARCH_STALE_DAYS=30  → last month
+    #   BRIEF_RESEARCH_STALE_DAYS=0   → disable filter entirely
+    #
+    # Files for which neither modifiedTime nor a parseable filename-date can
+    # be obtained are kept (don't err on the side of dropping legit content).
     _MONTH_TO_NUM = {
         "jan":1,"january":1, "feb":2,"february":2, "mar":3,"march":3,
         "apr":4,"april":4, "may":5, "jun":6,"june":6, "jul":7,"july":7,
@@ -1285,7 +1309,32 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
         _today_zh = datetime.now(ZoneInfo("Europe/Zurich")).date()
     except Exception:
         _today_zh = datetime.now().date()
-    _stale_cutoff = _today_zh - timedelta(days=1)
+    try:
+        _stale_days = int(os.environ.get("BRIEF_RESEARCH_STALE_DAYS", "1"))
+    except (TypeError, ValueError):
+        _stale_days = 1
+    _stale_cutoff = (
+        _today_zh - timedelta(days=_stale_days) if _stale_days > 0 else None
+    )
+
+    def _modified_date(fname: str):
+        """Return Drive's modifiedTime as a date (Europe/Zurich), or None
+        if we don't have the metadata for this filename."""
+        if not pdf_meta:
+            return None
+        mt = (pdf_meta.get(fname) or {}).get("modified_time") or ""
+        if not mt:
+            return None
+        try:
+            # Drive returns ISO with trailing Z. Parse + convert to Zurich.
+            iso = mt.replace("Z", "+00:00")
+            dt_utc = datetime.fromisoformat(iso)
+            try:
+                return dt_utc.astimezone(ZoneInfo("Europe/Zurich")).date()
+            except Exception:
+                return dt_utc.date()
+        except (ValueError, TypeError):
+            return None
 
     loaded = 0
     failed = 0
@@ -1293,16 +1342,24 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
     for fname, pdf_bytes in (pdfs or {}).items():
         # Staleness gate first — applies even on force_refresh, since the
         # whole point is to keep stale content out of today's brief.
-        fdate = _filename_date(fname)
-        if fdate is not None and fdate < _stale_cutoff:
-            st.session_state["_drive_research_skipped_stale"].append(
-                f"{fname} (dated {fdate.isoformat()})"
-            )
-            # Also evict any prior load of this file from research_docs so it
-            # can't survive in session state from an earlier brief run.
-            st.session_state["research_docs"].pop(fname, None)
-            skipped_stale += 1
-            continue
+        # _stale_cutoff is None when BRIEF_RESEARCH_STALE_DAYS=0 (disabled).
+        if _stale_cutoff is not None:
+            # Prefer Drive modifiedTime (upload time). Fall back to filename
+            # date only if metadata is unavailable.
+            ref_date = _modified_date(fname)
+            ref_label = "modified"
+            if ref_date is None:
+                ref_date = _filename_date(fname)
+                ref_label = "dated"
+            if ref_date is not None and ref_date < _stale_cutoff:
+                st.session_state["_drive_research_skipped_stale"].append(
+                    f"{fname} ({ref_label} {ref_date.isoformat()})"
+                )
+                # Also evict any prior load of this file from research_docs
+                # so it can't survive in session state from an earlier run.
+                st.session_state["research_docs"].pop(fname, None)
+                skipped_stale += 1
+                continue
 
         already_loaded = fname in st.session_state["research_docs"]
         already_failed = fname in st.session_state["_drive_research_failed"]

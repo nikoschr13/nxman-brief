@@ -319,6 +319,63 @@ def load_research_pdfs_dict(
     return out
 
 
+def load_research_pdfs_with_meta(
+    include_inbox: bool = True,
+    include_processed: bool = False,
+    max_pdfs: int = 20,
+) -> dict[str, dict]:
+    """Same as load_research_pdfs_dict but also returns Drive's modifiedTime.
+
+    Added 2026-05-04 so the Brief can filter "today's drops" by the actual
+    upload time (Drive modifiedTime) rather than a date parsed out of the
+    filename — broker PDFs are dated by the publishing house's cover-page,
+    not by when the user dropped them into the inbox, so filename-date
+    filtering wrongly drops PDFs the user just uploaded.
+
+    Returns:
+        {filename: {"bytes": pdf_bytes, "modified_time": ISO_string}}
+        Empty dict on misconfig / failure (same as the bytes-only sibling).
+    """
+    drive = _drive_client()
+    sniper_id = _load_sniper_folder_id()
+    if drive is None or not sniper_id:
+        logger.info("Drive PDF library not available — check SA + folder-ID config.")
+        return {}
+
+    inbox_id = _find_subfolder(drive, sniper_id, "Research_Inbox") if include_inbox else None
+    processed_id = _find_subfolder(drive, sniper_id, "Research_Processed") if include_processed else None
+
+    files: list[dict] = []
+    if inbox_id:
+        files.extend(_list_pdfs_in_folder(drive, inbox_id))
+    if processed_id:
+        files.extend(_list_pdfs_in_folder(drive, processed_id))
+    if not files and not inbox_id and not processed_id:
+        files = _list_pdfs_in_folder(drive, sniper_id)
+    if not files:
+        return {}
+
+    by_name: dict[str, dict] = {}
+    for f in files:
+        by_name[f["name"]] = f
+
+    ordered = sorted(
+        by_name.values(),
+        key=lambda f: f.get("modifiedTime", ""),
+        reverse=True,
+    )[:max_pdfs]
+
+    out: dict[str, dict] = {}
+    for f in ordered:
+        raw = _download_bytes(drive, f["id"])
+        if raw:
+            out[f["name"]] = {
+                "bytes": raw,
+                "modified_time": f.get("modifiedTime", ""),
+            }
+    return out
+
+
 # --------------------------------------------------------------------------- writer
 
 
@@ -410,6 +467,18 @@ try:  # pragma: no cover — optional
             max_pdfs=max_pdfs,
         )
 
+    @_st.cache_data(ttl=300)
+    def load_research_pdfs_with_meta_cached(
+        include_inbox: bool = True,
+        include_processed: bool = False,
+        max_pdfs: int = 20,
+    ) -> dict[str, dict]:
+        return load_research_pdfs_with_meta(
+            include_inbox=include_inbox,
+            include_processed=include_processed,
+            max_pdfs=max_pdfs,
+        )
+
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
@@ -420,6 +489,17 @@ except Exception:
         max_pdfs: int = 20,
     ) -> dict[str, bytes]:
         return load_research_pdfs_dict(
+            include_inbox=include_inbox,
+            include_processed=include_processed,
+            max_pdfs=max_pdfs,
+        )
+
+    def load_research_pdfs_with_meta_cached(  # type: ignore[no-redef]
+        include_inbox: bool = True,
+        include_processed: bool = False,
+        max_pdfs: int = 20,
+    ) -> dict[str, dict]:
+        return load_research_pdfs_with_meta(
             include_inbox=include_inbox,
             include_processed=include_processed,
             max_pdfs=max_pdfs,

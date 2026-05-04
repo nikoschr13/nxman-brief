@@ -1116,10 +1116,16 @@ def parse_equity_universe(pdf_bytes: bytes) -> dict:
                      "SINGAPORE","INDONESIA","JAPAN","LATIN AMERICA","MIDDLE EAST"}
     known_ratings = {"Buy","Hold","Sell","UR","Restricted","NC"}
     date_str = ""
+    p0 = ""  # initialized so it's always defined for the return dict
 
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            # Date from first page
+            # Page-1 text doubles as the bank-letterhead source for
+            # build_research_themes._infer_bank — without this, every
+            # equity-coverage doc reaches _infer_bank with empty source_text
+            # and the "bank of singapore" content check can never confirm,
+            # which is how a real BoS Equity Coverage report ended up
+            # surfacing under a generic filename label on 2026-05-04.
             p0 = pdf.pages[0].extract_text() or ""
             dm = re.search(r'\d{1,2}\s+\w+\s+\d{4}', p0)
             if dm:
@@ -1173,9 +1179,9 @@ def parse_equity_universe(pdf_bytes: bytes) -> dict:
                                 "uncertainty": _f(18),
                             })
     except Exception as e:
-        return {"error": str(e), "stocks": stocks, "date": date_str}
+        return {"error": str(e), "stocks": stocks, "date": date_str, "text": p0}
 
-    return {"stocks": stocks, "date": date_str, "error": None}
+    return {"stocks": stocks, "date": date_str, "error": None, "text": p0}
 
 
 def parse_generic_research(pdf_bytes: bytes, filename: str) -> dict:

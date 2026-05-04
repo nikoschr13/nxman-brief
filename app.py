@@ -205,24 +205,392 @@ FX_STRIP = [
     {"type": "asset", "key": "wti",     "label": "WTI Oil"},
 ]
 
-# ── Macro events calendar (update as needed) ─────────────────────────────────
-MACRO_EVENTS = [
-    {"date": "2026-04-17", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-05-02", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-05-07", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-05-13", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-06-05", "event": "ECB Rate Decision",       "category": "Central Banks"},
+# ── Macro events calendar — corrected fallback (2026) ────────────────────────
+# This is the FALLBACK list used when every live source fails. Dates have been
+# day-of-week-verified against the published 2026 ECB/Fed/BLS schedules:
+# - ECB Governing Council meetings end Thursday with the press conference
+# - Fed FOMC announces Wednesday at the conclusion of a 2-day Tue-Wed meeting
+# - NFP releases on the FIRST FRIDAY of each month
+# - CPI releases mid-month on a published BLS schedule (typically Tue/Wed/Thu)
+# The live fetcher in fetch_macro_events_live() supersedes this list when
+# any source returns data.
+MACRO_EVENTS_FALLBACK = [
+    # ECB monetary policy meetings 2026 (always Thursdays)
+    {"date": "2026-04-16", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-06-04", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-07-23", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-09-10", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-10-29", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2026-12-17", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    # Fed FOMC 2026 (decisions on Wednesdays — verify against fed published cal)
+    {"date": "2026-04-29", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-06-17", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-07-29", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-09-16", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-10-28", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-12-09", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    # NFP 2026 (always first Friday of each month — deterministic)
+    {"date": "2026-05-01", "event": "US Jobs Report (NFP)",    "category": "US Data"},
     {"date": "2026-06-05", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-06-11", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-06-18", "event": "FOMC Rate Decision",      "category": "Central Banks"},
     {"date": "2026-07-03", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-08-07", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-09-04", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-10-02", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-11-06", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    {"date": "2026-12-04", "event": "US Jobs Report (NFP)",    "category": "US Data"},
+    # US CPI 2026 (BLS published schedule — verify quarterly)
+    {"date": "2026-05-13", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-06-10", "event": "US CPI Release",          "category": "US Data"},
     {"date": "2026-07-15", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-07-24", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-07-30", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-08-05", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-09-11", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-09-17", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2026-08-12", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-09-10", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-10-15", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-11-12", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2026-12-10", "event": "US CPI Release",          "category": "US Data"},
 ]
+
+# Backwards-compat alias — older code paths read MACRO_EVENTS directly.
+# Pointed at the fallback so anything that hasn't been migrated still works.
+MACRO_EVENTS = MACRO_EVENTS_FALLBACK
+
+
+# ── Live macro-events fetchers ───────────────────────────────────────────────
+# The hardcoded list above is the fallback. The live fetcher tries to pull
+# from authoritative sources so the calendar self-updates and never drifts.
+# Each scraper is best-effort: if it fails, we silently fall through to the
+# next source, then to the hardcoded fallback. The brief never blocks on a
+# calendar fetch.
+#
+# Sources:
+# - FOMC:  https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+# - ECB:   https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+# - CPI:   https://www.bls.gov/schedule/news_release/cpi.htm
+# - NFP:   deterministic — always first Friday of the month, no scrape needed.
+
+_FOMC_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+_ECB_URL  = "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"
+_CPI_URL  = "https://www.bls.gov/schedule/news_release/cpi.htm"
+
+_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; nxman-brief/1.0; +daily-market-briefing)",
+    "Accept": "text/html,application/xhtml+xml",
+}
+
+_MONTH_NUM = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
+    "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
+    "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _http_get(url: str, timeout: int = 12) -> str:
+    """Fetch a URL with sensible headers; return body or raise."""
+    r = requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+
+def _scrape_fomc_dates(html: str | None = None) -> list[dict]:
+    """Parse the Fed's fomccalendars.htm page.
+
+    The page lists meetings under headers like '<h4>2026 FOMC Meetings</h4>'
+    and each meeting block contains a month and day-range (e.g. 'April 28-29').
+    The DECISION date is the second day of the range (announce day, Wed).
+
+    We extract all (month, day_range) pairs after the year-2026+ headings
+    and emit one event per meeting on the announce day.
+    """
+    if html is None:
+        html = _http_get(_FOMC_URL)
+    out: list[dict] = []
+    today_year = datetime.now().year
+    # Anchor: split on year headers like "2026 FOMC Meetings"
+    year_blocks = re.split(r"(?i)(\d{4})\s+FOMC\s+Meetings?", html)
+    # year_blocks: [pre, year1, body1, year2, body2, ...]
+    for i in range(1, len(year_blocks), 2):
+        try:
+            year = int(year_blocks[i])
+        except ValueError:
+            continue
+        if year < today_year or year > today_year + 2:
+            continue
+        body = year_blocks[i + 1] if i + 1 < len(year_blocks) else ""
+        # Find every "Month  Day-Day" pattern. The Fed's HTML separates the
+        # month and day range across multiple cells; collapse whitespace
+        # first so a regex can span them.
+        flat = re.sub(r"\s+", " ", body)
+        # Patterns to catch:
+        #   "January 27-28"
+        #   "April 28-29*"  (the asterisk on projected meetings)
+        #   "Sep/Oct  29-30"  (cross-month meetings)
+        for m in re.finditer(
+            r"\b("
+            r"January|February|March|April|May|June|"
+            r"July|August|September|October|November|December|"
+            r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+            r")\b"
+            r"(?:\s*/\s*(?:January|February|March|April|May|June|"
+            r"July|August|September|October|November|December|"
+            r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec))?"
+            r"\s+"
+            r"(\d{1,2})\s*(?:[-–]\s*(\d{1,2}))?",
+            flat,
+        ):
+            mon_word = m.group(1).lower()
+            day1 = int(m.group(2))
+            day2 = int(m.group(3)) if m.group(3) else day1
+            if mon_word not in _MONTH_NUM:
+                continue
+            month = _MONTH_NUM[mon_word]
+            # If the range spans months (e.g. "Oct 28-Nov 5"), the regex
+            # above only catches the start month — close enough; we use
+            # day2 as the announce day on the start month. If day2 < day1
+            # that means the range crossed; fall back to day1.
+            announce_day = day2 if day2 >= day1 else day1
+            try:
+                d = datetime(year, month, announce_day).date()
+            except ValueError:
+                continue
+            out.append({
+                "date": d.strftime("%Y-%m-%d"),
+                "event": "FOMC Rate Decision",
+                "category": "Central Banks",
+            })
+    # Dedupe within source.
+    seen = set()
+    deduped = []
+    for ev in out:
+        if ev["date"] not in seen:
+            seen.add(ev["date"])
+            deduped.append(ev)
+    return deduped
+
+
+def _scrape_ecb_dates(html: str | None = None) -> list[dict]:
+    """Parse ECB's monetary-policy calendar page.
+
+    The ECB page lists meetings with a date pattern like '4 June 2026' or
+    '04/06/2026' depending on the format. We extract dates that appear
+    near the words 'monetary policy' or in the structured meeting list.
+    """
+    if html is None:
+        html = _http_get(_ECB_URL)
+    out: list[dict] = []
+    today_year = datetime.now().year
+    flat = re.sub(r"\s+", " ", html)
+    # Match patterns like "5 March 2026" or "5 Mar 2026"
+    for m in re.finditer(
+        r"\b(\d{1,2})\s+("
+        r"January|February|March|April|May|June|"
+        r"July|August|September|October|November|December|"
+        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+        r")\s+(\d{4})\b",
+        flat,
+    ):
+        try:
+            day = int(m.group(1))
+            month = _MONTH_NUM[m.group(2).lower()]
+            year = int(m.group(3))
+        except (KeyError, ValueError):
+            continue
+        if year < today_year or year > today_year + 2:
+            continue
+        try:
+            d = datetime(year, month, day).date()
+        except ValueError:
+            continue
+        # ECB rate decisions are always Thursdays — this is the cleanest
+        # day-of-week filter to separate monetary-policy meetings from other
+        # ECB events listed on the page (speeches, conferences, etc.).
+        if d.weekday() != 3:  # 3 = Thursday
+            continue
+        out.append({
+            "date": d.strftime("%Y-%m-%d"),
+            "event": "ECB Rate Decision",
+            "category": "Central Banks",
+        })
+    seen = set()
+    deduped = []
+    for ev in out:
+        if ev["date"] not in seen:
+            seen.add(ev["date"])
+            deduped.append(ev)
+    return deduped
+
+
+def _scrape_cpi_dates(html: str | None = None) -> list[dict]:
+    """Parse the BLS CPI release schedule page.
+
+    Page layout: a table where each row carries a release date in the form
+    'July 15, 2026' (long form) for upcoming releases.
+    """
+    if html is None:
+        html = _http_get(_CPI_URL)
+    out: list[dict] = []
+    today_year = datetime.now().year
+    for m in re.finditer(
+        r"\b("
+        r"January|February|March|April|May|June|"
+        r"July|August|September|October|November|December"
+        r")\s+(\d{1,2}),?\s+(\d{4})\b",
+        html,
+    ):
+        try:
+            month = _MONTH_NUM[m.group(1).lower()]
+            day = int(m.group(2))
+            year = int(m.group(3))
+        except (KeyError, ValueError):
+            continue
+        if year < today_year or year > today_year + 1:
+            continue
+        try:
+            d = datetime(year, month, day).date()
+        except ValueError:
+            continue
+        out.append({
+            "date": d.strftime("%Y-%m-%d"),
+            "event": "US CPI Release",
+            "category": "US Data",
+        })
+    seen = set()
+    deduped = []
+    for ev in out:
+        if ev["date"] not in seen:
+            seen.add(ev["date"])
+            deduped.append(ev)
+    return deduped
+
+
+def _compute_nfp_dates(months_ahead: int = 8) -> list[dict]:
+    """NFP releases on the first Friday of each month — deterministic.
+
+    Returns events for the next `months_ahead` first-Fridays starting from
+    the current month.
+    """
+    out = []
+    today = datetime.now().date()
+    year, month = today.year, today.month
+    for _ in range(months_ahead + 1):
+        for day in range(1, 8):
+            try:
+                cand = datetime(year, month, day).date()
+            except ValueError:
+                break
+            if cand.weekday() == 4:  # Friday
+                out.append({
+                    "date": cand.strftime("%Y-%m-%d"),
+                    "event": "US Jobs Report (NFP)",
+                    "category": "US Data",
+                })
+                break
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return out
+
+
+@st.cache_data(ttl=86400)  # 24 hours
+def fetch_macro_events_live() -> list[dict]:
+    """Combine live-source events into a single sorted, deduped list. Falls
+    back to MACRO_EVENTS_FALLBACK if every live source fails. Drops events
+    whose date has already passed. Caches for 24h.
+
+    Diagnostic — which sources contributed — is stashed in session_state
+    under '_macro_events_status' so the sidebar can show it.
+    """
+    events: list[dict] = []
+    sources_used: list[str] = []
+    sources_failed: list[str] = []
+
+    # 1. NFP — deterministic, always works.
+    try:
+        nfp = _compute_nfp_dates(months_ahead=8)
+        events.extend(nfp)
+        sources_used.append(f"NFP (deterministic, {len(nfp)} dates)")
+    except Exception as e:
+        sources_failed.append(f"NFP calc: {type(e).__name__}: {e}")
+
+    # 2. Fed FOMC — scrape.
+    try:
+        fomc = _scrape_fomc_dates()
+        if fomc:
+            events.extend(fomc)
+            sources_used.append(f"Fed.gov ({len(fomc)} FOMC dates)")
+        else:
+            sources_failed.append("Fed.gov: parsed 0 dates")
+    except Exception as e:
+        sources_failed.append(f"Fed.gov: {type(e).__name__}: {str(e)[:80]}")
+
+    # 3. ECB — scrape.
+    try:
+        ecb = _scrape_ecb_dates()
+        if ecb:
+            events.extend(ecb)
+            sources_used.append(f"ECB.europa.eu ({len(ecb)} dates)")
+        else:
+            sources_failed.append("ECB: parsed 0 dates")
+    except Exception as e:
+        sources_failed.append(f"ECB: {type(e).__name__}: {str(e)[:80]}")
+
+    # 4. BLS CPI — scrape.
+    try:
+        cpi = _scrape_cpi_dates()
+        if cpi:
+            events.extend(cpi)
+            sources_used.append(f"BLS.gov ({len(cpi)} CPI dates)")
+        else:
+            sources_failed.append("BLS CPI: parsed 0 dates")
+    except Exception as e:
+        sources_failed.append(f"BLS CPI: {type(e).__name__}: {str(e)[:80]}")
+
+    # If we got nothing live, use the corrected hardcoded fallback.
+    if not events:
+        events = list(MACRO_EVENTS_FALLBACK)
+        sources_used.append("hardcoded fallback (all live sources failed)")
+    else:
+        # Top up missing event types from fallback so we never have a gap
+        # (e.g. live FOMC scrape works but ECB scrape fails — fill ECB
+        # from the fallback list).
+        live_types = {ev["event"] for ev in events}
+        for fb in MACRO_EVENTS_FALLBACK:
+            if fb["event"] not in live_types:
+                events.append(fb)
+                sources_used.append(f"fallback for {fb['event']}")
+                live_types.add(fb["event"])
+
+    # Drop events whose date has already passed.
+    today = datetime.now().date()
+    events = [
+        ev for ev in events
+        if datetime.strptime(ev["date"], "%Y-%m-%d").date() >= today
+    ]
+
+    # Dedupe by (date, event) and sort.
+    seen = set()
+    deduped = []
+    for ev in events:
+        k = (ev["date"], ev["event"])
+        if k not in seen:
+            seen.add(k)
+            deduped.append(ev)
+    deduped.sort(key=lambda e: e["date"])
+
+    # Diagnostic surface.
+    try:
+        import streamlit as _st
+        _st.session_state["_macro_events_status"] = {
+            "sources_used": sources_used,
+            "sources_failed": sources_failed,
+            "count": len(deduped),
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception:
+        pass
+
+    return deduped
 
 # ── News category style map ───────────────────────────────────────────────────
 CATEGORY_STYLE = {
@@ -3591,9 +3959,15 @@ def render_card_strip(snapshot, history, strip, title, caption, strip_name):
 
 
 def render_macro_calendar():
-    """Show the next upcoming macro events from the hardcoded MACRO_EVENTS list."""
+    """Show the next upcoming macro events. Pulls from the live fetcher
+    (Fed/ECB/BLS scrape + deterministic NFP), falling back to the corrected
+    hardcoded list if all live sources fail. The fetcher is cached for 24h."""
     today = pd.Timestamp.today().normalize()
-    upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:7]
+    try:
+        events_source = fetch_macro_events_live()
+    except Exception:
+        events_source = MACRO_EVENTS_FALLBACK
+    upcoming = [e for e in events_source if pd.Timestamp(e["date"]) >= today][:7]
 
     if not upcoming:
         st.caption("No upcoming events in the calendar.")
@@ -3962,11 +4336,17 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     else:
         chart_cell = P("<i>Chart unavailable</i>", sz=6, col=GRY)
 
-    # CotD cell — chart + reason + compact upcoming events below
+    # CotD cell — chart + reason + compact upcoming events below.
+    # Use the live macro-events fetcher (Fed/ECB/BLS scrape + deterministic
+    # NFP) — falls back to the corrected hardcoded list if all sources fail.
     _today_d = datetime.now().date()
     _cutoff_d = _today_d + timedelta(days=31)
+    try:
+        _events_source = fetch_macro_events_live()
+    except Exception:
+        _events_source = MACRO_EVENTS_FALLBACK
     _upcoming = [
-        e for e in MACRO_EVENTS
+        e for e in _events_source
         if _today_d <= datetime.strptime(e["date"], "%Y-%m-%d").date() <= _cutoff_d
     ]
 
@@ -5064,7 +5444,11 @@ else:
     with col_right:
         st.markdown("**📅 Upcoming Events**")
         today = pd.Timestamp.today().normalize()
-        upcoming = [e for e in MACRO_EVENTS if pd.Timestamp(e["date"]) >= today][:6]
+        try:
+            _events_source = fetch_macro_events_live()
+        except Exception:
+            _events_source = MACRO_EVENTS_FALLBACK
+        upcoming = [e for e in _events_source if pd.Timestamp(e["date"]) >= today][:6]
         for ev in upcoming:
             dt = pd.Timestamp(ev["date"])
             days = (dt - today).days

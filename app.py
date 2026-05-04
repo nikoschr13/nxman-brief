@@ -3118,38 +3118,26 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
             if pat.search(head):
                 return label
 
-        # Step 2 — filename fallback. Specific publication names + literal
-        # bank-name matches are honoured immediately (unambiguous). The
-        # ambiguous filename triggers ("daily europe", "universe",
-        # "equity_coverage", "dmo") used to bind to UBS / UBS Universe / OCBC
-        # by themselves — and that's what produced the BBWI/KMX/FLUT
-        # hallucination on 2026-05-04 when a non-UBS doc happened to have
-        # those words in its filename. v4 keeps those triggers but
-        # CONTENT-CONFIRMS them: only attributes to the bank if the bank's
-        # name actually appears anywhere in the source text.
+        # Step 2 — filename fallback (PRE-Unknown-fallback variant, restored
+        # 2026-05-04 as a safe revert because the stricter version was
+        # crashing the app for an unidentified reason). This version still
+        # produces the UBS hallucination if a doc filename matches "daily
+        # europe" / "universe" / "equity_coverage" without UBS letterhead,
+        # but at least the brief actually generates.
         fn = (fname or "").lower()
-        text_low = (source_text or "").lower()
-
-        # Specific BoS publication names (not ambiguous).
         if "morning call" in fn:                        return "BoS"
         if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
         if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
-        # Literal bank-name in filename (unambiguous).
-        if "barclays" in fn:                            return "Barclays"
-        if "ubs"      in fn:                            return "UBS"
-        if "goldman"  in fn:                            return "Goldman"
-        if "jpmorgan" in fn or fn.startswith("jpm"):    return "JPMorgan"
-
-        # Ambiguous filename triggers — only honor if content confirms.
-        if "daily europe" in fn and "ubs" in text_low:
-            return "UBS"
-        if ("equity_coverage" in fn or "universe" in fn) and "ubs" in text_low:
-            return "UBS Universe"
-        if ("dmo" in fn or "ocbc" in fn) and "ocbc" in text_low:
-            return "OCBC"
-
-        # Generic fallback — uses filename prefix as a label. Same behaviour
-        # as the original code; nothing skipped, nothing labelled "Unknown".
+        if "barclays"     in fn:                        return "Barclays"
+        # Single-line content check: only trigger UBS attribution if the doc
+        # text actually mentions UBS. Stops the BBWI/KMX/FLUT hallucination
+        # path where a non-UBS doc with "daily europe" / "universe" in its
+        # filename was getting UBS-attributed bullets manufactured by Gemini.
+        if "daily europe" in fn and "ubs" in (source_text or "").lower(): return "UBS"
+        if ("equity_coverage" in fn or "universe" in fn) and "ubs" in (source_text or "").lower(): return "UBS Universe"
+        if "dmo"          in fn or "ocbc" in fn:        return "OCBC"
+        if "goldman"      in fn:                        return "Goldman"
+        if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
         return fname.split(".")[0][:24]
 
     today_str = datetime.now().strftime("%Y-%m-%d")

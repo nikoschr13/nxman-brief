@@ -1179,9 +1179,15 @@ def parse_equity_universe(pdf_bytes: bytes) -> dict:
                                 "uncertainty": _f(18),
                             })
     except Exception as e:
-        return {"error": str(e), "stocks": stocks, "date": date_str, "text": p0}
+        # NB: store page-1 text in a SEPARATE field, not "text" — the
+        # downstream LLM-summary path uses an empty "text" field as the
+        # signal to rebuild source_text from the structured `stocks` list.
+        # Overloading "text" with the page-1 intro would silently bypass
+        # that reconstruction and feed the LLM the disclaimer page instead
+        # of the actual stock recommendations.
+        return {"error": str(e), "stocks": stocks, "date": date_str, "first_page_text": p0}
 
-    return {"stocks": stocks, "date": date_str, "error": None, "text": p0}
+    return {"stocks": stocks, "date": date_str, "error": None, "first_page_text": p0}
 
 
 def parse_generic_research(pdf_bytes: bytes, filename: str) -> dict:
@@ -3245,9 +3251,14 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         if rdoc.get("error"):
             continue
         source_text = (rdoc.get("text") or "").strip()
-        # Pass source_text so _infer_bank can use the actual letterhead
+        # For bank-attribution purposes ONLY, also consider any page-1 text
+        # the per-doc-type parser stashed in `first_page_text` (e.g.
+        # parse_equity_universe does this — its `text` field stays empty
+        # to preserve the LLM's stocks-reconstruction path below).
+        bank_text = source_text or (rdoc.get("first_page_text") or "").strip()
+        # Pass bank_text so _infer_bank can use the actual letterhead
         # rather than relying solely on filename triggers.
-        bank = _infer_bank(fname, source_text)
+        bank = _infer_bank(fname, bank_text)
 
         # Morning_call docs may have empty `text` but rich structured fields —
         # reconstruct text from those so Gemini has something to summarise.

@@ -3129,10 +3129,15 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
         if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
         if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
         if "barclays"     in fn:                        return "Barclays"
-        # Single-line content check: only trigger UBS attribution if the doc
-        # text actually mentions UBS. Stops the BBWI/KMX/FLUT hallucination
-        # path where a non-UBS doc with "daily europe" / "universe" in its
-        # filename was getting UBS-attributed bullets manufactured by Gemini.
+        # Single-line content checks: only trigger an attribution if the doc
+        # text actually mentions the bank. Stops the BBWI/KMX/FLUT
+        # hallucination path where a non-UBS doc with "daily europe" /
+        # "universe" / "equity_coverage" in its filename was getting
+        # UBS-attributed bullets manufactured by Gemini.
+        # BoS Equity Coverage check runs FIRST so a real BoS equity-coverage
+        # doc (which is what produced the 192%/133% upsides on 2026-05-04)
+        # gets correctly labelled BoS, not falsely UBS or generic-filename.
+        if "equity_coverage" in fn and "bank of singapore" in (source_text or "").lower(): return "BoS Equity Coverage"
         if "daily europe" in fn and "ubs" in (source_text or "").lower(): return "UBS"
         if ("equity_coverage" in fn or "universe" in fn) and "ubs" in (source_text or "").lower(): return "UBS Universe"
         if "dmo"          in fn or "ocbc" in fn:        return "OCBC"

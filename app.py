@@ -40,6 +40,11 @@ try:
 except Exception:
     _drive_pdf_loader_meta = None
 
+try:
+    from brief_drive_reader import load_3way_log_cached as _drive_3way_loader
+except Exception:
+    _drive_3way_loader = None
+
 # Drive upload is intentionally disabled: Google service accounts cannot
 # write to personal My Drive folders (Service Accounts do not have storage
 # quota). PDFs are added to Drive manually by the user; the Brief just reads
@@ -5004,6 +5009,80 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                         sz=4.9, col=TXT, lead=6.3,
                     ))
                 story.append(Spacer(1, 0.05*cm))
+
+    # ── 5b. TODAY'S 3-WAY CONFLUENCE (SNIPER + Mosh + Research) ─────────────
+    # Compact summary of today's 3-way agreement, sourced from
+    # sniper_3way_log.csv which the SNIPER autopilot (post-US-open run) syncs
+    # to Drive. Two buckets surfaced:
+    #   ALL_AGREE     — top conviction, all three sources aligned
+    #   MOSH_OUTLIER  — fidelity flag, SNIPER + research align, Mosh diverges
+    # Soft-fails: if the file isn't on Drive yet (first-time setup needs the
+    # user to drag it in once) or if today's autopilot hasn't run yet, the
+    # whole block is silently skipped — no broken PDF render.
+    try:
+        if _drive_3way_loader is not None:
+            _3way_df = _drive_3way_loader()
+        else:
+            _3way_df = None
+
+        if _3way_df is not None and not _3way_df.empty:
+            try:
+                _today_iso = now_zurich().date().isoformat()
+            except Exception:
+                _today_iso = datetime.now().date().isoformat()
+
+            _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
+            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"].head(15)
+            _mosh_outlier = _td[_td["agreement_label"] == "MOSH_OUTLIER"].head(8)
+
+            if (not _all_agree.empty) or (not _mosh_outlier.empty):
+                story += [
+                    Spacer(1, 0.06 * cm),
+                    HRFlowable(width=PW * cm, thickness=0.5, color=RUL),
+                    Spacer(1, 0.03 * cm),
+                    P("3-WAY CONFLUENCE  —  SNIPER + MOSH + RESEARCH",
+                      fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
+                    Spacer(1, 0.04 * cm),
+                ]
+
+                if not _all_agree.empty:
+                    story.append(P(
+                        f'<font color="{GRN.hexval()}"><b>'
+                        f'ALL AGREE ({len(_all_agree)})</b></font>  —  '
+                        f'top conviction; SNIPER, Mosh, and broker research aligned',
+                        sz=5.2, col=NAV, lead=6.5,
+                    ))
+                    for _, _r in _all_agree.iterrows():
+                        story.append(P(
+                            f"  • <b>{_xs(str(_r.get('ticker','')))}</b>  —  "
+                            f"SNIPER {_xs(str(_r.get('our_signal','')))}, "
+                            f"Mosh {_xs(str(_r.get('mosh_signal','')))}, "
+                            f"Research {_xs(str(_r.get('research_signal','')))} "
+                            f"({_xs(str(_r.get('research_houses','')))})",
+                            sz=4.9, col=TXT, lead=6.3,
+                        ))
+                    story.append(Spacer(1, 0.05 * cm))
+
+                if not _mosh_outlier.empty:
+                    story.append(P(
+                        f'<font color="{RED.hexval()}"><b>'
+                        f'MOSH OUTLIER ({len(_mosh_outlier)})</b></font>  —  '
+                        f'fidelity flag; SNIPER + research align, Mosh diverges',
+                        sz=5.2, col=NAV, lead=6.5,
+                    ))
+                    for _, _r in _mosh_outlier.iterrows():
+                        story.append(P(
+                            f"  • <b>{_xs(str(_r.get('ticker','')))}</b>  —  "
+                            f"SNIPER {_xs(str(_r.get('our_signal','')))}, "
+                            f"Mosh <b>{_xs(str(_r.get('mosh_signal','')))}</b>, "
+                            f"Research {_xs(str(_r.get('research_signal','')))} "
+                            f"({_xs(str(_r.get('research_houses','')))})",
+                            sz=4.9, col=TXT, lead=6.3,
+                        ))
+                    story.append(Spacer(1, 0.05 * cm))
+    except Exception:
+        # Never let a 3way-log read failure block the rest of the brief.
+        pass
 
     # ── 6. DATA TIMESTAMP + SOURCES ───────────────────────────────────────────
     # Reviewer's must-fix #3: every client-facing brief needs an explicit

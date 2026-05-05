@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 # Canonical research.csv filename in Drive. Kept as a constant so the
 # autopilot can upload by name and Brief can search by the same name.
 RESEARCH_CSV_NAME = "research.csv"
+THREE_WAY_LOG_NAME = "sniper_3way_log.csv"
 
 LOCAL_SA_PATH = Path.home() / ".config" / "sniper" / "service_account.json"
 LOCAL_CFG_PATH = Path.home() / "SNIPER" / "drive_config.json"
@@ -208,6 +209,55 @@ def load_research_df() -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(raw))
     except Exception as e:
         logger.error("Could not parse research.csv: %s", e)
+        return pd.DataFrame()
+
+
+def _find_3way_log_id(drive, folder_id: str) -> str | None:
+    """Mirror _find_research_csv_id but for the SNIPER 3-way log."""
+    try:
+        resp = drive.files().list(
+            q=(
+                f"'{folder_id}' in parents and trashed = false "
+                f"and name = '{THREE_WAY_LOG_NAME}'"
+            ),
+            fields="files(id,name,modifiedTime)",
+            pageSize=5,
+        ).execute()
+    except Exception as e:
+        logger.error("Drive list failed for %s: %s", THREE_WAY_LOG_NAME, e)
+        return None
+    files = resp.get("files", [])
+    if not files:
+        logger.info("No %s found in SNIPER Drive folder %s", THREE_WAY_LOG_NAME, folder_id)
+        return None
+    return files[0]["id"]
+
+
+def load_3way_log() -> pd.DataFrame:
+    """Return the SNIPER sniper_3way_log.csv as a DataFrame.
+
+    Empty frame on any misconfiguration / failure (file missing, no
+    creds, network error). Brief UI code is expected to handle the
+    empty-frame case gracefully — the 3-way confluence section simply
+    won't render when there's nothing to show.
+    """
+    drive = _drive_client()
+    folder_id = _load_sniper_folder_id()
+    if drive is None or not folder_id:
+        return pd.DataFrame()
+
+    file_id = _find_3way_log_id(drive, folder_id)
+    if not file_id:
+        return pd.DataFrame()
+
+    raw = _download_bytes(drive, file_id)
+    if not raw:
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        logger.error("Could not parse %s: %s", THREE_WAY_LOG_NAME, e)
         return pd.DataFrame()
 
 
@@ -456,6 +506,10 @@ try:  # pragma: no cover — optional
         return load_research_df()
 
     @_st.cache_data(ttl=300)
+    def load_3way_log_cached() -> pd.DataFrame:
+        return load_3way_log()
+
+    @_st.cache_data(ttl=300)
     def load_research_pdfs_dict_cached(
         include_inbox: bool = True,
         include_processed: bool = False,
@@ -482,6 +536,9 @@ try:  # pragma: no cover — optional
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
+
+    def load_3way_log_cached() -> pd.DataFrame:  # type: ignore[no-redef]
+        return load_3way_log()
 
     def load_research_pdfs_dict_cached(  # type: ignore[no-redef]
         include_inbox: bool = True,

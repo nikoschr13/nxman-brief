@@ -212,8 +212,14 @@ def load_research_df() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _find_3way_log_id(drive, folder_id: str) -> str | None:
-    """Mirror _find_research_csv_id but for the SNIPER 3-way log."""
+def _find_3way_log_meta(drive, folder_id: str) -> tuple[str | None, str]:
+    """Return (file_id, modified_time_iso) for the 3-way log on Drive.
+
+    The modifiedTime tells the Brief when the file was last synced — i.e.
+    when the SNIPER autopilot last ran and captured prices from yfinance.
+    Surfacing that in the UI lets users tell at a glance whether they're
+    looking at fresh post-open data or yesterday's close.
+    """
     try:
         resp = drive.files().list(
             q=(
@@ -225,40 +231,48 @@ def _find_3way_log_id(drive, folder_id: str) -> str | None:
         ).execute()
     except Exception as e:
         logger.error("Drive list failed for %s: %s", THREE_WAY_LOG_NAME, e)
-        return None
+        return None, ""
     files = resp.get("files", [])
     if not files:
         logger.info("No %s found in SNIPER Drive folder %s", THREE_WAY_LOG_NAME, folder_id)
-        return None
-    return files[0]["id"]
+        return None, ""
+    return files[0]["id"], files[0].get("modifiedTime", "") or ""
 
 
-def load_3way_log() -> pd.DataFrame:
-    """Return the SNIPER sniper_3way_log.csv as a DataFrame.
+# Backward-compat shim — older callers expect just a file ID.
+def _find_3way_log_id(drive, folder_id: str) -> str | None:
+    file_id, _ = _find_3way_log_meta(drive, folder_id)
+    return file_id
 
-    Empty frame on any misconfiguration / failure (file missing, no
-    creds, network error). Brief UI code is expected to handle the
-    empty-frame case gracefully — the 3-way confluence section simply
-    won't render when there's nothing to show.
+
+def load_3way_log() -> tuple[pd.DataFrame, str]:
+    """Return (DataFrame, modifiedTime ISO string) for the 3-way log.
+
+    modifiedTime is Drive's record of when the file was last touched —
+    i.e. when the SNIPER autopilot last ran. Empty string when the file
+    isn't reachable. Brief UI shows this so the user can tell whether
+    prices are fresh or stale.
+
+    Empty DataFrame on any misconfiguration / failure.
     """
     drive = _drive_client()
     folder_id = _load_sniper_folder_id()
     if drive is None or not folder_id:
-        return pd.DataFrame()
+        return pd.DataFrame(), ""
 
-    file_id = _find_3way_log_id(drive, folder_id)
+    file_id, mtime = _find_3way_log_meta(drive, folder_id)
     if not file_id:
-        return pd.DataFrame()
+        return pd.DataFrame(), ""
 
     raw = _download_bytes(drive, file_id)
     if not raw:
-        return pd.DataFrame()
+        return pd.DataFrame(), mtime
 
     try:
-        return pd.read_csv(io.BytesIO(raw))
+        return pd.read_csv(io.BytesIO(raw)), mtime
     except Exception as e:
         logger.error("Could not parse %s: %s", THREE_WAY_LOG_NAME, e)
-        return pd.DataFrame()
+        return pd.DataFrame(), mtime
 
 
 # --------------------------------------------------------------------------- PDF loader
@@ -506,7 +520,7 @@ try:  # pragma: no cover — optional
         return load_research_df()
 
     @_st.cache_data(ttl=300)
-    def load_3way_log_cached() -> pd.DataFrame:
+    def load_3way_log_cached() -> tuple[pd.DataFrame, str]:
         return load_3way_log()
 
     @_st.cache_data(ttl=300)
@@ -537,7 +551,7 @@ except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
 
-    def load_3way_log_cached() -> pd.DataFrame:  # type: ignore[no-redef]
+    def load_3way_log_cached() -> tuple[pd.DataFrame, str]:  # type: ignore[no-redef]
         return load_3way_log()
 
     def load_research_pdfs_dict_cached(  # type: ignore[no-redef]

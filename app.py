@@ -5775,7 +5775,7 @@ else:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
     # ── 6b. Today's 3-way confluence (on-screen only) ─────────────────────────
-    # SNIPER + Mosh + Research ALL_AGREE picks for today, sourced from
+    # SNIPER + Mosh + Research alignment for today, sourced from
     # sniper_3way_log.csv which the autopilot syncs to Drive after each
     # post-US-open run. Streamlit-page only — deliberately NOT in the PDF
     # (per user preference 2026-05-05).
@@ -5792,11 +5792,13 @@ else:
     try:
         if _drive_3way_loader is not None:
             _result = _drive_3way_loader()
-            # load_3way_log_cached returns (df, modified_time_iso)
+            # load_3way_log_cached returns (df, modified_time_iso) after
+            # the 2026-05-05 update; older deployed versions return just
+            # a DataFrame, so handle both shapes.
             if isinstance(_result, tuple) and len(_result) == 2:
                 _3way_df, _3way_mtime = _result
             else:
-                _3way_df = _result  # legacy single-return shape
+                _3way_df = _result
     except Exception as _e:
         st.caption(f"3-way log read error: {_e}")
 
@@ -5807,9 +5809,8 @@ else:
             "folder and this section will populate."
         )
     else:
-        # Render the prices-captured-at timestamp prominently. Drive returns
-        # modifiedTime in UTC ISO format (e.g. "2026-05-05T13:27:00.000Z");
-        # convert to Europe/Zurich for the user's reading frame.
+        # Prices-captured-at — make it prominent. Drive returns modifiedTime
+        # in UTC ISO ("2026-05-05T13:27:00.000Z"); convert to Europe/Zurich.
         _captured_label = ""
         if _3way_mtime:
             try:
@@ -5820,10 +5821,18 @@ else:
                 _captured_label = _3way_mtime
 
         if _captured_label:
-            st.caption(
-                f"📅 **Prices captured at:** {_captured_label}  "
-                f"·  Live yfinance quotes at the moment the SNIPER autopilot "
-                f"last ran. Research views are from the broker PDFs you uploaded."
+            # st.info renders as a clearly-bordered blue panel — much more
+            # visible than a small grey caption.
+            st.info(
+                f"📅 **Prices captured at:** {_captured_label}  \n"
+                f"Live yfinance quotes at the moment the SNIPER autopilot last "
+                f"ran. Research views are from the broker PDFs you uploaded."
+            )
+        else:
+            st.warning(
+                "Capture timestamp unavailable — the deployed brief_drive_reader.py "
+                "may be an older version. Re-upload the latest brief_drive_reader.py "
+                "to surface the timestamp."
             )
 
         try:
@@ -5839,15 +5848,22 @@ else:
             _latest = _all_dates[-1] if _all_dates else ""
             if _latest:
                 _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
-                st.caption(
-                    f"No rows for {_today_iso}; showing most recent date in file: {_latest}"
+                st.warning(
+                    f"No rows for {_today_iso}; showing most recent date in file: **{_latest}**"
                 )
 
         if _td.empty:
             st.info("No 3-way rows available.")
         else:
-            _cols = ["ticker", "our_signal", "mosh_signal", "research_signal", "research_houses"]
-            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_cols].reset_index(drop=True)
+            # Include live_price in the dataframes so the user can see the
+            # actual price each signal was computed from.
+            _cols = [
+                "ticker", "our_signal", "mosh_signal",
+                "research_signal", "research_houses", "live_price",
+            ]
+            _have_cols = [c for c in _cols if c in _td.columns]
+
+            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_have_cols].reset_index(drop=True)
 
             st.metric("✅ All Agree", len(_all_agree))
 
@@ -5861,6 +5877,36 @@ else:
                         "mosh_signal":     "Mosh",
                         "research_signal": "Research",
                         "research_houses": "Houses",
+                        "live_price":      "Price",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # Full table for comparison. Restored 2026-05-05 — the user wants
+            # to be able to see all rows side-by-side, not just All Agree.
+            with st.expander(
+                f"📊 Show all 3-way rows for the day ({len(_td)} tickers)",
+                expanded=False,
+            ):
+                _display_cols = [c for c in [
+                    "ticker", "agreement_label", "our_signal",
+                    "mosh_signal", "research_signal",
+                    "research_houses", "research_note", "live_price",
+                ] if c in _td.columns]
+                _all_today = _td[_display_cols].sort_values(
+                    by=["agreement_label", "ticker"]
+                ).reset_index(drop=True)
+                st.dataframe(
+                    _all_today.rename(columns={
+                        "ticker":           "Ticker",
+                        "agreement_label":  "Label",
+                        "our_signal":       "SNIPER",
+                        "mosh_signal":      "Mosh",
+                        "research_signal":  "Research",
+                        "research_houses":  "Houses",
+                        "research_note":    "Research note",
+                        "live_price":       "Price",
                     }),
                     use_container_width=True,
                     hide_index=True,

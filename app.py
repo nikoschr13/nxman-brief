@@ -5507,8 +5507,44 @@ with st.sidebar:
                 st.caption(f"🧪 Research themes: {kept}/{seen} bullets passed grounding check")
                 for drop in (_rt_dbg.get("drops") or [])[:5]:
                     st.caption(f"   ✗ {drop[:90]}")
-            elif _drive_pdf_loader is not None:
-                st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
+        elif _drive_pdf_loader is not None:
+            st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
+
+        # Staleness-filter visibility. Click to see exactly which PDFs were
+        # filtered out by BRIEF_RESEARCH_STALE_DAYS, with the date that
+        # triggered the skip (Drive modifiedTime or filename date). Helps
+        # diagnose "why isn't this doc loaded?" without spelunking logs.
+        _stale_skipped = st.session_state.get("_drive_research_skipped_stale") or []
+        _kept_docs = list(st.session_state.get("research_docs", {}).keys())
+        _stale_days_env = os.environ.get("BRIEF_RESEARCH_STALE_DAYS", "1")
+        if _stale_skipped or _kept_docs or drive_count == 0:
+            with st.expander(
+                f"🧪 Drive staleness filter "
+                f"(window={_stale_days_env}d · kept={len(_kept_docs)} · "
+                f"skipped={len(_stale_skipped)})",
+                expanded=False,
+            ):
+                st.caption(
+                    f"**Window:** docs older than `{_stale_days_env}` day(s) are "
+                    f"excluded. Override via Streamlit secret "
+                    f"`BRIEF_RESEARCH_STALE_DAYS` (e.g. `\"7\"` for a week, "
+                    f"`\"0\"` to disable)."
+                )
+                if _kept_docs:
+                    st.markdown("**✅ Loaded PDFs**")
+                    for fname in _kept_docs[:30]:
+                        st.caption(f"  • {fname}")
+                if _stale_skipped:
+                    st.markdown("**⏳ Skipped (older than window)**")
+                    for entry in _stale_skipped[:30]:
+                        st.caption(f"  • {entry}")
+                if not _kept_docs and not _stale_skipped:
+                    st.caption(
+                        "No PDFs returned from the Drive query at all. "
+                        "Check the SA has access to `Research_Inbox/` and "
+                        "the folder_ids in `drive_config.json` are correct."
+                    )
+
         if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
             autoload_research_from_drive(force_refresh=True)
             st.rerun()

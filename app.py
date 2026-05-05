@@ -5775,21 +5775,29 @@ else:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
     # ── 6b. Today's 3-way confluence (on-screen only) ─────────────────────────
-    # SNIPER + Mosh + Research alignment for today, sourced from
+    # SNIPER + Mosh + Research ALL_AGREE picks for today, sourced from
     # sniper_3way_log.csv which the autopilot syncs to Drive after each
     # post-US-open run. Streamlit-page only — deliberately NOT in the PDF
     # (per user preference 2026-05-05).
     st.markdown("---")
-    st.subheader("🎯 Today's 3-Way Confluence")
+    st.subheader("🎯 Today's 3-Way Confluence — All Agree")
     st.caption(
-        "SNIPER algo (10-indicator) vs Mosh's Platinum signal vs broker research. "
+        "Tickers where SNIPER (10-indicator), Mosh (Platinum sheet), and "
+        "broker research all point the same way. "
         "Sourced from `sniper_3way_log.csv` synced to Drive by the autopilot."
     )
 
+    _3way_df = None
+    _3way_mtime = ""
     try:
-        _3way_df = (_drive_3way_loader() if _drive_3way_loader is not None else None)
+        if _drive_3way_loader is not None:
+            _result = _drive_3way_loader()
+            # load_3way_log_cached returns (df, modified_time_iso)
+            if isinstance(_result, tuple) and len(_result) == 2:
+                _3way_df, _3way_mtime = _result
+            else:
+                _3way_df = _result  # legacy single-return shape
     except Exception as _e:
-        _3way_df = None
         st.caption(f"3-way log read error: {_e}")
 
     if _3way_df is None or _3way_df.empty:
@@ -5799,6 +5807,25 @@ else:
             "folder and this section will populate."
         )
     else:
+        # Render the prices-captured-at timestamp prominently. Drive returns
+        # modifiedTime in UTC ISO format (e.g. "2026-05-05T13:27:00.000Z");
+        # convert to Europe/Zurich for the user's reading frame.
+        _captured_label = ""
+        if _3way_mtime:
+            try:
+                _mt = datetime.fromisoformat(_3way_mtime.replace("Z", "+00:00"))
+                _mt_zh = _mt.astimezone(ZURICH_TZ)
+                _captured_label = _mt_zh.strftime("%a %d %b %Y, %H:%M %Z")
+            except Exception:
+                _captured_label = _3way_mtime
+
+        if _captured_label:
+            st.caption(
+                f"📅 **Prices captured at:** {_captured_label}  "
+                f"·  Live yfinance quotes at the moment the SNIPER autopilot "
+                f"last ran. Research views are from the broker PDFs you uploaded."
+            )
+
         try:
             _today_iso = now_zurich().date().isoformat()
         except Exception:
@@ -5812,30 +5839,24 @@ else:
             _latest = _all_dates[-1] if _all_dates else ""
             if _latest:
                 _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
-                st.caption(f"No rows for {_today_iso}; showing most recent date in file: {_latest}")
+                st.caption(
+                    f"No rows for {_today_iso}; showing most recent date in file: {_latest}"
+                )
 
         if _td.empty:
             st.info("No 3-way rows available.")
         else:
-            from collections import Counter as _Counter
-            _counts = _Counter(_td["agreement_label"])
-
-            _c1, _c2, _c3, _c4, _c5 = st.columns(5)
-            _c1.metric("✅ All Agree",       _counts.get("ALL_AGREE", 0))
-            _c2.metric("⚠️ Mosh Outlier",    _counts.get("MOSH_OUTLIER", 0),
-                       help="SNIPER + research align, Mosh diverges. Fidelity flag.")
-            _c3.metric("Sniper Outlier",     _counts.get("SNIPER_OUTLIER", 0),
-                       help="Mosh + research align, your SNIPER differs.")
-            _c4.metric("Research Outlier",   _counts.get("RESEARCH_OUTLIER", 0))
-            _c5.metric("No Research",        _counts.get("NO_RESEARCH", 0))
-
             _cols = ["ticker", "our_signal", "mosh_signal", "research_signal", "research_houses"]
-
             _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_cols].reset_index(drop=True)
-            if not _all_agree.empty:
-                st.markdown("##### ✅ All Agree — top conviction")
+
+            st.metric("✅ All Agree", len(_all_agree))
+
+            if _all_agree.empty:
+                st.info("No tickers where all three sources agree today.")
+            else:
                 st.dataframe(
                     _all_agree.rename(columns={
+                        "ticker":          "Ticker",
                         "our_signal":      "SNIPER",
                         "mosh_signal":     "Mosh",
                         "research_signal": "Research",
@@ -5844,29 +5865,6 @@ else:
                     use_container_width=True,
                     hide_index=True,
                 )
-
-            _mosh = _td[_td["agreement_label"] == "MOSH_OUTLIER"][_cols].reset_index(drop=True)
-            if not _mosh.empty:
-                st.markdown("##### ⚠️ Mosh Outlier — fidelity flag")
-                st.caption("SNIPER and broker research align here, but Mosh disagrees.")
-                st.dataframe(
-                    _mosh.rename(columns={
-                        "our_signal":      "SNIPER",
-                        "mosh_signal":     "Mosh",
-                        "research_signal": "Research",
-                        "research_houses": "Houses",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            with st.expander("Show all 3-way rows for today"):
-                _display_cols = ["ticker", "agreement_label", "our_signal",
-                                 "mosh_signal", "research_signal", "research_houses"]
-                _all_today = _td[_display_cols].sort_values(
-                    by=["agreement_label", "ticker"]
-                ).reset_index(drop=True)
-                st.dataframe(_all_today, use_container_width=True, hide_index=True)
 
     # ── 7. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")

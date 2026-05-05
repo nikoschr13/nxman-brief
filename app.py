@@ -5010,80 +5010,6 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
                     ))
                 story.append(Spacer(1, 0.05*cm))
 
-    # ── 5b. TODAY'S 3-WAY CONFLUENCE (SNIPER + Mosh + Research) ─────────────
-    # Compact summary of today's 3-way agreement, sourced from
-    # sniper_3way_log.csv which the SNIPER autopilot (post-US-open run) syncs
-    # to Drive. Two buckets surfaced:
-    #   ALL_AGREE     — top conviction, all three sources aligned
-    #   MOSH_OUTLIER  — fidelity flag, SNIPER + research align, Mosh diverges
-    # Soft-fails: if the file isn't on Drive yet (first-time setup needs the
-    # user to drag it in once) or if today's autopilot hasn't run yet, the
-    # whole block is silently skipped — no broken PDF render.
-    try:
-        if _drive_3way_loader is not None:
-            _3way_df = _drive_3way_loader()
-        else:
-            _3way_df = None
-
-        if _3way_df is not None and not _3way_df.empty:
-            try:
-                _today_iso = now_zurich().date().isoformat()
-            except Exception:
-                _today_iso = datetime.now().date().isoformat()
-
-            _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
-            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"].head(15)
-            _mosh_outlier = _td[_td["agreement_label"] == "MOSH_OUTLIER"].head(8)
-
-            if (not _all_agree.empty) or (not _mosh_outlier.empty):
-                story += [
-                    Spacer(1, 0.06 * cm),
-                    HRFlowable(width=PW * cm, thickness=0.5, color=RUL),
-                    Spacer(1, 0.03 * cm),
-                    P("3-WAY CONFLUENCE  —  SNIPER + MOSH + RESEARCH",
-                      fn="Helvetica-Bold", sz=5.8, col=NAV, lead=7),
-                    Spacer(1, 0.04 * cm),
-                ]
-
-                if not _all_agree.empty:
-                    story.append(P(
-                        f'<font color="{GRN.hexval()}"><b>'
-                        f'ALL AGREE ({len(_all_agree)})</b></font>  —  '
-                        f'top conviction; SNIPER, Mosh, and broker research aligned',
-                        sz=5.2, col=NAV, lead=6.5,
-                    ))
-                    for _, _r in _all_agree.iterrows():
-                        story.append(P(
-                            f"  • <b>{_xs(str(_r.get('ticker','')))}</b>  —  "
-                            f"SNIPER {_xs(str(_r.get('our_signal','')))}, "
-                            f"Mosh {_xs(str(_r.get('mosh_signal','')))}, "
-                            f"Research {_xs(str(_r.get('research_signal','')))} "
-                            f"({_xs(str(_r.get('research_houses','')))})",
-                            sz=4.9, col=TXT, lead=6.3,
-                        ))
-                    story.append(Spacer(1, 0.05 * cm))
-
-                if not _mosh_outlier.empty:
-                    story.append(P(
-                        f'<font color="{RED.hexval()}"><b>'
-                        f'MOSH OUTLIER ({len(_mosh_outlier)})</b></font>  —  '
-                        f'fidelity flag; SNIPER + research align, Mosh diverges',
-                        sz=5.2, col=NAV, lead=6.5,
-                    ))
-                    for _, _r in _mosh_outlier.iterrows():
-                        story.append(P(
-                            f"  • <b>{_xs(str(_r.get('ticker','')))}</b>  —  "
-                            f"SNIPER {_xs(str(_r.get('our_signal','')))}, "
-                            f"Mosh <b>{_xs(str(_r.get('mosh_signal','')))}</b>, "
-                            f"Research {_xs(str(_r.get('research_signal','')))} "
-                            f"({_xs(str(_r.get('research_houses','')))})",
-                            sz=4.9, col=TXT, lead=6.3,
-                        ))
-                    story.append(Spacer(1, 0.05 * cm))
-    except Exception:
-        # Never let a 3way-log read failure block the rest of the brief.
-        pass
-
     # ── 6. DATA TIMESTAMP + SOURCES ───────────────────────────────────────────
     # Reviewer's must-fix #3: every client-facing brief needs an explicit
     # "as-of" timestamp and a sources note, otherwise stale or partial data
@@ -5847,6 +5773,100 @@ else:
                 st.info("Generate the brief first.")
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
+
+    # ── 6b. Today's 3-way confluence (on-screen only) ─────────────────────────
+    # SNIPER + Mosh + Research alignment for today, sourced from
+    # sniper_3way_log.csv which the autopilot syncs to Drive after each
+    # post-US-open run. Streamlit-page only — deliberately NOT in the PDF
+    # (per user preference 2026-05-05).
+    st.markdown("---")
+    st.subheader("🎯 Today's 3-Way Confluence")
+    st.caption(
+        "SNIPER algo (10-indicator) vs Mosh's Platinum signal vs broker research. "
+        "Sourced from `sniper_3way_log.csv` synced to Drive by the autopilot."
+    )
+
+    try:
+        _3way_df = (_drive_3way_loader() if _drive_3way_loader is not None else None)
+    except Exception as _e:
+        _3way_df = None
+        st.caption(f"3-way log read error: {_e}")
+
+    if _3way_df is None or _3way_df.empty:
+        st.info(
+            "3-way log not yet on Drive. After the next post-US-open autopilot "
+            "run, the file `sniper_3way_log.csv` will be in the SNIPER Drive "
+            "folder and this section will populate."
+        )
+    else:
+        try:
+            _today_iso = now_zurich().date().isoformat()
+        except Exception:
+            _today_iso = datetime.now().date().isoformat()
+
+        _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
+
+        if _td.empty:
+            # Fall back to the most recent date in the file.
+            _all_dates = sorted(set(_3way_df["date"].astype(str).str[:10]))
+            _latest = _all_dates[-1] if _all_dates else ""
+            if _latest:
+                _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
+                st.caption(f"No rows for {_today_iso}; showing most recent date in file: {_latest}")
+
+        if _td.empty:
+            st.info("No 3-way rows available.")
+        else:
+            from collections import Counter as _Counter
+            _counts = _Counter(_td["agreement_label"])
+
+            _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+            _c1.metric("✅ All Agree",       _counts.get("ALL_AGREE", 0))
+            _c2.metric("⚠️ Mosh Outlier",    _counts.get("MOSH_OUTLIER", 0),
+                       help="SNIPER + research align, Mosh diverges. Fidelity flag.")
+            _c3.metric("Sniper Outlier",     _counts.get("SNIPER_OUTLIER", 0),
+                       help="Mosh + research align, your SNIPER differs.")
+            _c4.metric("Research Outlier",   _counts.get("RESEARCH_OUTLIER", 0))
+            _c5.metric("No Research",        _counts.get("NO_RESEARCH", 0))
+
+            _cols = ["ticker", "our_signal", "mosh_signal", "research_signal", "research_houses"]
+
+            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_cols].reset_index(drop=True)
+            if not _all_agree.empty:
+                st.markdown("##### ✅ All Agree — top conviction")
+                st.dataframe(
+                    _all_agree.rename(columns={
+                        "our_signal":      "SNIPER",
+                        "mosh_signal":     "Mosh",
+                        "research_signal": "Research",
+                        "research_houses": "Houses",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            _mosh = _td[_td["agreement_label"] == "MOSH_OUTLIER"][_cols].reset_index(drop=True)
+            if not _mosh.empty:
+                st.markdown("##### ⚠️ Mosh Outlier — fidelity flag")
+                st.caption("SNIPER and broker research align here, but Mosh disagrees.")
+                st.dataframe(
+                    _mosh.rename(columns={
+                        "our_signal":      "SNIPER",
+                        "mosh_signal":     "Mosh",
+                        "research_signal": "Research",
+                        "research_houses": "Houses",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            with st.expander("Show all 3-way rows for today"):
+                _display_cols = ["ticker", "agreement_label", "our_signal",
+                                 "mosh_signal", "research_signal", "research_houses"]
+                _all_today = _td[_display_cols].sort_values(
+                    by=["agreement_label", "ticker"]
+                ).reset_index(drop=True)
+                st.dataframe(_all_today, use_container_width=True, hide_index=True)
 
     # ── 7. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")

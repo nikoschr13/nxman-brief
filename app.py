@@ -5810,11 +5810,15 @@ else:
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── 6b. Today's 3-way confluence (on-screen only) ─────────────────────────
+    # ── 6b. Today's 3-way confluence (on-screen only, lazy-loaded) ───────────
     # SNIPER + Mosh + Research alignment for today, sourced from
     # sniper_3way_log.csv which the autopilot syncs to Drive after each
-    # post-US-open run. Streamlit-page only — deliberately NOT in the PDF
-    # (per user preference 2026-05-05).
+    # post-US-open run. Streamlit-page only — deliberately NOT in the PDF.
+    #
+    # LAZY-LOADED: the Drive fetch only fires when the user clicks the
+    # button below. This keeps it off the page-load critical path so it
+    # can't contribute to OOM-killing the worker. State is kept across
+    # reruns via st.session_state.
     st.markdown("---")
     st.subheader("🎯 Today's 3-Way Confluence — All Agree")
     st.caption(
@@ -5823,130 +5827,144 @@ else:
         "Sourced from `sniper_3way_log.csv` synced to Drive by the autopilot."
     )
 
-    _3way_df = None
-    _3way_mtime = ""
-    try:
-        if _drive_3way_loader is not None:
-            _result = _drive_3way_loader()
-            # load_3way_log_cached returns (df, modified_time_iso) after
-            # the 2026-05-05 update; older deployed versions return just
-            # a DataFrame, so handle both shapes.
-            if isinstance(_result, tuple) and len(_result) == 2:
-                _3way_df, _3way_mtime = _result
-            else:
-                _3way_df = _result
-    except Exception as _e:
-        st.caption(f"3-way log read error: {_e}")
+    if "_3way_loaded" not in st.session_state:
+        st.session_state["_3way_loaded"] = False
+        st.session_state["_3way_df"] = None
+        st.session_state["_3way_mtime"] = ""
 
-    if _3way_df is None or _3way_df.empty:
-        st.info(
-            "3-way log not yet on Drive. After the next post-US-open autopilot "
-            "run, the file `sniper_3way_log.csv` will be in the SNIPER Drive "
-            "folder and this section will populate."
-        )
-    else:
-        # Prices-captured-at — make it prominent. Drive returns modifiedTime
-        # in UTC ISO ("2026-05-05T13:27:00.000Z"); convert to Europe/Zurich.
-        _captured_label = ""
-        if _3way_mtime:
+    _btn_cols = st.columns([1, 3])
+    with _btn_cols[0]:
+        if st.button("📥 Load 3-Way Confluence",
+                     use_container_width=True,
+                     key="load_3way_btn"):
             try:
-                _mt = datetime.fromisoformat(_3way_mtime.replace("Z", "+00:00"))
-                _mt_zh = _mt.astimezone(ZURICH_TZ)
-                _captured_label = _mt_zh.strftime("%a %d %b %Y, %H:%M %Z")
-            except Exception:
-                _captured_label = _3way_mtime
+                if _drive_3way_loader is not None:
+                    _r = _drive_3way_loader()
+                    if isinstance(_r, tuple) and len(_r) == 2:
+                        st.session_state["_3way_df"], st.session_state["_3way_mtime"] = _r
+                    else:
+                        st.session_state["_3way_df"] = _r
+                        st.session_state["_3way_mtime"] = ""
+                    st.session_state["_3way_loaded"] = True
+            except Exception as _e:
+                st.error(f"3-way log read error: {_e}")
+                st.session_state["_3way_loaded"] = False
 
-        if _captured_label:
-            # st.info renders as a clearly-bordered blue panel — much more
-            # visible than a small grey caption.
+    if not st.session_state.get("_3way_loaded"):
+        st.info("Click **Load 3-Way Confluence** to fetch today's agreement table from Drive.")
+    else:
+        _3way_df = st.session_state.get("_3way_df")
+        _3way_mtime = st.session_state.get("_3way_mtime", "")
+
+        if _3way_df is None or _3way_df.empty:
             st.info(
-                f"📅 **Prices captured at:** {_captured_label}  \n"
-                f"Live yfinance quotes at the moment the SNIPER autopilot last "
-                f"ran. Research views are from the broker PDFs you uploaded."
+                "3-way log not yet on Drive. After the next post-US-open autopilot "
+                "run, the file `sniper_3way_log.csv` will be in the SNIPER Drive "
+                "folder and this section will populate."
             )
         else:
-            st.warning(
-                "Capture timestamp unavailable — the deployed brief_drive_reader.py "
-                "may be an older version. Re-upload the latest brief_drive_reader.py "
-                "to surface the timestamp."
-            )
+            # Prices-captured-at — make it prominent. Drive returns modifiedTime
+            # in UTC ISO ("2026-05-05T13:27:00.000Z"); convert to Europe/Zurich.
+            _captured_label = ""
+            if _3way_mtime:
+                try:
+                    _mt = datetime.fromisoformat(_3way_mtime.replace("Z", "+00:00"))
+                    _mt_zh = _mt.astimezone(ZURICH_TZ)
+                    _captured_label = _mt_zh.strftime("%a %d %b %Y, %H:%M %Z")
+                except Exception:
+                    _captured_label = _3way_mtime
 
-        try:
-            _today_iso = now_zurich().date().isoformat()
-        except Exception:
-            _today_iso = datetime.now().date().isoformat()
-
-        _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
-
-        if _td.empty:
-            # Fall back to the most recent date in the file.
-            _all_dates = sorted(set(_3way_df["date"].astype(str).str[:10]))
-            _latest = _all_dates[-1] if _all_dates else ""
-            if _latest:
-                _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
-                st.warning(
-                    f"No rows for {_today_iso}; showing most recent date in file: **{_latest}**"
+            if _captured_label:
+                # st.info renders as a clearly-bordered blue panel — much more
+                # visible than a small grey caption.
+                st.info(
+                    f"📅 **Prices captured at:** {_captured_label}  \n"
+                    f"Live yfinance quotes at the moment the SNIPER autopilot last "
+                    f"ran. Research views are from the broker PDFs you uploaded."
                 )
-
-        if _td.empty:
-            st.info("No 3-way rows available.")
-        else:
-            # Include live_price in the dataframes so the user can see the
-            # actual price each signal was computed from.
-            _cols = [
-                "ticker", "our_signal", "mosh_signal",
-                "research_signal", "research_houses", "live_price",
-            ]
-            _have_cols = [c for c in _cols if c in _td.columns]
-
-            _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_have_cols].reset_index(drop=True)
-
-            st.metric("✅ All Agree", len(_all_agree))
-
-            if _all_agree.empty:
-                st.info("No tickers where all three sources agree today.")
             else:
-                st.dataframe(
-                    _all_agree.rename(columns={
-                        "ticker":          "Ticker",
-                        "our_signal":      "SNIPER",
-                        "mosh_signal":     "Mosh",
-                        "research_signal": "Research",
-                        "research_houses": "Houses",
-                        "live_price":      "Price",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
+                st.warning(
+                    "Capture timestamp unavailable — the deployed brief_drive_reader.py "
+                    "may be an older version. Re-upload the latest brief_drive_reader.py "
+                    "to surface the timestamp."
                 )
 
-            # Full table for comparison. Restored 2026-05-05 — the user wants
-            # to be able to see all rows side-by-side, not just All Agree.
-            with st.expander(
-                f"📊 Show all 3-way rows for the day ({len(_td)} tickers)",
-                expanded=False,
-            ):
-                _display_cols = [c for c in [
-                    "ticker", "agreement_label", "our_signal",
-                    "mosh_signal", "research_signal",
-                    "research_houses", "research_note", "live_price",
-                ] if c in _td.columns]
-                _all_today = _td[_display_cols].sort_values(
-                    by=["agreement_label", "ticker"]
-                ).reset_index(drop=True)
-                st.dataframe(
-                    _all_today.rename(columns={
-                        "ticker":           "Ticker",
-                        "agreement_label":  "Label",
-                        "our_signal":       "SNIPER",
-                        "mosh_signal":      "Mosh",
-                        "research_signal":  "Research",
-                        "research_houses":  "Houses",
-                        "research_note":    "Research note",
-                        "live_price":       "Price",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            try:
+                _today_iso = now_zurich().date().isoformat()
+            except Exception:
+                _today_iso = datetime.now().date().isoformat()
+
+            _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
+
+            if _td.empty:
+                # Fall back to the most recent date in the file.
+                _all_dates = sorted(set(_3way_df["date"].astype(str).str[:10]))
+                _latest = _all_dates[-1] if _all_dates else ""
+                if _latest:
+                    _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
+                    st.warning(
+                        f"No rows for {_today_iso}; showing most recent date in file: **{_latest}**"
+                    )
+
+            if _td.empty:
+                st.info("No 3-way rows available.")
+            else:
+                # Include live_price in the dataframes so the user can see the
+                # actual price each signal was computed from.
+                _cols = [
+                    "ticker", "our_signal", "mosh_signal",
+                    "research_signal", "research_houses", "live_price",
+                ]
+                _have_cols = [c for c in _cols if c in _td.columns]
+
+                _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_have_cols].reset_index(drop=True)
+
+                st.metric("✅ All Agree", len(_all_agree))
+
+                if _all_agree.empty:
+                    st.info("No tickers where all three sources agree today.")
+                else:
+                    st.dataframe(
+                        _all_agree.rename(columns={
+                            "ticker":          "Ticker",
+                            "our_signal":      "SNIPER",
+                            "mosh_signal":     "Mosh",
+                            "research_signal": "Research",
+                            "research_houses": "Houses",
+                            "live_price":      "Price",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                # Full table for comparison. Restored 2026-05-05 — the user wants
+                # to be able to see all rows side-by-side, not just All Agree.
+                with st.expander(
+                    f"📊 Show all 3-way rows for the day ({len(_td)} tickers)",
+                    expanded=False,
+                ):
+                    _display_cols = [c for c in [
+                        "ticker", "agreement_label", "our_signal",
+                        "mosh_signal", "research_signal",
+                        "research_houses", "research_note", "live_price",
+                    ] if c in _td.columns]
+                    _all_today = _td[_display_cols].sort_values(
+                        by=["agreement_label", "ticker"]
+                    ).reset_index(drop=True)
+                    st.dataframe(
+                        _all_today.rename(columns={
+                            "ticker":           "Ticker",
+                            "agreement_label":  "Label",
+                            "our_signal":       "SNIPER",
+                            "mosh_signal":      "Mosh",
+                            "research_signal":  "Research",
+                            "research_houses":  "Houses",
+                            "research_note":    "Research note",
+                            "live_price":       "Price",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     # ── 7. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")

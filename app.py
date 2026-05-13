@@ -45,6 +45,11 @@ try:
 except Exception:
     _drive_3way_loader = None
 
+try:
+    from brief_drive_reader import load_eu_agreement_log_cached as _drive_eu_loader
+except Exception:
+    _drive_eu_loader = None
+
 # Drive upload is intentionally disabled: Google service accounts cannot
 # write to personal My Drive folders (Service Accounts do not have storage
 # quota). PDFs are added to Drive manually by the user; the Brief just reads
@@ -5961,6 +5966,149 @@ else:
                             "research_houses":  "Houses",
                             "research_note":    "Research note",
                             "live_price":       "Price",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+    # ── 6c. EU 2-way confluence (on-screen only, lazy-loaded) ────────────────
+    # Same pattern as 6b but for the European universe. Sourced from
+    # sniper_eu_agreement_log.csv which the autopilot syncs to Drive on
+    # every run that fires step_eu_signals. NB: 2-way, not 3-way — Mosh's
+    # Platinum sheet doesn't cover EU tickers.
+    st.markdown("---")
+    st.subheader("🇪🇺 EU 2-Way Agreement — SNIPER vs Research")
+    st.caption(
+        "European tickers where SNIPER's 10-indicator model and broker "
+        "research align. Sourced from `sniper_eu_agreement_log.csv` synced "
+        "to Drive by the autopilot. Mosh's Platinum sheet doesn't cover EU, "
+        "so this is a 2-way (not 3-way) comparison."
+    )
+
+    if "_eu_loaded" not in st.session_state:
+        st.session_state["_eu_loaded"] = False
+        st.session_state["_eu_df"] = None
+        st.session_state["_eu_mtime"] = ""
+
+    _eu_btn_cols = st.columns([1, 3])
+    with _eu_btn_cols[0]:
+        if st.button("📥 Load EU 2-Way Agreement",
+                     use_container_width=True,
+                     key="load_eu_btn"):
+            try:
+                if _drive_eu_loader is not None:
+                    _r = _drive_eu_loader()
+                    if isinstance(_r, tuple) and len(_r) == 2:
+                        st.session_state["_eu_df"], st.session_state["_eu_mtime"] = _r
+                    else:
+                        st.session_state["_eu_df"] = _r
+                        st.session_state["_eu_mtime"] = ""
+                    st.session_state["_eu_loaded"] = True
+            except Exception as _e:
+                st.error(f"EU agreement log read error: {_e}")
+                st.session_state["_eu_loaded"] = False
+
+    if not st.session_state.get("_eu_loaded"):
+        st.info("Click **Load EU 2-Way Agreement** to fetch today's EU agreement table from Drive.")
+    else:
+        _eu_df = st.session_state.get("_eu_df")
+        _eu_mtime = st.session_state.get("_eu_mtime", "")
+
+        if _eu_df is None or _eu_df.empty:
+            st.info(
+                "EU agreement log not yet on Drive. After the next autopilot "
+                "run (which fires step_eu_signals → step_eu_agreement), the "
+                "file `sniper_eu_agreement_log.csv` will be in the SNIPER "
+                "Drive folder and this section will populate."
+            )
+        else:
+            # Capture timestamp panel (mirror US 3-way)
+            _eu_captured = ""
+            if _eu_mtime:
+                try:
+                    _eu_mt = datetime.fromisoformat(_eu_mtime.replace("Z", "+00:00"))
+                    _eu_captured = _eu_mt.astimezone(ZURICH_TZ).strftime(
+                        "%a %d %b %Y, %H:%M %Z"
+                    )
+                except Exception:
+                    _eu_captured = _eu_mtime
+
+            if _eu_captured:
+                st.info(
+                    f"📅 **EU prices captured at:** {_eu_captured}  \n"
+                    f"Live yfinance quotes for European tickers at the "
+                    f"moment the SNIPER autopilot last ran."
+                )
+
+            try:
+                _eu_today_iso = now_zurich().date().isoformat()
+            except Exception:
+                _eu_today_iso = datetime.now().date().isoformat()
+
+            _eu_td = _eu_df[_eu_df["date"].astype(str).str.startswith(_eu_today_iso)]
+
+            if _eu_td.empty:
+                _eu_dates = sorted(set(_eu_df["date"].astype(str).str[:10]))
+                _eu_latest = _eu_dates[-1] if _eu_dates else ""
+                if _eu_latest:
+                    _eu_td = _eu_df[_eu_df["date"].astype(str).str.startswith(_eu_latest)]
+                    st.warning(
+                        f"No EU rows for {_eu_today_iso}; showing most recent "
+                        f"date in file: **{_eu_latest}**"
+                    )
+
+            if _eu_td.empty:
+                st.info("No EU rows available.")
+            else:
+                _eu_cols = [
+                    "ticker", "name", "our_signal",
+                    "research_signal", "research_houses", "price",
+                ]
+                _eu_have_cols = [c for c in _eu_cols if c in _eu_td.columns]
+                _eu_agree = _eu_td[_eu_td["agreement_label"] == "AGREE"][
+                    _eu_have_cols
+                ].reset_index(drop=True)
+
+                st.metric("✅ EU AGREE", len(_eu_agree))
+
+                if _eu_agree.empty:
+                    st.info("No EU tickers where SNIPER and research agree today.")
+                else:
+                    st.dataframe(
+                        _eu_agree.rename(columns={
+                            "ticker":          "Ticker",
+                            "name":            "Name",
+                            "our_signal":      "SNIPER",
+                            "research_signal": "Research",
+                            "research_houses": "Houses",
+                            "price":           "Price",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                with st.expander(
+                    f"📊 Show all EU 2-way rows for the day ({len(_eu_td)} tickers)",
+                    expanded=False,
+                ):
+                    _eu_display_cols = [c for c in [
+                        "ticker", "name", "agreement_label", "our_signal",
+                        "research_signal", "research_houses",
+                        "research_note", "price",
+                    ] if c in _eu_td.columns]
+                    _eu_all_today = _eu_td[_eu_display_cols].sort_values(
+                        by=["agreement_label", "ticker"]
+                    ).reset_index(drop=True)
+                    st.dataframe(
+                        _eu_all_today.rename(columns={
+                            "ticker":           "Ticker",
+                            "name":             "Name",
+                            "agreement_label":  "Label",
+                            "our_signal":       "SNIPER",
+                            "research_signal":  "Research",
+                            "research_houses":  "Houses",
+                            "research_note":    "Research note",
+                            "price":            "Price",
                         }),
                         use_container_width=True,
                         hide_index=True,

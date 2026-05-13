@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # autopilot can upload by name and Brief can search by the same name.
 RESEARCH_CSV_NAME = "research.csv"
 THREE_WAY_LOG_NAME = "sniper_3way_log.csv"
+EU_AGREEMENT_LOG_NAME = "sniper_eu_agreement_log.csv"
 
 LOCAL_SA_PATH = Path.home() / ".config" / "sniper" / "service_account.json"
 LOCAL_CFG_PATH = Path.home() / "SNIPER" / "drive_config.json"
@@ -243,6 +244,57 @@ def _find_3way_log_meta(drive, folder_id: str) -> tuple[str | None, str]:
 def _find_3way_log_id(drive, folder_id: str) -> str | None:
     file_id, _ = _find_3way_log_meta(drive, folder_id)
     return file_id
+
+
+def _find_eu_agreement_log_meta(drive, folder_id: str) -> tuple[str | None, str]:
+    """Find sniper_eu_agreement_log.csv in the SNIPER folder. Returns
+    (file_id, modified_time_iso) like _find_3way_log_meta."""
+    try:
+        resp = drive.files().list(
+            q=(
+                f"'{folder_id}' in parents and trashed = false "
+                f"and name = '{EU_AGREEMENT_LOG_NAME}'"
+            ),
+            fields="files(id,name,modifiedTime)",
+            pageSize=5,
+        ).execute()
+    except Exception as e:
+        logger.error("Drive list failed for %s: %s", EU_AGREEMENT_LOG_NAME, e)
+        return None, ""
+    files = resp.get("files", [])
+    if not files:
+        logger.info("No %s found in SNIPER Drive folder %s",
+                    EU_AGREEMENT_LOG_NAME, folder_id)
+        return None, ""
+    return files[0]["id"], files[0].get("modifiedTime", "") or ""
+
+
+def load_eu_agreement_log() -> tuple[pd.DataFrame, str]:
+    """Return (DataFrame, modifiedTime ISO string) for the EU 2-way log.
+
+    Empty DataFrame on any misconfiguration / failure. Same contract as
+    load_3way_log so the Brief UI can render the EU Confluence section
+    with identical shape (lazy-load button, capture timestamp, AGREE
+    table, full-table expander).
+    """
+    drive = _drive_client()
+    folder_id = _load_sniper_folder_id()
+    if drive is None or not folder_id:
+        return pd.DataFrame(), ""
+
+    file_id, mtime = _find_eu_agreement_log_meta(drive, folder_id)
+    if not file_id:
+        return pd.DataFrame(), ""
+
+    raw = _download_bytes(drive, file_id)
+    if not raw:
+        return pd.DataFrame(), mtime
+
+    try:
+        return pd.read_csv(io.BytesIO(raw)), mtime
+    except Exception as e:
+        logger.error("Could not parse %s: %s", EU_AGREEMENT_LOG_NAME, e)
+        return pd.DataFrame(), mtime
 
 
 def load_3way_log() -> tuple[pd.DataFrame, str]:
@@ -524,6 +576,10 @@ try:  # pragma: no cover — optional
         return load_3way_log()
 
     @_st.cache_data(ttl=300)
+    def load_eu_agreement_log_cached() -> tuple[pd.DataFrame, str]:
+        return load_eu_agreement_log()
+
+    @_st.cache_data(ttl=300)
     def load_research_pdfs_dict_cached(
         include_inbox: bool = True,
         include_processed: bool = False,
@@ -553,6 +609,9 @@ except Exception:
 
     def load_3way_log_cached() -> tuple[pd.DataFrame, str]:  # type: ignore[no-redef]
         return load_3way_log()
+
+    def load_eu_agreement_log_cached() -> tuple[pd.DataFrame, str]:  # type: ignore[no-redef]
+        return load_eu_agreement_log()
 
     def load_research_pdfs_dict_cached(  # type: ignore[no-redef]
         include_inbox: bool = True,

@@ -55,6 +55,7 @@ EU_AGREEMENT_LOG_NAME = "sniper_eu_agreement_log.csv"
 FOUR_WAY_LOG_NAME = "sniper_4way_log.csv"          # MAN | Mosh | Research | Composite (US)
 FOUR_WAY_EU_LOG_NAME = "sniper_4way_eu_log.csv"    # MAN | Research | Composite (EU, no Mosh)
 COMPOSITE_LOG_NAME = "sniper_composite_log.csv"     # per-ticker 5-layer scores
+RESEARCH_MACRO_NAME = "research_macro.csv"          # macro / sector / asset-class views by house
 
 LOCAL_SA_PATH = Path.home() / ".config" / "sniper" / "service_account.json"
 LOCAL_CFG_PATH = Path.home() / "SNIPER" / "drive_config.json"
@@ -306,24 +307,31 @@ def load_composite_df() -> pd.DataFrame:
     return _load_named_csv_df(COMPOSITE_LOG_NAME)
 
 
-@lru_cache(maxsize=1)
-def load_4way_df_cached() -> pd.DataFrame:
-    """Cached wrapper around load_4way_df — call from Brief UI to avoid
-    re-fetching on every rerun. Cache is per-process; clear via
-    load_4way_df_cached.cache_clear() if needed."""
-    return load_4way_df()
+# NOTE: cached wrappers for the 4-way / composite loaders are defined inside
+# the Streamlit try-block at the bottom of this file. They use
+# @st.cache_data(ttl=300) — same pattern as load_research_df_cached — so the
+# Brief auto-refreshes from Drive every 5 minutes instead of caching forever
+# (which is what @lru_cache was doing — bug fixed 2026-05-22).
+
+
+def load_research_macro_df() -> pd.DataFrame:
+    """Broker macro / sector / asset-class views (research_macro.csv).
+
+    Columns: date, house, source_doc, source_pdf, source_page, region,
+    asset_class, sector, view_raw, view_normalized (OW/N/UW/POS/NEG),
+    conviction, time_horizon, theme, change_from, analyst, quoted_snippet,
+    extracted_at.
+
+    Use this to build a houses-side-by-side comparison of regional / asset /
+    sector tilts. Pivots cleanly on (region, asset_class, sector) × house.
+    """
+    return _load_named_csv_df(RESEARCH_MACRO_NAME)
 
 
 @lru_cache(maxsize=1)
-def load_4way_eu_df_cached() -> pd.DataFrame:
-    """Cached wrapper around load_4way_eu_df."""
-    return load_4way_eu_df()
-
-
-@lru_cache(maxsize=1)
-def load_composite_df_cached() -> pd.DataFrame:
-    """Cached wrapper around load_composite_df."""
-    return load_composite_df()
+def load_research_macro_df_cached() -> pd.DataFrame:
+    """Cached wrapper around load_research_macro_df."""
+    return load_research_macro_df()
 
 
 # --------------------------------------------------------------------------- PDF loader
@@ -525,6 +533,21 @@ try:  # pragma: no cover — optional
             max_pdfs=max_pdfs,
         )
 
+    @_st.cache_data(ttl=300)
+    def load_4way_df_cached() -> pd.DataFrame:
+        """US 4-way agreement, refreshed from Drive every 5 minutes."""
+        return load_4way_df()
+
+    @_st.cache_data(ttl=300)
+    def load_4way_eu_df_cached() -> pd.DataFrame:
+        """EU 3-way agreement, refreshed from Drive every 5 minutes."""
+        return load_4way_eu_df()
+
+    @_st.cache_data(ttl=300)
+    def load_composite_df_cached() -> pd.DataFrame:
+        """Composite per-layer scores, refreshed from Drive every 5 minutes."""
+        return load_composite_df()
+
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
@@ -539,6 +562,17 @@ except Exception:
             include_processed=include_processed,
             max_pdfs=max_pdfs,
         )
+
+    # Non-Streamlit fallbacks — passthroughs (no cache). Used when this module
+    # is imported outside the Brief (e.g. by the CLI test below).
+    def load_4way_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
+        return load_4way_df()
+
+    def load_4way_eu_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
+        return load_4way_eu_df()
+
+    def load_composite_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
+        return load_composite_df()
 
 
 if __name__ == "__main__":

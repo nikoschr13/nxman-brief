@@ -5779,6 +5779,208 @@ else:
                             hide_index=True,
                         )
 
+    # ── 7b. Macro Views by Topic ──────────────────────────────────────────────
+    # Houses side-by-side comparison of regional / asset-class / sector tilts.
+    # Pulled from research_macro.csv on Drive — written by sniper_macro_extract
+    # which runs alongside the per-stock extractor on every PDF in Research_Inbox.
+    try:
+        from brief_drive_reader import load_research_macro_df_cached
+        _have_macro = True
+    except Exception:
+        _have_macro = False
+
+    if _have_macro:
+        with st.expander("🌍 Macro Views by Topic — Houses Side-by-Side", expanded=False):
+            df_macro = load_research_macro_df_cached()
+            if df_macro.empty:
+                st.info(
+                    "No macro views available yet. The macro extractor fires on "
+                    "every PDF the autopilot processes; views land here once you "
+                    "drop UBS Daily Europe / CIO Weekly / similar publications "
+                    "into the Drive Research_Inbox folder."
+                )
+            else:
+                # ── filters
+                st.markdown(
+                    "<div style='font-size:11.5px;color:#475467;margin-bottom:6px;'>"
+                    "Broker macro / sector / asset-class views, pivoted by topic. "
+                    "Each cell shows the most-recent view from that house on that topic."
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+                col_f1, col_f2, col_f3 = st.columns(3)
+                with col_f1:
+                    asset_options = sorted(
+                        [a for a in df_macro["asset_class"].dropna().unique() if str(a).strip()]
+                    )
+                    asset_filter = st.multiselect(
+                        "Asset class",
+                        options=asset_options,
+                        default=asset_options,
+                        key="macro_asset_filter",
+                    )
+                with col_f2:
+                    region_options = sorted(
+                        [r for r in df_macro["region"].dropna().unique() if str(r).strip()]
+                    )
+                    region_filter = st.multiselect(
+                        "Region",
+                        options=region_options,
+                        default=region_options,
+                        key="macro_region_filter",
+                    )
+                with col_f3:
+                    days_back = st.selectbox(
+                        "Look back",
+                        options=[7, 14, 30, 60, 90, 9999],
+                        format_func=lambda d: f"Last {d} days" if d != 9999 else "All time",
+                        index=1,
+                        key="macro_days_filter",
+                    )
+
+                # Apply filters
+                view = df_macro.copy()
+                if asset_filter:
+                    view = view[view["asset_class"].isin(asset_filter)]
+                if region_filter:
+                    view = view[view["region"].isin(region_filter)]
+                if days_back < 9999:
+                    cutoff = (pd.Timestamp.today() - pd.Timedelta(days=int(days_back))).strftime("%Y-%m-%d")
+                    view = view[view["date"] >= cutoff]
+
+                if view.empty:
+                    st.info("No macro views match the current filters.")
+                else:
+                    # ── pivot: rows = (region, asset_class, sector), cols = house,
+                    # cell = most-recent view_normalized for that combo
+                    # Sort by date so 'last' gives the most recent view
+                    view_sorted = view.sort_values("date")
+                    keys = ["region", "asset_class", "sector"]
+                    last_views = view_sorted.groupby(keys + ["house"], dropna=False).agg(
+                        view_normalized=("view_normalized", "last"),
+                        view_raw=("view_raw", "last"),
+                        date=("date", "last"),
+                        theme=("theme", "last"),
+                        source_doc=("source_doc", "last"),
+                        quoted_snippet=("quoted_snippet", "last"),
+                    ).reset_index()
+
+                    # Color-code by view_normalized
+                    _VIEW_COLORS = {
+                        "OW":  "#16a34a",  # green
+                        "POS": "#16a34a",
+                        "N":   "#64748b",  # slate
+                        "UW":  "#dc2626",  # red
+                        "NEG": "#dc2626",
+                        "":    "#94a3b8",  # light slate
+                    }
+                    _VIEW_LABELS = {
+                        "OW":  "Overweight",
+                        "UW":  "Underweight",
+                        "N":   "Neutral",
+                        "POS": "Positive",
+                        "NEG": "Negative",
+                        "":    "—",
+                    }
+
+                    # Pivot to topic × house grid
+                    pivot = last_views.pivot_table(
+                        index=keys,
+                        columns="house",
+                        values="view_normalized",
+                        aggfunc="last",
+                        fill_value="",
+                    )
+
+                    # Render with HTML so we can color cells + show view_raw on hover
+                    houses_present = sorted([str(h) for h in pivot.columns if str(h).strip()])
+                    html_rows = []
+                    html_rows.append("<table style='width:100%;border-collapse:collapse;font-size:12px;'>")
+                    html_rows.append(
+                        "<thead><tr>"
+                        "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Region</th>"
+                        "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Asset</th>"
+                        "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Sector</th>"
+                        + "".join(
+                            f"<th style='text-align:center;padding:6px 8px;background:#f1f5f9;'>{h}</th>"
+                            for h in houses_present
+                        )
+                        + "</tr></thead><tbody>"
+                    )
+                    for idx, row in pivot.iterrows():
+                        region, asset_c, sector = idx if isinstance(idx, tuple) else (idx, "", "")
+                        cells = []
+                        for h in houses_present:
+                            v = str(row.get(h, "") or "")
+                            color = _VIEW_COLORS.get(v, "#94a3b8")
+                            label = _VIEW_LABELS.get(v, v or "—")
+                            # Find the underlying row for hover detail
+                            detail = last_views[
+                                (last_views["region"] == region)
+                                & (last_views["asset_class"] == asset_c)
+                                & (last_views["sector"] == sector)
+                                & (last_views["house"] == h)
+                            ]
+                            tooltip = ""
+                            if not detail.empty:
+                                d = detail.iloc[0]
+                                tooltip = (
+                                    f"{d['view_raw']} · {d['date']} · {d['source_doc']}\n"
+                                    f"\n{d['theme']}"
+                                ).replace('"', "'")
+                            if v:
+                                cells.append(
+                                    f"<td title=\"{tooltip}\" "
+                                    f"style='text-align:center;padding:6px 8px;"
+                                    f"font-weight:700;color:{color};border-bottom:1px solid #e2e8f0;'>"
+                                    f"{label}</td>"
+                                )
+                            else:
+                                cells.append(
+                                    "<td style='text-align:center;padding:6px 8px;"
+                                    "color:#94a3b8;border-bottom:1px solid #e2e8f0;'>—</td>"
+                                )
+                        html_rows.append(
+                            "<tr>"
+                            f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;'>{region or '—'}</td>"
+                            f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;'>{asset_c or '—'}</td>"
+                            f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#475467;'>{sector or ''}</td>"
+                            + "".join(cells)
+                            + "</tr>"
+                        )
+                    html_rows.append("</tbody></table>")
+                    st.markdown("".join(html_rows), unsafe_allow_html=True)
+
+                    # Legend
+                    st.markdown(
+                        "<div style='font-size:11px;color:#64748b;margin-top:10px;'>"
+                        "Legend: "
+                        "<span style='color:#16a34a;font-weight:700;'>Overweight / Positive</span> · "
+                        "<span style='color:#64748b;font-weight:700;'>Neutral</span> · "
+                        "<span style='color:#dc2626;font-weight:700;'>Underweight / Negative</span> · "
+                        "<span style='color:#94a3b8;'>— (no view)</span>"
+                        " · Hover any cell for the view_raw, date, theme."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── detail table for drill-down
+                    st.markdown("")
+                    st.markdown("**Underlying view rows** (latest per house · topic · click headers to sort)")
+                    detail_cols = [
+                        "date", "house", "region", "asset_class", "sector",
+                        "view_raw", "view_normalized", "conviction", "time_horizon",
+                        "theme", "source_doc",
+                    ]
+                    detail_cols = [c for c in detail_cols if c in last_views.columns]
+                    st.dataframe(
+                        last_views[detail_cols].sort_values(["region", "asset_class", "sector", "house"]),
+                        use_container_width=True,
+                        height=320,
+                        hide_index=True,
+                    )
+
     # ── 8. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")
 

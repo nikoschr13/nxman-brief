@@ -1518,7 +1518,8 @@ def render_generic_research(data: dict):
         st.markdown(f"<div style='font-size:11px;color:#475467;line-height:1.5;'>"
                     f"{preview}…</div>", unsafe_allow_html=True)
         with st.expander("Full extracted text"):
-            st.text_area("", text, height=400, key=f"txt_{filename[:20]}")
+            st.text_area("Extracted text", text, height=400,
+                         key=f"txt_{filename[:20]}", label_visibility="collapsed")
 
 
 def render_research_library():
@@ -5260,11 +5261,11 @@ generate = False
 
 with st.sidebar:
     st.markdown("**Mode**")
-    mode = st.radio("", ["Live", "Morning snapshot"], index=1, label_visibility="collapsed")
+    mode = st.radio("Mode", ["Live", "Morning snapshot"], index=1, label_visibility="collapsed")
     st.caption("Snapshot freezes at 08:00 Zurich.")
 
     st.markdown("**Chart window**")
-    chart_window = st.radio("", ["YTD", "3 months", "6 months", "1 year"], index=0, label_visibility="collapsed")
+    chart_window = st.radio("Chart window", ["YTD", "3 months", "6 months", "1 year"], index=0, label_visibility="collapsed")
 
     st.markdown("**Options**")
     show_definitions = st.checkbox("Show definitions", value=False)

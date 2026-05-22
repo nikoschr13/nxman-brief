@@ -47,11 +47,14 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Canonical research.csv filename in Drive. Kept as a constant so the
-# autopilot can upload by name and Brief can search by the same name.
+# Canonical CSV filenames in Drive. Kept as constants so the SNIPER autopilot
+# can upload by name and the Brief can search by the same name.
 RESEARCH_CSV_NAME = "research.csv"
 THREE_WAY_LOG_NAME = "sniper_3way_log.csv"
 EU_AGREEMENT_LOG_NAME = "sniper_eu_agreement_log.csv"
+FOUR_WAY_LOG_NAME = "sniper_4way_log.csv"          # MAN | Mosh | Research | Composite (US)
+FOUR_WAY_EU_LOG_NAME = "sniper_4way_eu_log.csv"    # MAN | Research | Composite (EU, no Mosh)
+COMPOSITE_LOG_NAME = "sniper_composite_log.csv"     # per-ticker 5-layer scores
 
 LOCAL_SA_PATH = Path.home() / ".config" / "sniper" / "service_account.json"
 LOCAL_CFG_PATH = Path.home() / "SNIPER" / "drive_config.json"
@@ -213,118 +216,114 @@ def load_research_df() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _find_3way_log_meta(drive, folder_id: str) -> tuple[str | None, str]:
-    """Return (file_id, modified_time_iso) for the 3-way log on Drive.
+# --------------------------------------------------------------------------- generic CSV-by-name loader
 
-    The modifiedTime tells the Brief when the file was last synced — i.e.
-    when the SNIPER autopilot last ran and captured prices from yfinance.
-    Surfacing that in the UI lets users tell at a glance whether they're
-    looking at fresh post-open data or yesterday's close.
-    """
+
+def _find_csv_id_by_name(drive, folder_id: str, name: str) -> str | None:
+    """Look up the file ID for any named CSV inside the SNIPER folder."""
+    safe_name = name.replace("'", "\\'")
     try:
         resp = drive.files().list(
             q=(
                 f"'{folder_id}' in parents and trashed = false "
-                f"and name = '{THREE_WAY_LOG_NAME}'"
+                f"and name = '{safe_name}'"
             ),
             fields="files(id,name,modifiedTime)",
             pageSize=5,
         ).execute()
     except Exception as e:
-        logger.error("Drive list failed for %s: %s", THREE_WAY_LOG_NAME, e)
-        return None, ""
+        logger.error("Drive list failed for %s: %s", name, e)
+        return None
     files = resp.get("files", [])
     if not files:
-        logger.info("No %s found in SNIPER Drive folder %s", THREE_WAY_LOG_NAME, folder_id)
-        return None, ""
-    return files[0]["id"], files[0].get("modifiedTime", "") or ""
+        logger.info("No %s found in SNIPER Drive folder %s", name, folder_id)
+        return None
+    return files[0]["id"]
 
 
-# Backward-compat shim — older callers expect just a file ID.
-def _find_3way_log_id(drive, folder_id: str) -> str | None:
-    file_id, _ = _find_3way_log_meta(drive, folder_id)
-    return file_id
-
-
-def _find_eu_agreement_log_meta(drive, folder_id: str) -> tuple[str | None, str]:
-    """Find sniper_eu_agreement_log.csv in the SNIPER folder. Returns
-    (file_id, modified_time_iso) like _find_3way_log_meta."""
-    try:
-        resp = drive.files().list(
-            q=(
-                f"'{folder_id}' in parents and trashed = false "
-                f"and name = '{EU_AGREEMENT_LOG_NAME}'"
-            ),
-            fields="files(id,name,modifiedTime)",
-            pageSize=5,
-        ).execute()
-    except Exception as e:
-        logger.error("Drive list failed for %s: %s", EU_AGREEMENT_LOG_NAME, e)
-        return None, ""
-    files = resp.get("files", [])
-    if not files:
-        logger.info("No %s found in SNIPER Drive folder %s",
-                    EU_AGREEMENT_LOG_NAME, folder_id)
-        return None, ""
-    return files[0]["id"], files[0].get("modifiedTime", "") or ""
-
-
-def load_eu_agreement_log() -> tuple[pd.DataFrame, str]:
-    """Return (DataFrame, modifiedTime ISO string) for the EU 2-way log.
-
-    Empty DataFrame on any misconfiguration / failure. Same contract as
-    load_3way_log so the Brief UI can render the EU Confluence section
-    with identical shape (lazy-load button, capture timestamp, AGREE
-    table, full-table expander).
-    """
+def _load_named_csv_df(name: str) -> pd.DataFrame:
+    """Generic loader: fetch a CSV by name from the SNIPER Drive folder.
+    Returns an empty DataFrame on any failure — always safe for UI use."""
     drive = _drive_client()
     folder_id = _load_sniper_folder_id()
     if drive is None or not folder_id:
-        return pd.DataFrame(), ""
+        return pd.DataFrame()
 
-    file_id, mtime = _find_eu_agreement_log_meta(drive, folder_id)
+    file_id = _find_csv_id_by_name(drive, folder_id, name)
     if not file_id:
-        return pd.DataFrame(), ""
+        return pd.DataFrame()
 
     raw = _download_bytes(drive, file_id)
     if not raw:
-        return pd.DataFrame(), mtime
+        return pd.DataFrame()
 
     try:
-        return pd.read_csv(io.BytesIO(raw)), mtime
+        return pd.read_csv(io.BytesIO(raw))
     except Exception as e:
-        logger.error("Could not parse %s: %s", EU_AGREEMENT_LOG_NAME, e)
-        return pd.DataFrame(), mtime
+        logger.error("Could not parse %s: %s", name, e)
+        return pd.DataFrame()
 
 
-def load_3way_log() -> tuple[pd.DataFrame, str]:
-    """Return (DataFrame, modifiedTime ISO string) for the 3-way log.
+# --------------------------------------------------------------------------- 4-way + composite loaders
 
-    modifiedTime is Drive's record of when the file was last touched —
-    i.e. when the SNIPER autopilot last ran. Empty string when the file
-    isn't reachable. Brief UI shows this so the user can tell whether
-    prices are fresh or stale.
 
-    Empty DataFrame on any misconfiguration / failure.
+def load_4way_df() -> pd.DataFrame:
+    """US 4-way agreement (MAN | Mosh | Research | Composite).
+
+    Columns include: date, ticker, man_signal, man_family, mosh_signal,
+    mosh_family, research_signal, research_family, composite_signal,
+    composite_family, composite_scs, agreement_label, research_houses,
+    research_n_bull, research_n_bear, research_n_flat,
+    composite_active_layers, composite_hard_reject, live_price.
+
+    The agreement_label column buckets each row into UNANIMOUS / MAN_OUTLIER /
+    MOSH_OUTLIER (fidelity flag) / RESEARCH_OUTLIER / COMPOSITE_OUTLIER (new
+    layer signal) / SPLIT / NO_RESEARCH / NO_COMPOSITE.
     """
-    drive = _drive_client()
-    folder_id = _load_sniper_folder_id()
-    if drive is None or not folder_id:
-        return pd.DataFrame(), ""
+    return _load_named_csv_df(FOUR_WAY_LOG_NAME)
 
-    file_id, mtime = _find_3way_log_meta(drive, folder_id)
-    if not file_id:
-        return pd.DataFrame(), ""
 
-    raw = _download_bytes(drive, file_id)
-    if not raw:
-        return pd.DataFrame(), mtime
+def load_4way_eu_df() -> pd.DataFrame:
+    """EU 3-way agreement (MAN | Research | Composite — Mosh doesn't cover EU).
 
-    try:
-        return pd.read_csv(io.BytesIO(raw)), mtime
-    except Exception as e:
-        logger.error("Could not parse %s: %s", THREE_WAY_LOG_NAME, e)
-        return pd.DataFrame(), mtime
+    Same column shape as load_4way_df but without the mosh_* columns, and
+    with a 'name' column for the company name. Bucket labels exclude
+    MOSH_OUTLIER.
+    """
+    return _load_named_csv_df(FOUR_WAY_EU_LOG_NAME)
+
+
+def load_composite_df() -> pd.DataFrame:
+    """Per-ticker 5-layer composite scores (sniper_composite_log.csv).
+
+    Columns: date, ticker, region, scs, signal, hard_reject, raw_score,
+    risk_multiplier, layer_technical, layer_research, layer_fundamentals,
+    layer_revisions, active_layers, missing_layers, error.
+
+    Useful for drilling into the per-layer breakdown of any row in the 4-way
+    log: filter by ticker + date and you get the contribution waterfall.
+    """
+    return _load_named_csv_df(COMPOSITE_LOG_NAME)
+
+
+@lru_cache(maxsize=1)
+def load_4way_df_cached() -> pd.DataFrame:
+    """Cached wrapper around load_4way_df — call from Brief UI to avoid
+    re-fetching on every rerun. Cache is per-process; clear via
+    load_4way_df_cached.cache_clear() if needed."""
+    return load_4way_df()
+
+
+@lru_cache(maxsize=1)
+def load_4way_eu_df_cached() -> pd.DataFrame:
+    """Cached wrapper around load_4way_eu_df."""
+    return load_4way_eu_df()
+
+
+@lru_cache(maxsize=1)
+def load_composite_df_cached() -> pd.DataFrame:
+    """Cached wrapper around load_composite_df."""
+    return load_composite_df()
 
 
 # --------------------------------------------------------------------------- PDF loader
@@ -435,63 +434,6 @@ def load_research_pdfs_dict(
     return out
 
 
-def load_research_pdfs_with_meta(
-    include_inbox: bool = True,
-    include_processed: bool = False,
-    max_pdfs: int = 20,
-) -> dict[str, dict]:
-    """Same as load_research_pdfs_dict but also returns Drive's modifiedTime.
-
-    Added 2026-05-04 so the Brief can filter "today's drops" by the actual
-    upload time (Drive modifiedTime) rather than a date parsed out of the
-    filename — broker PDFs are dated by the publishing house's cover-page,
-    not by when the user dropped them into the inbox, so filename-date
-    filtering wrongly drops PDFs the user just uploaded.
-
-    Returns:
-        {filename: {"bytes": pdf_bytes, "modified_time": ISO_string}}
-        Empty dict on misconfig / failure (same as the bytes-only sibling).
-    """
-    drive = _drive_client()
-    sniper_id = _load_sniper_folder_id()
-    if drive is None or not sniper_id:
-        logger.info("Drive PDF library not available — check SA + folder-ID config.")
-        return {}
-
-    inbox_id = _find_subfolder(drive, sniper_id, "Research_Inbox") if include_inbox else None
-    processed_id = _find_subfolder(drive, sniper_id, "Research_Processed") if include_processed else None
-
-    files: list[dict] = []
-    if inbox_id:
-        files.extend(_list_pdfs_in_folder(drive, inbox_id))
-    if processed_id:
-        files.extend(_list_pdfs_in_folder(drive, processed_id))
-    if not files and not inbox_id and not processed_id:
-        files = _list_pdfs_in_folder(drive, sniper_id)
-    if not files:
-        return {}
-
-    by_name: dict[str, dict] = {}
-    for f in files:
-        by_name[f["name"]] = f
-
-    ordered = sorted(
-        by_name.values(),
-        key=lambda f: f.get("modifiedTime", ""),
-        reverse=True,
-    )[:max_pdfs]
-
-    out: dict[str, dict] = {}
-    for f in ordered:
-        raw = _download_bytes(drive, f["id"])
-        if raw:
-            out[f["name"]] = {
-                "bytes": raw,
-                "modified_time": f.get("modifiedTime", ""),
-            }
-    return out
-
-
 # --------------------------------------------------------------------------- writer
 
 
@@ -572,14 +514,6 @@ try:  # pragma: no cover — optional
         return load_research_df()
 
     @_st.cache_data(ttl=300)
-    def load_3way_log_cached() -> tuple[pd.DataFrame, str]:
-        return load_3way_log()
-
-    @_st.cache_data(ttl=300)
-    def load_eu_agreement_log_cached() -> tuple[pd.DataFrame, str]:
-        return load_eu_agreement_log()
-
-    @_st.cache_data(ttl=300)
     def load_research_pdfs_dict_cached(
         include_inbox: bool = True,
         include_processed: bool = False,
@@ -591,27 +525,9 @@ try:  # pragma: no cover — optional
             max_pdfs=max_pdfs,
         )
 
-    @_st.cache_data(ttl=300)
-    def load_research_pdfs_with_meta_cached(
-        include_inbox: bool = True,
-        include_processed: bool = False,
-        max_pdfs: int = 20,
-    ) -> dict[str, dict]:
-        return load_research_pdfs_with_meta(
-            include_inbox=include_inbox,
-            include_processed=include_processed,
-            max_pdfs=max_pdfs,
-        )
-
 except Exception:
     def load_research_df_cached() -> pd.DataFrame:  # type: ignore[no-redef]
         return load_research_df()
-
-    def load_3way_log_cached() -> tuple[pd.DataFrame, str]:  # type: ignore[no-redef]
-        return load_3way_log()
-
-    def load_eu_agreement_log_cached() -> tuple[pd.DataFrame, str]:  # type: ignore[no-redef]
-        return load_eu_agreement_log()
 
     def load_research_pdfs_dict_cached(  # type: ignore[no-redef]
         include_inbox: bool = True,
@@ -619,17 +535,6 @@ except Exception:
         max_pdfs: int = 20,
     ) -> dict[str, bytes]:
         return load_research_pdfs_dict(
-            include_inbox=include_inbox,
-            include_processed=include_processed,
-            max_pdfs=max_pdfs,
-        )
-
-    def load_research_pdfs_with_meta_cached(  # type: ignore[no-redef]
-        include_inbox: bool = True,
-        include_processed: bool = False,
-        max_pdfs: int = 20,
-    ) -> dict[str, dict]:
-        return load_research_pdfs_with_meta(
             include_inbox=include_inbox,
             include_processed=include_processed,
             max_pdfs=max_pdfs,

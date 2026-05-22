@@ -24,31 +24,11 @@ from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 
 # Optional: Drive-backed research library feed. If brief_drive_reader isn't
-# importable (e.g. dep not installed locally, or only an older version of
-# brief_drive_reader.py is deployed), Brief falls back to manual upload.
-# Flat try/except blocks so each variable is unconditionally defined no
-# matter which import succeeds — a nested arrangement could leave the
-# metadata loader name undefined when the outer import failed, which
-# crashed the app on the sidebar's autoload call.
+# importable (e.g. dep not installed locally), Brief falls back to manual upload.
 try:
     from brief_drive_reader import load_research_pdfs_dict_cached as _drive_pdf_loader
 except Exception:
     _drive_pdf_loader = None
-
-try:
-    from brief_drive_reader import load_research_pdfs_with_meta_cached as _drive_pdf_loader_meta
-except Exception:
-    _drive_pdf_loader_meta = None
-
-try:
-    from brief_drive_reader import load_3way_log_cached as _drive_3way_loader
-except Exception:
-    _drive_3way_loader = None
-
-try:
-    from brief_drive_reader import load_eu_agreement_log_cached as _drive_eu_loader
-except Exception:
-    _drive_eu_loader = None
 
 # Drive upload is intentionally disabled: Google service accounts cannot
 # write to personal My Drive folders (Service Accounts do not have storage
@@ -1126,16 +1106,10 @@ def parse_equity_universe(pdf_bytes: bytes) -> dict:
                      "SINGAPORE","INDONESIA","JAPAN","LATIN AMERICA","MIDDLE EAST"}
     known_ratings = {"Buy","Hold","Sell","UR","Restricted","NC"}
     date_str = ""
-    p0 = ""  # initialized so it's always defined for the return dict
 
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            # Page-1 text doubles as the bank-letterhead source for
-            # build_research_themes._infer_bank — without this, every
-            # equity-coverage doc reaches _infer_bank with empty source_text
-            # and the "bank of singapore" content check can never confirm,
-            # which is how a real BoS Equity Coverage report ended up
-            # surfacing under a generic filename label on 2026-05-04.
+            # Date from first page
             p0 = pdf.pages[0].extract_text() or ""
             dm = re.search(r'\d{1,2}\s+\w+\s+\d{4}', p0)
             if dm:
@@ -1189,15 +1163,9 @@ def parse_equity_universe(pdf_bytes: bytes) -> dict:
                                 "uncertainty": _f(18),
                             })
     except Exception as e:
-        # NB: store page-1 text in a SEPARATE field, not "text" — the
-        # downstream LLM-summary path uses an empty "text" field as the
-        # signal to rebuild source_text from the structured `stocks` list.
-        # Overloading "text" with the page-1 intro would silently bypass
-        # that reconstruction and feed the LLM the disclaimer page instead
-        # of the actual stock recommendations.
-        return {"error": str(e), "stocks": stocks, "date": date_str, "first_page_text": p0}
+        return {"error": str(e), "stocks": stocks, "date": date_str}
 
-    return {"stocks": stocks, "date": date_str, "error": None, "first_page_text": p0}
+    return {"stocks": stocks, "date": date_str, "error": None}
 
 
 def parse_generic_research(pdf_bytes: bytes, filename: str) -> dict:
@@ -1255,18 +1223,8 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
     if st.session_state.get(flag) and not force_refresh:
         return (0, 0)
 
-    # Prefer the metadata-aware loader so we can filter by Drive modifiedTime
-    # (when the file was uploaded) instead of by a date parsed from the
-    # filename (when the publishing house wrote the document). The two are
-    # often days or weeks apart for broker research.
-    pdf_meta: dict[str, dict] = {}
-    pdfs: dict[str, bytes] = {}
     try:
-        if _drive_pdf_loader_meta is not None:
-            pdf_meta = _drive_pdf_loader_meta() or {}
-            pdfs = {name: m.get("bytes", b"") for name, m in pdf_meta.items()}
-        else:
-            pdfs = _drive_pdf_loader() or {}
+        pdfs = _drive_pdf_loader()
     except Exception:
         st.session_state[flag] = True  # don't loop-retry on error
         return (0, 0)
@@ -1275,120 +1233,10 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
         st.session_state["research_docs"] = {}
     if "_drive_research_failed" not in st.session_state:
         st.session_state["_drive_research_failed"] = {}
-    if "_drive_research_skipped_stale" not in st.session_state:
-        st.session_state["_drive_research_skipped_stale"] = []
-
-    # Staleness filter: drop docs older than the configured window. Prevents
-    # zombie data — a UBS PDF that lingered in Drive from a previous session
-    # shouldn't feed today's brief once it's been moved out of the day's
-    # focus.
-    #
-    # Filter signal, in priority order:
-    #   1. Drive modifiedTime (when the file was uploaded/touched) — preferred
-    #   2. Filename date — fallback when the metadata loader is unavailable
-    #
-    # Window default = 1 day. Tunable via env var BRIEF_RESEARCH_STALE_DAYS:
-    #   BRIEF_RESEARCH_STALE_DAYS=1   → today's drops only (default)
-    #   BRIEF_RESEARCH_STALE_DAYS=7   → last week
-    #   BRIEF_RESEARCH_STALE_DAYS=30  → last month
-    #   BRIEF_RESEARCH_STALE_DAYS=0   → disable filter entirely
-    #
-    # Files for which neither modifiedTime nor a parseable filename-date can
-    # be obtained are kept (don't err on the side of dropping legit content).
-    _MONTH_TO_NUM = {
-        "jan":1,"january":1, "feb":2,"february":2, "mar":3,"march":3,
-        "apr":4,"april":4, "may":5, "jun":6,"june":6, "jul":7,"july":7,
-        "aug":8,"august":8, "sep":9,"september":9,"sept":9, "oct":10,"october":10,
-        "nov":11,"november":11, "dec":12,"december":12,
-    }
-
-    def _filename_date(fname: str):
-        """Extract a publication date from common broker-PDF filename patterns.
-        Returns datetime.date or None."""
-        if not fname:
-            return None
-        base = fname.rsplit(".", 1)[0]
-        # ISO YYYY-MM-DD
-        m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", base)
-        if m:
-            try:
-                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
-            except ValueError:
-                pass
-        # "DD Month YYYY" e.g. "Morning Call_22 April 2026"
-        m = re.search(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b", base)
-        if m:
-            mo = _MONTH_TO_NUM.get(m.group(2).lower()[:3])
-            if mo:
-                try:
-                    return datetime(int(m.group(3)), mo, int(m.group(1))).date()
-                except ValueError:
-                    pass
-        # "DD-MM-YYYY" or "DD_MM_YYYY"
-        m = re.search(r"\b(\d{1,2})[\-_](\d{1,2})[\-_](\d{4})\b", base)
-        if m:
-            try:
-                return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).date()
-            except ValueError:
-                pass
-        return None
-
-    try:
-        _today_zh = datetime.now(ZoneInfo("Europe/Zurich")).date()
-    except Exception:
-        _today_zh = datetime.now().date()
-    try:
-        _stale_days = int(os.environ.get("BRIEF_RESEARCH_STALE_DAYS", "1"))
-    except (TypeError, ValueError):
-        _stale_days = 1
-    _stale_cutoff = (
-        _today_zh - timedelta(days=_stale_days) if _stale_days > 0 else None
-    )
-
-    def _modified_date(fname: str):
-        """Return Drive's modifiedTime as a date (Europe/Zurich), or None
-        if we don't have the metadata for this filename."""
-        if not pdf_meta:
-            return None
-        mt = (pdf_meta.get(fname) or {}).get("modified_time") or ""
-        if not mt:
-            return None
-        try:
-            # Drive returns ISO with trailing Z. Parse + convert to Zurich.
-            iso = mt.replace("Z", "+00:00")
-            dt_utc = datetime.fromisoformat(iso)
-            try:
-                return dt_utc.astimezone(ZoneInfo("Europe/Zurich")).date()
-            except Exception:
-                return dt_utc.date()
-        except (ValueError, TypeError):
-            return None
 
     loaded = 0
     failed = 0
-    skipped_stale = 0
     for fname, pdf_bytes in (pdfs or {}).items():
-        # Staleness gate first — applies even on force_refresh, since the
-        # whole point is to keep stale content out of today's brief.
-        # _stale_cutoff is None when BRIEF_RESEARCH_STALE_DAYS=0 (disabled).
-        if _stale_cutoff is not None:
-            # Prefer Drive modifiedTime (upload time). Fall back to filename
-            # date only if metadata is unavailable.
-            ref_date = _modified_date(fname)
-            ref_label = "modified"
-            if ref_date is None:
-                ref_date = _filename_date(fname)
-                ref_label = "dated"
-            if ref_date is not None and ref_date < _stale_cutoff:
-                st.session_state["_drive_research_skipped_stale"].append(
-                    f"{fname} ({ref_label} {ref_date.isoformat()})"
-                )
-                # Also evict any prior load of this file from research_docs
-                # so it can't survive in session state from an earlier run.
-                st.session_state["research_docs"].pop(fname, None)
-                skipped_stale += 1
-                continue
-
         already_loaded = fname in st.session_state["research_docs"]
         already_failed = fname in st.session_state["_drive_research_failed"]
         if not force_refresh and (already_loaded or already_failed):
@@ -3111,57 +2959,17 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     if not use_gemini or not GEMINI_API_KEY:
         return empty
 
-    # 2026-05-04: was filename-only. Filename matching let docs whose name
-    # contained a trigger ("daily europe" → "UBS") get the wrong bank label
-    # even when the actual content was from a different house, which is
-    # how a non-UBS doc produced a "UBS rates BBWI Buy 192% upside" line in
-    # the daily brief. Now we sniff the first 3000 chars of the source PDF
-    # for an explicit letterhead first; filename is the fallback.
-    _LETTERHEAD_PATTERNS = [
-        (re.compile(r"(?i)\bbank\s+of\s+singapore\b"),                       "BoS"),
-        (re.compile(r"(?i)\bubs\s+(group|ag|wealth|investment|research|cio)\b"), "UBS"),
-        (re.compile(r"(?i)\bjulius\s+ba[eë]r\b"),                            "Julius Baer"),
-        (re.compile(r"(?i)\bgoldman\s+sachs\b"),                             "Goldman"),
-        (re.compile(r"(?i)\bmorgan\s+stanley\b"),                            "Morgan Stanley"),
-        (re.compile(r"(?i)\bbarclays\b"),                                    "Barclays"),
-        (re.compile(r"(?i)\bjp\s*morgan\b"),                                 "JPMorgan"),
-        (re.compile(r"(?i)\bocbc\s+bank\b|\boversea[\-\s]chinese\s+banking\b"), "OCBC"),
-        (re.compile(r"(?i)\bcitigroup\b|\bciti\s+research\b"),               "Citi"),
-        (re.compile(r"(?i)\bmorningstar\b"),                                 "Morningstar"),
-        (re.compile(r"(?i)ajk\b.*\binvestor\s+compass\b|\binvestor\s+compass\b.*ajk"),
-                                                                             "AJK"),
-    ]
-
-    def _infer_bank(fname: str, source_text: str = "") -> str:
-        # Step 1 — content-based: look for an explicit letterhead in the
-        # first 3000 chars. Authoritative when present.
-        head = (source_text or "")[:3000]
-        for pat, label in _LETTERHEAD_PATTERNS:
-            if pat.search(head):
-                return label
-
-        # Step 2 — filename fallback (PRE-Unknown-fallback variant, restored
-        # 2026-05-04 as a safe revert because the stricter version was
-        # crashing the app for an unidentified reason). This version still
-        # produces the UBS hallucination if a doc filename matches "daily
-        # europe" / "universe" / "equity_coverage" without UBS letterhead,
-        # but at least the brief actually generates.
-        fn = (fname or "").lower()
+    def _infer_bank(fname: str) -> str:
+        fn = fname.lower()
+        # Bank of Singapore publication families. Confirmed 2026-04-27 — the
+        # CIO_WEEKLY_* and FX_WEEKLY_* documents that previously rendered as
+        # raw filenames are BoS publications.
         if "morning call" in fn:                        return "BoS"
         if "cio_weekly"   in fn or "cio weekly" in fn:  return "BoS CIO"
         if "fx_weekly"    in fn or "fx weekly"  in fn:  return "BoS FX"
         if "barclays"     in fn:                        return "Barclays"
-        # Single-line content checks: only trigger an attribution if the doc
-        # text actually mentions the bank. Stops the BBWI/KMX/FLUT
-        # hallucination path where a non-UBS doc with "daily europe" /
-        # "universe" / "equity_coverage" in its filename was getting
-        # UBS-attributed bullets manufactured by Gemini.
-        # BoS Equity Coverage check runs FIRST so a real BoS equity-coverage
-        # doc (which is what produced the 192%/133% upsides on 2026-05-04)
-        # gets correctly labelled BoS, not falsely UBS or generic-filename.
-        if "equity_coverage" in fn and "bank of singapore" in (source_text or "").lower(): return "BoS Equity Coverage"
-        if "daily europe" in fn and "ubs" in (source_text or "").lower(): return "UBS"
-        if ("equity_coverage" in fn or "universe" in fn) and "ubs" in (source_text or "").lower(): return "UBS Universe"
+        if "daily europe" in fn:                        return "UBS"
+        if "equity_coverage" in fn or "universe" in fn: return "UBS Universe"
         if "dmo"          in fn or "ocbc" in fn:        return "OCBC"
         if "goldman"      in fn:                        return "Goldman"
         if "jpmorgan"     in fn or fn.startswith("jpm"): return "JPMorgan"
@@ -3260,15 +3068,8 @@ def build_research_themes(research_docs: dict, use_gemini: bool = True) -> dict:
     for fname, rdoc in research_docs.items():
         if rdoc.get("error"):
             continue
+        bank = _infer_bank(fname)
         source_text = (rdoc.get("text") or "").strip()
-        # For bank-attribution purposes ONLY, also consider any page-1 text
-        # the per-doc-type parser stashed in `first_page_text` (e.g.
-        # parse_equity_universe does this — its `text` field stays empty
-        # to preserve the LLM's stocks-reconstruction path below).
-        bank_text = source_text or (rdoc.get("first_page_text") or "").strip()
-        # Pass bank_text so _infer_bank can use the actual letterhead
-        # rather than relying solely on filename triggers.
-        bank = _infer_bank(fname, bank_text)
 
         # Morning_call docs may have empty `text` but rich structured fields —
         # reconstruct text from those so Gemini has something to summarise.
@@ -4745,12 +4546,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     # the disclaimer + professional-use footer. Renders as a small bordered
     # block above Research Highlights so page 2 has analytical value, not just
     # tables of bank views. AI-generated; suppressed entirely if no AI output.
-    # Disabled 2026-05-04 — section emitted macro-level "implications" without
-    # any knowledge of the user's actual portfolio, which can read as advice.
-    # The AI still generates portfolio_implications upstream; we simply don't
-    # render them. Re-enable by reverting this stub if real portfolio context
-    # becomes available.
-    _pi_list = []
+    _pi_list = (writing or {}).get("portfolio_implications") or []
     _pi_list = [b for b in _pi_list if isinstance(b, str) and b.strip()][:4]
     if _pi_list:
         pi_flows = [
@@ -5512,44 +5308,8 @@ with st.sidebar:
                 st.caption(f"🧪 Research themes: {kept}/{seen} bullets passed grounding check")
                 for drop in (_rt_dbg.get("drops") or [])[:5]:
                     st.caption(f"   ✗ {drop[:90]}")
-        elif _drive_pdf_loader is not None:
-            st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
-
-        # Staleness-filter visibility. Click to see exactly which PDFs were
-        # filtered out by BRIEF_RESEARCH_STALE_DAYS, with the date that
-        # triggered the skip (Drive modifiedTime or filename date). Helps
-        # diagnose "why isn't this doc loaded?" without spelunking logs.
-        _stale_skipped = st.session_state.get("_drive_research_skipped_stale") or []
-        _kept_docs = list(st.session_state.get("research_docs", {}).keys())
-        _stale_days_env = os.environ.get("BRIEF_RESEARCH_STALE_DAYS", "1")
-        if _stale_skipped or _kept_docs or drive_count == 0:
-            with st.expander(
-                f"🧪 Drive staleness filter "
-                f"(window={_stale_days_env}d · kept={len(_kept_docs)} · "
-                f"skipped={len(_stale_skipped)})",
-                expanded=False,
-            ):
-                st.caption(
-                    f"**Window:** docs older than `{_stale_days_env}` day(s) are "
-                    f"excluded. Override via Streamlit secret "
-                    f"`BRIEF_RESEARCH_STALE_DAYS` (e.g. `\"7\"` for a week, "
-                    f"`\"0\"` to disable)."
-                )
-                if _kept_docs:
-                    st.markdown("**✅ Loaded PDFs**")
-                    for fname in _kept_docs[:30]:
-                        st.caption(f"  • {fname}")
-                if _stale_skipped:
-                    st.markdown("**⏳ Skipped (older than window)**")
-                    for entry in _stale_skipped[:30]:
-                        st.caption(f"  • {entry}")
-                if not _kept_docs and not _stale_skipped:
-                    st.caption(
-                        "No PDFs returned from the Drive query at all. "
-                        "Check the SA has access to `Research_Inbox/` and "
-                        "the folder_ids in `drive_config.json` are correct."
-                    )
-
+            elif _drive_pdf_loader is not None:
+                st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
         if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
             autoload_research_from_drive(force_refresh=True)
             st.rerun()
@@ -5815,306 +5575,211 @@ else:
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── 6b. Today's 3-way confluence (on-screen only, lazy-loaded) ───────────
-    # SNIPER + Mosh + Research alignment for today, sourced from
-    # sniper_3way_log.csv which the autopilot syncs to Drive after each
-    # post-US-open run. Streamlit-page only — deliberately NOT in the PDF.
-    #
-    # LAZY-LOADED: the Drive fetch only fires when the user clicks the
-    # button below. This keeps it off the page-load critical path so it
-    # can't contribute to OOM-killing the worker. State is kept across
-    # reruns via st.session_state.
-    st.markdown("---")
-    st.subheader("🎯 Today's 3-Way Confluence — All Agree")
-    st.caption(
-        "Tickers where SNIPER (10-indicator), Mosh (Platinum sheet), and "
-        "broker research all point the same way. "
-        "Sourced from `sniper_3way_log.csv` synced to Drive by the autopilot."
-    )
+    # ── 7. SNIPER 4-way Agreement ─────────────────────────────────────────────
+    # MAN (quant Layer 1) vs Mosh (external benchmark) vs Research (broker
+    # consensus) vs Composite (5-layer roll-up). Pulled from Drive — falls
+    # back gracefully to empty if the SA / folder isn't configured.
+    try:
+        from brief_drive_reader import (
+            load_4way_df_cached,
+            load_4way_eu_df_cached,
+            load_composite_df_cached,
+        )
+        _have_4way = True
+    except Exception:
+        _have_4way = False
 
-    if "_3way_loaded" not in st.session_state:
-        st.session_state["_3way_loaded"] = False
-        st.session_state["_3way_df"] = None
-        st.session_state["_3way_mtime"] = ""
+    if _have_4way:
+        with st.expander("🎯 SNIPER Agreement — MAN · Mosh · Research · Composite", expanded=False):
+            df4 = load_4way_df_cached()
+            df4_eu = load_4way_eu_df_cached()
+            df_comp = load_composite_df_cached()
 
-    _btn_cols = st.columns([1, 3])
-    with _btn_cols[0]:
-        if st.button("📥 Load 3-Way Confluence",
-                     use_container_width=True,
-                     key="load_3way_btn"):
-            try:
-                if _drive_3way_loader is not None:
-                    _r = _drive_3way_loader()
-                    if isinstance(_r, tuple) and len(_r) == 2:
-                        st.session_state["_3way_df"], st.session_state["_3way_mtime"] = _r
-                    else:
-                        st.session_state["_3way_df"] = _r
-                        st.session_state["_3way_mtime"] = ""
-                    st.session_state["_3way_loaded"] = True
-            except Exception as _e:
-                st.error(f"3-way log read error: {_e}")
-                st.session_state["_3way_loaded"] = False
-
-    if not st.session_state.get("_3way_loaded"):
-        st.info("Click **Load 3-Way Confluence** to fetch today's agreement table from Drive.")
-    else:
-        _3way_df = st.session_state.get("_3way_df")
-        _3way_mtime = st.session_state.get("_3way_mtime", "")
-
-        if _3way_df is None or _3way_df.empty:
-            st.info(
-                "3-way log not yet on Drive. After the next post-US-open autopilot "
-                "run, the file `sniper_3way_log.csv` will be in the SNIPER Drive "
-                "folder and this section will populate."
-            )
-        else:
-            # Prices-captured-at — make it prominent. Drive returns modifiedTime
-            # in UTC ISO ("2026-05-05T13:27:00.000Z"); convert to Europe/Zurich.
-            _captured_label = ""
-            if _3way_mtime:
-                try:
-                    _mt = datetime.fromisoformat(_3way_mtime.replace("Z", "+00:00"))
-                    _mt_zh = _mt.astimezone(ZURICH_TZ)
-                    _captured_label = _mt_zh.strftime("%a %d %b %Y, %H:%M %Z")
-                except Exception:
-                    _captured_label = _3way_mtime
-
-            if _captured_label:
-                # st.info renders as a clearly-bordered blue panel — much more
-                # visible than a small grey caption.
+            if df4.empty and df4_eu.empty:
                 st.info(
-                    f"📅 **Prices captured at:** {_captured_label}  \n"
-                    f"Live yfinance quotes at the moment the SNIPER autopilot last "
-                    f"ran. Research views are from the broker PDFs you uploaded."
+                    "No SNIPER 4-way logs available yet. Composite batch fires "
+                    "daily at 16:45 Zurich; 4-way assembly at 17:00. "
+                    "Files: `sniper_4way_log.csv`, `sniper_4way_eu_log.csv`, "
+                    "`sniper_composite_log.csv` in the SNIPER Drive folder."
                 )
             else:
-                st.warning(
-                    "Capture timestamp unavailable — the deployed brief_drive_reader.py "
-                    "may be an older version. Re-upload the latest brief_drive_reader.py "
-                    "to surface the timestamp."
+                # Filter to the latest date — agreement is a daily snapshot.
+                def _latest(df):
+                    if df.empty or "date" not in df.columns:
+                        return df
+                    return df[df["date"] == df["date"].max()].copy()
+
+                df4_today = _latest(df4)
+                df4_eu_today = _latest(df4_eu)
+                latest_date = ""
+                if not df4_today.empty:
+                    latest_date = str(df4_today["date"].iloc[0])
+                elif not df4_eu_today.empty:
+                    latest_date = str(df4_eu_today["date"].iloc[0])
+
+                st.markdown(
+                    f"<div style='font-size:11.5px;color:#475467;margin-bottom:8px;'>"
+                    f"Snapshot date: <b>{latest_date}</b> · "
+                    f"Composite scores updated 16:45 Zurich · "
+                    f"Joins assembled 17:00 Zurich"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
 
-            try:
-                _today_iso = now_zurich().date().isoformat()
-            except Exception:
-                _today_iso = datetime.now().date().isoformat()
+                # Color map for the agreement buckets
+                _BUCKET_COLOR = {
+                    "UNANIMOUS":         "#16a34a",  # green
+                    "MOSH_OUTLIER":      "#dc2626",  # red — fidelity flag
+                    "COMPOSITE_OUTLIER": "#9333ea",  # purple — new layer signal
+                    "MAN_OUTLIER":       "#ea580c",  # orange
+                    "RESEARCH_OUTLIER":  "#0891b2",  # cyan
+                    "SPLIT":             "#64748b",  # slate
+                    "NO_RESEARCH":       "#94a3b8",  # light slate
+                    "NO_COMPOSITE":      "#94a3b8",
+                }
 
-            _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_today_iso)]
+                def _bucket_summary(df, region_label, order):
+                    if df.empty:
+                        st.info(f"No {region_label} rows for the latest date.")
+                        return
+                    counts = df["agreement_label"].value_counts().to_dict()
+                    total = len(df)
+                    cols = st.columns(len(order))
+                    for i, bucket in enumerate(order):
+                        n = counts.get(bucket, 0)
+                        pct = (100.0 * n / total) if total else 0.0
+                        color = _BUCKET_COLOR.get(bucket, "#64748b")
+                        with cols[i]:
+                            st.markdown(
+                                f"<div style='text-align:center;padding:8px;"
+                                f"border-radius:6px;background:#f8fafc;"
+                                f"border-left:3px solid {color};'>"
+                                f"<div style='font-size:11px;font-weight:700;"
+                                f"color:{color};'>{bucket}</div>"
+                                f"<div style='font-size:18px;font-weight:700;"
+                                f"color:#0f172a;'>{n}</div>"
+                                f"<div style='font-size:10px;color:#64748b;'>"
+                                f"{pct:.1f}%</div></div>",
+                                unsafe_allow_html=True,
+                            )
 
-            if _td.empty:
-                # Fall back to the most recent date in the file.
-                _all_dates = sorted(set(_3way_df["date"].astype(str).str[:10]))
-                _latest = _all_dates[-1] if _all_dates else ""
-                if _latest:
-                    _td = _3way_df[_3way_df["date"].astype(str).str.startswith(_latest)]
-                    st.warning(
-                        f"No rows for {_today_iso}; showing most recent date in file: **{_latest}**"
-                    )
+                _US_ORDER = ["UNANIMOUS", "MOSH_OUTLIER", "COMPOSITE_OUTLIER",
+                             "MAN_OUTLIER", "RESEARCH_OUTLIER", "SPLIT",
+                             "NO_RESEARCH"]
+                _EU_ORDER = ["UNANIMOUS", "MAN_OUTLIER", "RESEARCH_OUTLIER",
+                             "COMPOSITE_OUTLIER", "SPLIT", "NO_RESEARCH"]
 
-            if _td.empty:
-                st.info("No 3-way rows available.")
-            else:
-                # Include live_price in the dataframes so the user can see the
-                # actual price each signal was computed from.
-                _cols = [
-                    "ticker", "our_signal", "mosh_signal",
-                    "research_signal", "research_houses", "live_price",
-                ]
-                _have_cols = [c for c in _cols if c in _td.columns]
+                tabs_4w = st.tabs(["US (4-way)", "EU (3-way)", "Composite layers"])
 
-                _all_agree = _td[_td["agreement_label"] == "ALL_AGREE"][_have_cols].reset_index(drop=True)
-
-                st.metric("✅ All Agree", len(_all_agree))
-
-                if _all_agree.empty:
-                    st.info("No tickers where all three sources agree today.")
-                else:
-                    st.dataframe(
-                        _all_agree.rename(columns={
-                            "ticker":          "Ticker",
-                            "our_signal":      "SNIPER",
-                            "mosh_signal":     "Mosh",
-                            "research_signal": "Research",
-                            "research_houses": "Houses",
-                            "live_price":      "Price",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                # Full table for comparison. Restored 2026-05-05 — the user wants
-                # to be able to see all rows side-by-side, not just All Agree.
-                with st.expander(
-                    f"📊 Show all 3-way rows for the day ({len(_td)} tickers)",
-                    expanded=False,
-                ):
-                    _display_cols = [c for c in [
-                        "ticker", "agreement_label", "our_signal",
-                        "mosh_signal", "research_signal",
-                        "research_houses", "research_note", "live_price",
-                    ] if c in _td.columns]
-                    _all_today = _td[_display_cols].sort_values(
-                        by=["agreement_label", "ticker"]
-                    ).reset_index(drop=True)
-                    st.dataframe(
-                        _all_today.rename(columns={
-                            "ticker":           "Ticker",
-                            "agreement_label":  "Label",
-                            "our_signal":       "SNIPER",
-                            "mosh_signal":      "Mosh",
-                            "research_signal":  "Research",
-                            "research_houses":  "Houses",
-                            "research_note":    "Research note",
-                            "live_price":       "Price",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-    # ── 6c. EU 2-way confluence (on-screen only, lazy-loaded) ────────────────
-    # Same pattern as 6b but for the European universe. Sourced from
-    # sniper_eu_agreement_log.csv which the autopilot syncs to Drive on
-    # every run that fires step_eu_signals. NB: 2-way, not 3-way — Mosh's
-    # Platinum sheet doesn't cover EU tickers.
-    st.markdown("---")
-    st.subheader("🇪🇺 EU 2-Way Agreement — SNIPER vs Research")
-    st.caption(
-        "European tickers where SNIPER's 10-indicator model and broker "
-        "research align. Sourced from `sniper_eu_agreement_log.csv` synced "
-        "to Drive by the autopilot. Mosh's Platinum sheet doesn't cover EU, "
-        "so this is a 2-way (not 3-way) comparison."
-    )
-
-    if "_eu_loaded" not in st.session_state:
-        st.session_state["_eu_loaded"] = False
-        st.session_state["_eu_df"] = None
-        st.session_state["_eu_mtime"] = ""
-
-    _eu_btn_cols = st.columns([1, 3])
-    with _eu_btn_cols[0]:
-        if st.button("📥 Load EU 2-Way Agreement",
-                     use_container_width=True,
-                     key="load_eu_btn"):
-            try:
-                if _drive_eu_loader is not None:
-                    _r = _drive_eu_loader()
-                    if isinstance(_r, tuple) and len(_r) == 2:
-                        st.session_state["_eu_df"], st.session_state["_eu_mtime"] = _r
+                with tabs_4w[0]:
+                    if df4_today.empty:
+                        st.info("No US 4-way rows for the latest date.")
                     else:
-                        st.session_state["_eu_df"] = _r
-                        st.session_state["_eu_mtime"] = ""
-                    st.session_state["_eu_loaded"] = True
-            except Exception as _e:
-                st.error(f"EU agreement log read error: {_e}")
-                st.session_state["_eu_loaded"] = False
+                        _bucket_summary(df4_today, "US", _US_ORDER)
+                        st.markdown("")
+                        st.markdown(
+                            "<div style='font-size:11.5px;color:#475467;'>"
+                            "<b>UNANIMOUS</b> = all four agree · "
+                            "<b>MOSH_OUTLIER</b> = MAN+Research+Composite align, Mosh diverges (fidelity flag) · "
+                            "<b>COMPOSITE_OUTLIER</b> = three-way agrees, composite differs (new-layer signal) · "
+                            "<b>SPLIT</b> = no three-way consensus"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        # Bucket filter
+                        bucket_filter = st.multiselect(
+                            "Filter by bucket",
+                            options=_US_ORDER + ["NO_COMPOSITE"],
+                            default=["UNANIMOUS", "MOSH_OUTLIER", "COMPOSITE_OUTLIER"],
+                            key="us_4way_bucket_filter",
+                        )
+                        view = df4_today.copy()
+                        if bucket_filter:
+                            view = view[view["agreement_label"].isin(bucket_filter)]
+                        display_cols = [
+                            "ticker", "agreement_label",
+                            "man_signal", "mosh_signal", "research_signal",
+                            "composite_signal", "composite_scs",
+                            "research_houses", "live_price",
+                        ]
+                        display_cols = [c for c in display_cols if c in view.columns]
+                        st.dataframe(
+                            view[display_cols].sort_values(
+                                ["agreement_label", "ticker"]
+                            ),
+                            use_container_width=True,
+                            height=400,
+                            hide_index=True,
+                        )
 
-    if not st.session_state.get("_eu_loaded"):
-        st.info("Click **Load EU 2-Way Agreement** to fetch today's EU agreement table from Drive.")
-    else:
-        _eu_df = st.session_state.get("_eu_df")
-        _eu_mtime = st.session_state.get("_eu_mtime", "")
+                with tabs_4w[1]:
+                    if df4_eu_today.empty:
+                        st.info("No EU 3-way rows for the latest date.")
+                    else:
+                        _bucket_summary(df4_eu_today, "EU", _EU_ORDER)
+                        st.markdown("")
+                        st.markdown(
+                            "<div style='font-size:11.5px;color:#475467;'>"
+                            "EU is 3-way (no Mosh column — Mosh doesn't cover European tickers)."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        bucket_filter_eu = st.multiselect(
+                            "Filter by bucket",
+                            options=_EU_ORDER + ["NO_COMPOSITE"],
+                            default=["UNANIMOUS", "MAN_OUTLIER", "RESEARCH_OUTLIER", "COMPOSITE_OUTLIER"],
+                            key="eu_3way_bucket_filter",
+                        )
+                        view_eu = df4_eu_today.copy()
+                        if bucket_filter_eu:
+                            view_eu = view_eu[view_eu["agreement_label"].isin(bucket_filter_eu)]
+                        display_cols_eu = [
+                            "ticker", "name", "agreement_label",
+                            "man_signal", "research_signal",
+                            "composite_signal", "composite_scs",
+                            "research_houses", "price",
+                        ]
+                        display_cols_eu = [c for c in display_cols_eu if c in view_eu.columns]
+                        st.dataframe(
+                            view_eu[display_cols_eu].sort_values(
+                                ["agreement_label", "ticker"]
+                            ),
+                            use_container_width=True,
+                            height=400,
+                            hide_index=True,
+                        )
 
-        if _eu_df is None or _eu_df.empty:
-            st.info(
-                "EU agreement log not yet on Drive. After the next autopilot "
-                "run (which fires step_eu_signals → step_eu_agreement), the "
-                "file `sniper_eu_agreement_log.csv` will be in the SNIPER "
-                "Drive folder and this section will populate."
-            )
-        else:
-            # Capture timestamp panel (mirror US 3-way)
-            _eu_captured = ""
-            if _eu_mtime:
-                try:
-                    _eu_mt = datetime.fromisoformat(_eu_mtime.replace("Z", "+00:00"))
-                    _eu_captured = _eu_mt.astimezone(ZURICH_TZ).strftime(
-                        "%a %d %b %Y, %H:%M %Z"
-                    )
-                except Exception:
-                    _eu_captured = _eu_mtime
+                with tabs_4w[2]:
+                    if df_comp.empty:
+                        st.info("No composite layer breakdown available.")
+                    else:
+                        df_comp_today = _latest(df_comp)
+                        st.markdown(
+                            "<div style='font-size:11.5px;color:#475467;margin-bottom:8px;'>"
+                            "Per-layer subscores. Each layer ∈ [-1, +1]. SCS is the "
+                            "weighted blend × risk multiplier. Empty cells = layer "
+                            "couldn't be computed (e.g. no broker coverage)."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        layer_cols = [
+                            "ticker", "region", "scs", "signal", "hard_reject",
+                            "layer_technical", "layer_research",
+                            "layer_fundamentals", "layer_revisions",
+                            "risk_multiplier", "active_layers",
+                        ]
+                        layer_cols = [c for c in layer_cols if c in df_comp_today.columns]
+                        st.dataframe(
+                            df_comp_today[layer_cols].sort_values(
+                                "scs", ascending=False,
+                                key=lambda s: pd.to_numeric(s, errors="coerce"),
+                            ),
+                            use_container_width=True,
+                            height=400,
+                            hide_index=True,
+                        )
 
-            if _eu_captured:
-                st.info(
-                    f"📅 **EU prices captured at:** {_eu_captured}  \n"
-                    f"Live yfinance quotes for European tickers at the "
-                    f"moment the SNIPER autopilot last ran."
-                )
-
-            try:
-                _eu_today_iso = now_zurich().date().isoformat()
-            except Exception:
-                _eu_today_iso = datetime.now().date().isoformat()
-
-            _eu_td = _eu_df[_eu_df["date"].astype(str).str.startswith(_eu_today_iso)]
-
-            if _eu_td.empty:
-                _eu_dates = sorted(set(_eu_df["date"].astype(str).str[:10]))
-                _eu_latest = _eu_dates[-1] if _eu_dates else ""
-                if _eu_latest:
-                    _eu_td = _eu_df[_eu_df["date"].astype(str).str.startswith(_eu_latest)]
-                    st.warning(
-                        f"No EU rows for {_eu_today_iso}; showing most recent "
-                        f"date in file: **{_eu_latest}**"
-                    )
-
-            if _eu_td.empty:
-                st.info("No EU rows available.")
-            else:
-                _eu_cols = [
-                    "ticker", "name", "our_signal",
-                    "research_signal", "research_houses", "price",
-                ]
-                _eu_have_cols = [c for c in _eu_cols if c in _eu_td.columns]
-                _eu_agree = _eu_td[_eu_td["agreement_label"] == "AGREE"][
-                    _eu_have_cols
-                ].reset_index(drop=True)
-
-                st.metric("✅ EU AGREE", len(_eu_agree))
-
-                if _eu_agree.empty:
-                    st.info("No EU tickers where SNIPER and research agree today.")
-                else:
-                    st.dataframe(
-                        _eu_agree.rename(columns={
-                            "ticker":          "Ticker",
-                            "name":            "Name",
-                            "our_signal":      "SNIPER",
-                            "research_signal": "Research",
-                            "research_houses": "Houses",
-                            "price":           "Price",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                with st.expander(
-                    f"📊 Show all EU 2-way rows for the day ({len(_eu_td)} tickers)",
-                    expanded=False,
-                ):
-                    _eu_display_cols = [c for c in [
-                        "ticker", "name", "agreement_label", "our_signal",
-                        "research_signal", "research_houses",
-                        "research_note", "price",
-                    ] if c in _eu_td.columns]
-                    _eu_all_today = _eu_td[_eu_display_cols].sort_values(
-                        by=["agreement_label", "ticker"]
-                    ).reset_index(drop=True)
-                    st.dataframe(
-                        _eu_all_today.rename(columns={
-                            "ticker":           "Ticker",
-                            "name":             "Name",
-                            "agreement_label":  "Label",
-                            "our_signal":       "SNIPER",
-                            "research_signal":  "Research",
-                            "research_houses":  "Houses",
-                            "research_note":    "Research note",
-                            "price":            "Price",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-    # ── 7. PDF download ───────────────────────────────────────────────────────
+    # ── 8. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")
 
     st.download_button(

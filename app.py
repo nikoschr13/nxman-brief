@@ -5598,8 +5598,9 @@ else:
 
             if df4.empty and df4_eu.empty:
                 st.info(
-                    "No SNIPER 4-way logs available yet. Composite batch fires "
-                    "daily at 16:45 Zurich; 4-way assembly at 17:00. "
+                    "No SNIPER 4-way logs available yet. EU chain fires "
+                    "daily at 09:15 → 09:28 Zurich (EU ready for trading at 09:30). "
+                    "Full US+EU chain fires 16:00 → 16:35 Zurich. "
                     "Files: `sniper_4way_log.csv`, `sniper_4way_eu_log.csv`, "
                     "`sniper_composite_log.csv` in the SNIPER Drive folder."
                 )
@@ -5621,8 +5622,8 @@ else:
                 st.markdown(
                     f"<div style='font-size:11.5px;color:#475467;margin-bottom:8px;'>"
                     f"Snapshot date: <b>{latest_date}</b> · "
-                    f"Composite scores updated 16:45 Zurich · "
-                    f"Joins assembled 17:00 Zurich"
+                    f"EU refresh 09:20 → 09:28 Zurich · "
+                    f"Full US+EU 16:10 → 16:35 Zurich"
                     f"</div>",
                     unsafe_allow_html=True,
                 )

@@ -5590,7 +5590,12 @@ else:
     except Exception:
         _have_4way = False
 
-    if _have_4way:
+    # Kill switch added 2026-05-29 — temporarily skipping SNIPER panel render
+    # while we debug a Streamlit Cloud crash. Set _SNIPER_PANELS_ENABLED = True
+    # to re-enable once we've fixed the underlying issue. Removing the wrapper
+    # entirely is safe once the panel is verified working.
+    _SNIPER_PANELS_ENABLED = False
+    if _have_4way and _SNIPER_PANELS_ENABLED:
         with st.expander("🎯 SNIPER Agreement — MAN · Mosh · Research · Composite", expanded=False):
             df4 = load_4way_df_cached()
             df4_eu = load_4way_eu_df_cached()
@@ -5791,7 +5796,10 @@ else:
     except Exception:
         _have_macro = False
 
-    if _have_macro:
+    # Kill switch (see SNIPER section above). Set to True to re-enable
+    # the Macro Views panel after debugging the underlying crash.
+    _MACRO_PANEL_ENABLED = False
+    if _have_macro and _MACRO_PANEL_ENABLED:
         with st.expander("🌍 Macro Views by Topic — Houses Side-by-Side", expanded=False):
             df_macro = load_research_macro_df_cached()
             if df_macro.empty:

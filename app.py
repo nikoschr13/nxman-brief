@@ -5578,11 +5578,9 @@ else:
 
     # ── 7. SNIPER 4-way Agreement + Macro Views ──────────────────────────────
     # Loads data from Drive with HARD TIMEOUTS so the worker can never hang.
-    # Distinguishes 4 cases per loader and surfaces each visibly:
-    #   - "ok"      → data loaded, table renders
-    #   - "empty"   → loader returned empty DataFrame (no data for today)
-    #   - "timeout" → 10-second wall clock exceeded (Drive slow/unreachable)
-    #   - "error"   → loader threw something else (auth, missing CSV, etc.)
+    # Each loader call has a 10-second wall clock; on timeout/error/empty
+    # we show a visible banner instead of silently dropping the section.
+    # Tables are sortable (click column headers) and have a free-text filter.
     from concurrent.futures import ThreadPoolExecutor as _TPE
     from concurrent.futures import TimeoutError as _TimeoutErr
 
@@ -5604,13 +5602,38 @@ else:
             return pd.DataFrame(), "error", f"{type(_exc).__name__}: {_exc}"
 
     def _status_banner(name, status, err):
-        """Render a small inline notice for non-ok loader status."""
         if status == "timeout":
             st.warning(f"⏱ **{name}** — Drive timed out ({err}). Data not loaded for this view.")
         elif status == "error":
             st.warning(f"⚠ **{name}** — couldn't load: `{err}`")
         elif status == "empty":
             st.info(f"📭 **{name}** — no rows in the Drive file yet (auto-fire will populate it).")
+
+    def _filtered_table(df, columns, search_key, height=260):
+        """Render a sortable table with a free-text filter above it.
+        Filter matches against any string column (case-insensitive substring).
+        Click column headers to sort. Use the filter box to search."""
+        # Pick the columns that actually exist in this frame
+        cols = [c for c in columns if c in df.columns]
+        view = df[cols] if cols else df.copy()
+        # Filter box
+        query = st.text_input(
+            "🔍 Filter (matches any column)",
+            value="",
+            key=search_key,
+            placeholder="e.g. UNANIMOUS, MOSH_OUTLIER, Buy, AAPL, Tech, ...",
+        )
+        if query:
+            q = query.strip().lower()
+            mask = view.apply(
+                lambda row: any(q in str(v).lower() for v in row.values),
+                axis=1,
+            )
+            view = view[mask]
+            st.caption(f"{len(view)} rows match · click any column header to sort")
+        else:
+            st.caption(f"{len(view)} rows · click any column header to sort")
+        st.dataframe(view, use_container_width=True, hide_index=True, height=height)
 
     try:
         from brief_drive_reader import (
@@ -5630,7 +5653,7 @@ else:
             df4_eu,   st_eu,    err_eu    = _safe_load(load_4way_eu_df_cached,        timeout_s=10)
             df_macro, st_macro, err_macro = _safe_load(load_research_macro_df_cached, timeout_s=10)
 
-            # ── SNIPER 4-way panel header + content ──────────────────────────
+            # ── SNIPER 4-way panel ────────────────────────────────────────────
             st.markdown("### 🎯 SNIPER Agreement — MAN · Mosh · Research · Composite")
             st.markdown(
                 "<div style='font-size:11px;color:#64748b;margin-bottom:6px;'>"
@@ -5642,16 +5665,17 @@ else:
             # US side
             if st_us == "ok" and "date" in df4.columns:
                 latest_us = df4["date"].max()
-                st.markdown(f"**US 4-way · latest {latest_us}**")
-                us_view = df4[df4["date"] == latest_us]
-                us_cols = [c for c in (
-                    "ticker", "agreement_label",
-                    "man_signal", "mosh_signal", "research_signal", "composite_signal",
-                    "composite_scs", "research_houses", "live_price",
-                ) if c in us_view.columns]
-                st.dataframe(
-                    us_view[us_cols] if us_cols else us_view,
-                    use_container_width=True, hide_index=True, height=260,
+                st.markdown(f"#### US 4-way · latest {latest_us}")
+                us_today = df4[df4["date"] == latest_us]
+                _filtered_table(
+                    us_today,
+                    columns=[
+                        "ticker", "agreement_label",
+                        "man_signal", "mosh_signal", "research_signal", "composite_signal",
+                        "composite_scs", "research_houses", "live_price",
+                    ],
+                    search_key="sniper_us_filter",
+                    height=300,
                 )
             else:
                 _status_banner("US 4-way", st_us, err_us)
@@ -5659,16 +5683,17 @@ else:
             # EU side
             if st_eu == "ok" and "date" in df4_eu.columns:
                 latest_eu = df4_eu["date"].max()
-                st.markdown(f"**EU 3-way · latest {latest_eu}**")
-                eu_view = df4_eu[df4_eu["date"] == latest_eu]
-                eu_cols = [c for c in (
-                    "ticker", "name", "agreement_label",
-                    "man_signal", "research_signal", "composite_signal",
-                    "composite_scs", "research_houses", "price",
-                ) if c in eu_view.columns]
-                st.dataframe(
-                    eu_view[eu_cols] if eu_cols else eu_view,
-                    use_container_width=True, hide_index=True, height=260,
+                st.markdown(f"#### EU 3-way · latest {latest_eu}")
+                eu_today = df4_eu[df4_eu["date"] == latest_eu]
+                _filtered_table(
+                    eu_today,
+                    columns=[
+                        "ticker", "name", "agreement_label",
+                        "man_signal", "research_signal", "composite_signal",
+                        "composite_scs", "research_houses", "price",
+                    ],
+                    search_key="sniper_eu_filter",
+                    height=300,
                 )
             else:
                 _status_banner("EU 3-way", st_eu, err_eu)
@@ -5677,15 +5702,16 @@ else:
             if st_macro == "ok" and "date" in df_macro.columns:
                 latest_m = df_macro["date"].max()
                 st.markdown(f"### 🌍 Macro Views by Topic · latest {latest_m}")
-                m_view = df_macro[df_macro["date"] == latest_m]
-                m_cols = [c for c in (
-                    "date", "house", "region", "asset_class", "sector",
-                    "view_raw", "view_normalized", "conviction", "time_horizon",
-                    "theme", "source_doc",
-                ) if c in m_view.columns]
-                st.dataframe(
-                    m_view[m_cols] if m_cols else m_view,
-                    use_container_width=True, hide_index=True, height=300,
+                macro_today = df_macro[df_macro["date"] == latest_m]
+                _filtered_table(
+                    macro_today,
+                    columns=[
+                        "date", "house", "region", "asset_class", "sector",
+                        "view_raw", "view_normalized", "conviction", "time_horizon",
+                        "theme", "source_doc",
+                    ],
+                    search_key="macro_filter",
+                    height=320,
                 )
             else:
                 st.markdown("### 🌍 Macro Views by Topic")

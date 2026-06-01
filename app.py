@@ -1224,7 +1224,14 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
         return (0, 0)
 
     try:
-        pdfs = _drive_pdf_loader()
+        # Pull from both Inbox AND Processed so the library isn't empty when
+        # the nightly archiver (00:05 Zurich) has moved yesterday's drops out
+        # of Inbox. Cap at 20 most-recent PDFs across both folders.
+        pdfs = _drive_pdf_loader(
+            include_inbox=True,
+            include_processed=True,
+            max_pdfs=20,
+        )
     except Exception:
         st.session_state[flag] = True  # don't loop-retry on error
         return (0, 0)

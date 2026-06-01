@@ -5576,437 +5576,127 @@ else:
         with tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
-    # ── 7. SNIPER 4-way Agreement ─────────────────────────────────────────────
-    # MAN (quant Layer 1) vs Mosh (external benchmark) vs Research (broker
-    # consensus) vs Composite (5-layer roll-up). Pulled from Drive — falls
-    # back gracefully to empty if the SA / folder isn't configured.
+    # ── 7. SNIPER 4-way Agreement + Macro Views ──────────────────────────────
+    # Loads data from Drive with HARD TIMEOUTS so the worker can never hang.
+    # Distinguishes 4 cases per loader and surfaces each visibly:
+    #   - "ok"      → data loaded, table renders
+    #   - "empty"   → loader returned empty DataFrame (no data for today)
+    #   - "timeout" → 10-second wall clock exceeded (Drive slow/unreachable)
+    #   - "error"   → loader threw something else (auth, missing CSV, etc.)
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    from concurrent.futures import TimeoutError as _TimeoutErr
+
+    def _safe_load(loader, timeout_s=10):
+        """Run a Drive loader with a hard wall-clock timeout.
+        Returns (DataFrame, status_string, optional_error_message)."""
+        try:
+            with _TPE(max_workers=1) as _ex:
+                _fut = _ex.submit(loader)
+                _result = _fut.result(timeout=timeout_s)
+            if not hasattr(_result, "empty"):
+                return pd.DataFrame(), "error", f"loader returned {type(_result).__name__}, expected DataFrame"
+            if _result.empty:
+                return _result, "empty", None
+            return _result, "ok", None
+        except _TimeoutErr:
+            return pd.DataFrame(), "timeout", f"Drive call exceeded {timeout_s}s"
+        except Exception as _exc:
+            return pd.DataFrame(), "error", f"{type(_exc).__name__}: {_exc}"
+
+    def _status_banner(name, status, err):
+        """Render a small inline notice for non-ok loader status."""
+        if status == "timeout":
+            st.warning(f"⏱ **{name}** — Drive timed out ({err}). Data not loaded for this view.")
+        elif status == "error":
+            st.warning(f"⚠ **{name}** — couldn't load: `{err}`")
+        elif status == "empty":
+            st.info(f"📭 **{name}** — no rows in the Drive file yet (auto-fire will populate it).")
+
     try:
         from brief_drive_reader import (
             load_4way_df_cached,
             load_4way_eu_df_cached,
             load_composite_df_cached,
+            load_research_macro_df_cached,
         )
-        _have_4way = True
-    except Exception:
-        _have_4way = False
+        _have_sniper = True
+    except Exception as _imp_exc:
+        _have_sniper = False
+        st.warning(f"⚠ **SNIPER + Macro panels** — brief_drive_reader import failed: `{type(_imp_exc).__name__}: {_imp_exc}`")
 
-    # Kill switch added 2026-05-29 — temporarily skipping SNIPER panel render
-    # Defensive wrapper added 2026-05-29 — if anything inside the SNIPER panel
-    # throws (Drive credentials, pandas column mismatch, Streamlit nesting, etc.),
-    # show the error inline rather than crashing the whole Brief.
-    if _have_4way:
+    if _have_sniper:
         try:
-            with st.expander("🎯 SNIPER Agreement — MAN · Mosh · Research · Composite", expanded=False):
-                df4 = load_4way_df_cached()
-                df4_eu = load_4way_eu_df_cached()
-                df_comp = load_composite_df_cached()
+            df4,      st_us,    err_us    = _safe_load(load_4way_df_cached,           timeout_s=10)
+            df4_eu,   st_eu,    err_eu    = _safe_load(load_4way_eu_df_cached,        timeout_s=10)
+            df_macro, st_macro, err_macro = _safe_load(load_research_macro_df_cached, timeout_s=10)
 
-                if df4.empty and df4_eu.empty:
-                    st.info(
-                        "No SNIPER 4-way logs available yet. EU chain fires "
-                        "daily at 09:15 → 09:28 Zurich (EU ready for trading at 09:30). "
-                        "Full US+EU chain fires 16:00 → 16:35 Zurich. "
-                        "Files: `sniper_4way_log.csv`, `sniper_4way_eu_log.csv`, "
-                        "`sniper_composite_log.csv` in the SNIPER Drive folder."
-                    )
-                else:
-                    # Filter to the latest date — agreement is a daily snapshot.
-                    def _latest(df):
-                        if df.empty or "date" not in df.columns:
-                            return df
-                        return df[df["date"] == df["date"].max()].copy()
+            # ── SNIPER 4-way panel header + content ──────────────────────────
+            st.markdown("### 🎯 SNIPER Agreement — MAN · Mosh · Research · Composite")
+            st.markdown(
+                "<div style='font-size:11px;color:#64748b;margin-bottom:6px;'>"
+                "EU refresh 09:20 → 09:28 Zurich · Full US+EU 16:10 → 16:35 Zurich"
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
-                    df4_today = _latest(df4)
-                    df4_eu_today = _latest(df4_eu)
-                    latest_date = ""
-                    if not df4_today.empty:
-                        latest_date = str(df4_today["date"].iloc[0])
-                    elif not df4_eu_today.empty:
-                        latest_date = str(df4_eu_today["date"].iloc[0])
+            # US side
+            if st_us == "ok" and "date" in df4.columns:
+                latest_us = df4["date"].max()
+                st.markdown(f"**US 4-way · latest {latest_us}**")
+                us_view = df4[df4["date"] == latest_us]
+                us_cols = [c for c in (
+                    "ticker", "agreement_label",
+                    "man_signal", "mosh_signal", "research_signal", "composite_signal",
+                    "composite_scs", "research_houses", "live_price",
+                ) if c in us_view.columns]
+                st.dataframe(
+                    us_view[us_cols] if us_cols else us_view,
+                    use_container_width=True, hide_index=True, height=260,
+                )
+            else:
+                _status_banner("US 4-way", st_us, err_us)
 
-                    st.markdown(
-                        f"<div style='font-size:11.5px;color:#475467;margin-bottom:8px;'>"
-                        f"Snapshot date: <b>{latest_date}</b> · "
-                        f"EU refresh 09:20 → 09:28 Zurich · "
-                        f"Full US+EU 16:10 → 16:35 Zurich"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+            # EU side
+            if st_eu == "ok" and "date" in df4_eu.columns:
+                latest_eu = df4_eu["date"].max()
+                st.markdown(f"**EU 3-way · latest {latest_eu}**")
+                eu_view = df4_eu[df4_eu["date"] == latest_eu]
+                eu_cols = [c for c in (
+                    "ticker", "name", "agreement_label",
+                    "man_signal", "research_signal", "composite_signal",
+                    "composite_scs", "research_houses", "price",
+                ) if c in eu_view.columns]
+                st.dataframe(
+                    eu_view[eu_cols] if eu_cols else eu_view,
+                    use_container_width=True, hide_index=True, height=260,
+                )
+            else:
+                _status_banner("EU 3-way", st_eu, err_eu)
 
-                    # Color map for the agreement buckets
-                    _BUCKET_COLOR = {
-                        "UNANIMOUS":         "#16a34a",  # green
-                        "MOSH_OUTLIER":      "#dc2626",  # red — fidelity flag
-                        "COMPOSITE_OUTLIER": "#9333ea",  # purple — new layer signal
-                        "MAN_OUTLIER":       "#ea580c",  # orange
-                        "RESEARCH_OUTLIER":  "#0891b2",  # cyan
-                        "SPLIT":             "#64748b",  # slate
-                        "NO_RESEARCH":       "#94a3b8",  # light slate
-                        "NO_COMPOSITE":      "#94a3b8",
-                    }
-
-                    def _bucket_summary(df, region_label, order):
-                        if df.empty:
-                            st.info(f"No {region_label} rows for the latest date.")
-                            return
-                        counts = df["agreement_label"].value_counts().to_dict()
-                        total = len(df)
-                        cols = st.columns(len(order))
-                        for i, bucket in enumerate(order):
-                            n = counts.get(bucket, 0)
-                            pct = (100.0 * n / total) if total else 0.0
-                            color = _BUCKET_COLOR.get(bucket, "#64748b")
-                            with cols[i]:
-                                st.markdown(
-                                    f"<div style='text-align:center;padding:8px;"
-                                    f"border-radius:6px;background:#f8fafc;"
-                                    f"border-left:3px solid {color};'>"
-                                    f"<div style='font-size:11px;font-weight:700;"
-                                    f"color:{color};'>{bucket}</div>"
-                                    f"<div style='font-size:18px;font-weight:700;"
-                                    f"color:#0f172a;'>{n}</div>"
-                                    f"<div style='font-size:10px;color:#64748b;'>"
-                                    f"{pct:.1f}%</div></div>",
-                                    unsafe_allow_html=True,
-                                )
-
-                    _US_ORDER = ["UNANIMOUS", "MOSH_OUTLIER", "COMPOSITE_OUTLIER",
-                                 "MAN_OUTLIER", "RESEARCH_OUTLIER", "SPLIT",
-                                 "NO_RESEARCH"]
-                    _EU_ORDER = ["UNANIMOUS", "MAN_OUTLIER", "RESEARCH_OUTLIER",
-                                 "COMPOSITE_OUTLIER", "SPLIT", "NO_RESEARCH"]
-
-                    tabs_4w = st.tabs(["US (4-way)", "EU (3-way)", "Composite layers"])
-
-                    with tabs_4w[0]:
-                        if df4_today.empty:
-                            st.info("No US 4-way rows for the latest date.")
-                        else:
-                            _bucket_summary(df4_today, "US", _US_ORDER)
-                            st.markdown("")
-                            st.markdown(
-                                "<div style='font-size:11.5px;color:#475467;'>"
-                                "<b>UNANIMOUS</b> = all four agree · "
-                                "<b>MOSH_OUTLIER</b> = MAN+Research+Composite align, Mosh diverges (fidelity flag) · "
-                                "<b>COMPOSITE_OUTLIER</b> = three-way agrees, composite differs (new-layer signal) · "
-                                "<b>SPLIT</b> = no three-way consensus"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                            # Bucket filter
-                            bucket_filter = st.multiselect(
-                                "Filter by bucket",
-                                options=_US_ORDER + ["NO_COMPOSITE"],
-                                default=["UNANIMOUS", "MOSH_OUTLIER", "COMPOSITE_OUTLIER"],
-                                key="us_4way_bucket_filter",
-                            )
-                            view = df4_today.copy()
-                            if bucket_filter:
-                                view = view[view["agreement_label"].isin(bucket_filter)]
-                            display_cols = [
-                                "ticker", "agreement_label",
-                                "man_signal", "mosh_signal", "research_signal",
-                                "composite_signal", "composite_scs",
-                                "research_houses", "live_price",
-                            ]
-                            display_cols = [c for c in display_cols if c in view.columns]
-                            st.dataframe(
-                                view[display_cols].sort_values(
-                                    ["agreement_label", "ticker"]
-                                ),
-                                use_container_width=True,
-                                height=400,
-                                hide_index=True,
-                            )
-
-                    with tabs_4w[1]:
-                        if df4_eu_today.empty:
-                            st.info("No EU 3-way rows for the latest date.")
-                        else:
-                            _bucket_summary(df4_eu_today, "EU", _EU_ORDER)
-                            st.markdown("")
-                            st.markdown(
-                                "<div style='font-size:11.5px;color:#475467;'>"
-                                "EU is 3-way (no Mosh column — Mosh doesn't cover European tickers)."
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                            bucket_filter_eu = st.multiselect(
-                                "Filter by bucket",
-                                options=_EU_ORDER + ["NO_COMPOSITE"],
-                                default=["UNANIMOUS", "MAN_OUTLIER", "RESEARCH_OUTLIER", "COMPOSITE_OUTLIER"],
-                                key="eu_3way_bucket_filter",
-                            )
-                            view_eu = df4_eu_today.copy()
-                            if bucket_filter_eu:
-                                view_eu = view_eu[view_eu["agreement_label"].isin(bucket_filter_eu)]
-                            display_cols_eu = [
-                                "ticker", "name", "agreement_label",
-                                "man_signal", "research_signal",
-                                "composite_signal", "composite_scs",
-                                "research_houses", "price",
-                            ]
-                            display_cols_eu = [c for c in display_cols_eu if c in view_eu.columns]
-                            st.dataframe(
-                                view_eu[display_cols_eu].sort_values(
-                                    ["agreement_label", "ticker"]
-                                ),
-                                use_container_width=True,
-                                height=400,
-                                hide_index=True,
-                            )
-
-                    with tabs_4w[2]:
-                        if df_comp.empty:
-                            st.info("No composite layer breakdown available.")
-                        else:
-                            df_comp_today = _latest(df_comp)
-                            st.markdown(
-                                "<div style='font-size:11.5px;color:#475467;margin-bottom:8px;'>"
-                                "Per-layer subscores. Each layer ∈ [-1, +1]. SCS is the "
-                                "weighted blend × risk multiplier. Empty cells = layer "
-                                "couldn't be computed (e.g. no broker coverage)."
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                            layer_cols = [
-                                "ticker", "region", "scs", "signal", "hard_reject",
-                                "layer_technical", "layer_research",
-                                "layer_fundamentals", "layer_revisions",
-                                "risk_multiplier", "active_layers",
-                            ]
-                            layer_cols = [c for c in layer_cols if c in df_comp_today.columns]
-                            st.dataframe(
-                                df_comp_today[layer_cols].sort_values(
-                                    "scs", ascending=False,
-                                    key=lambda s: pd.to_numeric(s, errors="coerce"),
-                                ),
-                                use_container_width=True,
-                                height=400,
-                                hide_index=True,
-                            )
-
+            # ── Macro Views panel ────────────────────────────────────────────
+            if st_macro == "ok" and "date" in df_macro.columns:
+                latest_m = df_macro["date"].max()
+                st.markdown(f"### 🌍 Macro Views by Topic · latest {latest_m}")
+                m_view = df_macro[df_macro["date"] == latest_m]
+                m_cols = [c for c in (
+                    "date", "house", "region", "asset_class", "sector",
+                    "view_raw", "view_normalized", "conviction", "time_horizon",
+                    "theme", "source_doc",
+                ) if c in m_view.columns]
+                st.dataframe(
+                    m_view[m_cols] if m_cols else m_view,
+                    use_container_width=True, hide_index=True, height=300,
+                )
+            else:
+                st.markdown("### 🌍 Macro Views by Topic")
+                _status_banner("Macro Views", st_macro, err_macro)
         except Exception as _sniper_exc:
-            import traceback as _tb
             st.warning(
-                f"SNIPER Agreement panel temporarily unavailable: "
+                f"⚠ SNIPER panels — unexpected error: "
                 f"`{type(_sniper_exc).__name__}: {_sniper_exc}`"
             )
-            with st.expander("Show SNIPER traceback (for debugging)"):
-                st.code(_tb.format_exc(), language="python")
-    # ── 7b. Macro Views by Topic ──────────────────────────────────────────────
-    # Houses side-by-side comparison of regional / asset-class / sector tilts.
-    # Pulled from research_macro.csv on Drive — written by sniper_macro_extract
-    # which runs alongside the per-stock extractor on every PDF in Research_Inbox.
-    try:
-        from brief_drive_reader import load_research_macro_df_cached
-        _have_macro = True
-    except Exception:
-        _have_macro = False
 
-    # Kill switch (see SNIPER section above). Set to True to re-enable
-    # Defensive wrapper — same pattern as the SNIPER section above.
-    if _have_macro:
-        try:
-            with st.expander("🌍 Macro Views by Topic — Houses Side-by-Side", expanded=False):
-                df_macro = load_research_macro_df_cached()
-                if df_macro.empty:
-                    st.info(
-                        "No macro views available yet. The macro extractor fires on "
-                        "every PDF the autopilot processes; views land here once you "
-                        "drop UBS Daily Europe / CIO Weekly / similar publications "
-                        "into the Drive Research_Inbox folder."
-                    )
-                else:
-                    # ── filters
-                    st.markdown(
-                        "<div style='font-size:11.5px;color:#475467;margin-bottom:6px;'>"
-                        "Broker macro / sector / asset-class views, pivoted by topic. "
-                        "Each cell shows the most-recent view from that house on that topic."
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
 
-                    col_f1, col_f2, col_f3 = st.columns(3)
-                    with col_f1:
-                        asset_options = sorted(
-                            [a for a in df_macro["asset_class"].dropna().unique() if str(a).strip()]
-                        )
-                        asset_filter = st.multiselect(
-                            "Asset class",
-                            options=asset_options,
-                            default=asset_options,
-                            key="macro_asset_filter",
-                        )
-                    with col_f2:
-                        region_options = sorted(
-                            [r for r in df_macro["region"].dropna().unique() if str(r).strip()]
-                        )
-                        region_filter = st.multiselect(
-                            "Region",
-                            options=region_options,
-                            default=region_options,
-                            key="macro_region_filter",
-                        )
-                    with col_f3:
-                        days_back = st.selectbox(
-                            "Look back",
-                            options=[7, 14, 30, 60, 90, 9999],
-                            format_func=lambda d: f"Last {d} days" if d != 9999 else "All time",
-                            index=1,
-                            key="macro_days_filter",
-                        )
-
-                    # Apply filters
-                    view = df_macro.copy()
-                    if asset_filter:
-                        view = view[view["asset_class"].isin(asset_filter)]
-                    if region_filter:
-                        view = view[view["region"].isin(region_filter)]
-                    if days_back < 9999:
-                        cutoff = (pd.Timestamp.today() - pd.Timedelta(days=int(days_back))).strftime("%Y-%m-%d")
-                        view = view[view["date"] >= cutoff]
-
-                    if view.empty:
-                        st.info("No macro views match the current filters.")
-                    else:
-                        # ── pivot: rows = (region, asset_class, sector), cols = house,
-                        # cell = most-recent view_normalized for that combo
-                        # Sort by date so 'last' gives the most recent view
-                        view_sorted = view.sort_values("date")
-                        keys = ["region", "asset_class", "sector"]
-                        last_views = view_sorted.groupby(keys + ["house"], dropna=False).agg(
-                            view_normalized=("view_normalized", "last"),
-                            view_raw=("view_raw", "last"),
-                            date=("date", "last"),
-                            theme=("theme", "last"),
-                            source_doc=("source_doc", "last"),
-                            quoted_snippet=("quoted_snippet", "last"),
-                        ).reset_index()
-
-                        # Color-code by view_normalized
-                        _VIEW_COLORS = {
-                            "OW":  "#16a34a",  # green
-                            "POS": "#16a34a",
-                            "N":   "#64748b",  # slate
-                            "UW":  "#dc2626",  # red
-                            "NEG": "#dc2626",
-                            "":    "#94a3b8",  # light slate
-                        }
-                        _VIEW_LABELS = {
-                            "OW":  "Overweight",
-                            "UW":  "Underweight",
-                            "N":   "Neutral",
-                            "POS": "Positive",
-                            "NEG": "Negative",
-                            "":    "—",
-                        }
-
-                        # Pivot to topic × house grid
-                        pivot = last_views.pivot_table(
-                            index=keys,
-                            columns="house",
-                            values="view_normalized",
-                            aggfunc="last",
-                            fill_value="",
-                        )
-
-                        # Render with HTML so we can color cells + show view_raw on hover
-                        houses_present = sorted([str(h) for h in pivot.columns if str(h).strip()])
-                        html_rows = []
-                        html_rows.append("<table style='width:100%;border-collapse:collapse;font-size:12px;'>")
-                        html_rows.append(
-                            "<thead><tr>"
-                            "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Region</th>"
-                            "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Asset</th>"
-                            "<th style='text-align:left;padding:6px 8px;background:#f1f5f9;'>Sector</th>"
-                            + "".join(
-                                f"<th style='text-align:center;padding:6px 8px;background:#f1f5f9;'>{h}</th>"
-                                for h in houses_present
-                            )
-                            + "</tr></thead><tbody>"
-                        )
-                        for idx, row in pivot.iterrows():
-                            region, asset_c, sector = idx if isinstance(idx, tuple) else (idx, "", "")
-                            cells = []
-                            for h in houses_present:
-                                v = str(row.get(h, "") or "")
-                                color = _VIEW_COLORS.get(v, "#94a3b8")
-                                label = _VIEW_LABELS.get(v, v or "—")
-                                # Find the underlying row for hover detail
-                                detail = last_views[
-                                    (last_views["region"] == region)
-                                    & (last_views["asset_class"] == asset_c)
-                                    & (last_views["sector"] == sector)
-                                    & (last_views["house"] == h)
-                                ]
-                                tooltip = ""
-                                if not detail.empty:
-                                    d = detail.iloc[0]
-                                    tooltip = (
-                                        f"{d['view_raw']} · {d['date']} · {d['source_doc']}\n"
-                                        f"\n{d['theme']}"
-                                    ).replace('"', "'")
-                                if v:
-                                    cells.append(
-                                        f"<td title=\"{tooltip}\" "
-                                        f"style='text-align:center;padding:6px 8px;"
-                                        f"font-weight:700;color:{color};border-bottom:1px solid #e2e8f0;'>"
-                                        f"{label}</td>"
-                                    )
-                                else:
-                                    cells.append(
-                                        "<td style='text-align:center;padding:6px 8px;"
-                                        "color:#94a3b8;border-bottom:1px solid #e2e8f0;'>—</td>"
-                                    )
-                            html_rows.append(
-                                "<tr>"
-                                f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;'>{region or '—'}</td>"
-                                f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;'>{asset_c or '—'}</td>"
-                                f"<td style='padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#475467;'>{sector or ''}</td>"
-                                + "".join(cells)
-                                + "</tr>"
-                            )
-                        html_rows.append("</tbody></table>")
-                        st.markdown("".join(html_rows), unsafe_allow_html=True)
-
-                        # Legend
-                        st.markdown(
-                            "<div style='font-size:11px;color:#64748b;margin-top:10px;'>"
-                            "Legend: "
-                            "<span style='color:#16a34a;font-weight:700;'>Overweight / Positive</span> · "
-                            "<span style='color:#64748b;font-weight:700;'>Neutral</span> · "
-                            "<span style='color:#dc2626;font-weight:700;'>Underweight / Negative</span> · "
-                            "<span style='color:#94a3b8;'>— (no view)</span>"
-                            " · Hover any cell for the view_raw, date, theme."
-                            "</div>",
-                            unsafe_allow_html=True,
-                        )
-
-                        # ── detail table for drill-down
-                        st.markdown("")
-                        st.markdown("**Underlying view rows** (latest per house · topic · click headers to sort)")
-                        detail_cols = [
-                            "date", "house", "region", "asset_class", "sector",
-                            "view_raw", "view_normalized", "conviction", "time_horizon",
-                            "theme", "source_doc",
-                        ]
-                        detail_cols = [c for c in detail_cols if c in last_views.columns]
-                        st.dataframe(
-                            last_views[detail_cols].sort_values(["region", "asset_class", "sector", "house"]),
-                            use_container_width=True,
-                            height=320,
-                            hide_index=True,
-                        )
-
-        except Exception as _macro_exc:
-            import traceback as _tb
-            st.warning(
-                f"Macro Views panel temporarily unavailable: "
-                f"`{type(_macro_exc).__name__}: {_macro_exc}`"
-            )
-            with st.expander("Show Macro traceback (for debugging)"):
-                st.code(_tb.format_exc(), language="python")
     # ── 8. PDF download ───────────────────────────────────────────────────────
     st.markdown("---")
 

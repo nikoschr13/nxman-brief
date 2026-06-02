@@ -1223,15 +1223,28 @@ def autoload_research_from_drive(force_refresh: bool = False) -> tuple[int, int]
     if st.session_state.get(flag) and not force_refresh:
         return (0, 0)
 
+    # Pull from both Inbox AND Processed so the library isn't empty when
+    # the nightly archiver (00:05 Zurich) has moved yesterday's drops out
+    # of Inbox. Cap at 20 most-recent PDFs across both folders.
+    #
+    # HARD TIMEOUT: wrap the Drive call in a ThreadPoolExecutor with a 20s
+    # wall-clock limit. Without this, a slow Drive response hangs the worker
+    # and Streamlit Cloud shows "Oh no" with no traceback (worker just dies).
+    from concurrent.futures import ThreadPoolExecutor as _RL_TPE
+    from concurrent.futures import TimeoutError as _RL_TimeoutErr
+    pdfs = None
     try:
-        # Pull from both Inbox AND Processed so the library isn't empty when
-        # the nightly archiver (00:05 Zurich) has moved yesterday's drops out
-        # of Inbox. Cap at 20 most-recent PDFs across both folders.
-        pdfs = _drive_pdf_loader(
-            include_inbox=True,
-            include_processed=True,
-            max_pdfs=20,
-        )
+        with _RL_TPE(max_workers=1) as _rl_ex:
+            _rl_fut = _rl_ex.submit(
+                _drive_pdf_loader,
+                include_inbox=True,
+                include_processed=True,
+                max_pdfs=20,
+            )
+            pdfs = _rl_fut.result(timeout=20)
+    except _RL_TimeoutErr:
+        st.session_state[flag] = True  # don't loop-retry on timeout
+        return (0, 0)
     except Exception:
         st.session_state[flag] = True  # don't loop-retry on error
         return (0, 0)

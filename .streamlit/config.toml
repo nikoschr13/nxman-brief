@@ -1,1 +1,6 @@
+# Streamlit app config — diagnostic mode
+# Shows the real Python traceback in the browser instead of the "Oh no" page,
+# so we can see what's actually crashing.
 
+[client]
+showErrorDetails = "full"

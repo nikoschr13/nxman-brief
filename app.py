@@ -3478,6 +3478,184 @@ def build_bundle():
     return pd.DataFrame(snapshot_rows), history, chart_allowed_keys
 
 
+# ── SNIPER "as-if-traded" equity curve (CHF, 15-day hold, sized by risk_multiplier)
+# Simulates: for every SNIPER Buy signal (US 4-way ∪ EU 3-way), open a long
+# position on the signal date sized at CHF 10,000 × risk_multiplier from the
+# composite log; hold exactly 15 trading days; close at that day's close.
+# Convert USD/EUR PnL to CHF at trade-date FX. Ignore transaction costs. The
+# result is a daily cumulative CHF return series that can overlay the main
+# returns chart.
+def build_sniper_equity_chf(chart_window_start, notional_per_trade_chf=10_000.0,
+                            hold_days=15):
+    """Return DataFrame [date, cum_chf, return_pct] rebased to 0% at window start.
+
+    Long-only. Sizing = notional_per_trade_chf * risk_multiplier (fall-back 1.0
+    if the composite log doesn't cover this (ticker, date)). Empty DataFrame
+    on any load / compute failure so the chart never breaks.
+    """
+    import yfinance as yf
+    try:
+        from brief_drive_reader import (
+            load_4way_df_cached, load_4way_eu_df_cached, load_composite_df_cached,
+        )
+    except Exception:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    try:
+        df_us   = load_4way_df_cached()
+        df_eu   = load_4way_eu_df_cached()
+        df_comp = load_composite_df_cached()
+    except Exception:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    start = pd.Timestamp(chart_window_start).normalize()
+    end   = pd.Timestamp.today().normalize()
+
+    def _buys(df, currency):
+        if df is None or df.empty or "date" not in df.columns:
+            return pd.DataFrame(columns=["date", "ticker", "currency"])
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df[df["composite_signal"].astype(str).str.strip().str.lower().eq("buy")]
+        df = df[(df["date"] >= start) & (df["date"] <= end)]
+        if df.empty:
+            return pd.DataFrame(columns=["date", "ticker", "currency"])
+        out = df[["date", "ticker"]].copy()
+        out["currency"] = currency
+        return out
+
+    trades = pd.concat(
+        [_buys(df_us, "USD"), _buys(df_eu, "EUR")],
+        ignore_index=True,
+    )
+    if trades.empty:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    # Join risk_multiplier from the composite log on (ticker, date). Fall
+    # back to 1.0 if the log doesn't cover that pair.
+    if df_comp is not None and not df_comp.empty and "risk_multiplier" in df_comp.columns:
+        _comp = df_comp[["date", "ticker", "risk_multiplier"]].copy()
+        _comp["date"] = pd.to_datetime(_comp["date"], errors="coerce")
+        trades = trades.merge(_comp, on=["date", "ticker"], how="left")
+    else:
+        trades["risk_multiplier"] = 1.0
+    trades["risk_multiplier"] = pd.to_numeric(trades["risk_multiplier"], errors="coerce").fillna(1.0).clip(0.0, 1.0)
+    trades = trades[trades["risk_multiplier"] > 0.0].reset_index(drop=True)
+    if trades.empty:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    # yfinance ticker normalisation. US tickers pass through; EU tickers may
+    # need an exchange suffix (SIX, DE, PA, MI, AS, MC …). We use the exact
+    # ticker as SNIPER stored it — if you keep suffixes in the sheet, they
+    # feed straight into yfinance; if not, we log a miss and skip that trade.
+    tickers = sorted(set(trades["ticker"].dropna().astype(str)))
+    prices_by_ticker = {}
+    for t in tickers:
+        try:
+            hist = yf.Ticker(t).history(
+                start=(start - pd.Timedelta(days=5)).date(),
+                end=(end + pd.Timedelta(days=hold_days + 5)).date(),
+                interval="1d", auto_adjust=True,
+            )
+            if not hist.empty and "Close" in hist.columns:
+                s = hist["Close"].copy()
+                s.index = pd.to_datetime(s.index).tz_localize(None)
+                prices_by_ticker[t] = s
+        except Exception:
+            continue
+
+    # FX to CHF. Yahoo tickers: USDCHF=X, EURCHF=X.
+    def _fx(pair):
+        try:
+            fx = yf.Ticker(pair).history(
+                start=(start - pd.Timedelta(days=5)).date(),
+                end=(end + pd.Timedelta(days=hold_days + 5)).date(),
+                interval="1d", auto_adjust=False,
+            )
+            if fx.empty or "Close" not in fx.columns:
+                return None
+            s = fx["Close"].copy()
+            s.index = pd.to_datetime(s.index).tz_localize(None)
+            return s
+        except Exception:
+            return None
+
+    usdchf = _fx("USDCHF=X")
+    eurchf = _fx("EURCHF=X")
+
+    def _fx_on(s, dt):
+        if s is None:
+            return None
+        sub = s[s.index <= dt]
+        return float(sub.iloc[-1]) if not sub.empty else None
+
+    # Compute per-trade CHF PnL and the trading day it lands on.
+    trade_pnl_rows = []
+    for _, r in trades.iterrows():
+        t = r["ticker"]
+        s = prices_by_ticker.get(t)
+        if s is None or s.empty:
+            continue
+        entry_dt = pd.Timestamp(r["date"]).normalize()
+        idx_after = s.index[s.index >= entry_dt]
+        if idx_after.empty:
+            continue
+        entry_ts = idx_after[0]
+        entry_pos = s.index.get_loc(entry_ts)
+        exit_pos = min(entry_pos + hold_days, len(s) - 1)
+        exit_ts = s.index[exit_pos]
+        entry_px = float(s.iloc[entry_pos])
+        exit_px = float(s.iloc[exit_pos])
+        if entry_px <= 0:
+            continue
+
+        # Sizing: CHF notional = 10k × risk_multiplier. Convert to local ccy
+        # notional at entry-date FX so we can compute a native-currency
+        # quantity; PnL then comes back to CHF at exit-date FX.
+        size_chf = notional_per_trade_chf * float(r["risk_multiplier"])
+        ccy = r["currency"]
+        fx_series = usdchf if ccy == "USD" else eurchf
+        fx_entry = _fx_on(fx_series, entry_ts)
+        fx_exit  = _fx_on(fx_series, exit_ts)
+        if fx_entry is None or fx_exit is None or fx_entry <= 0:
+            continue
+        # Local-currency notional at entry:
+        size_local = size_chf / fx_entry
+        qty = size_local / entry_px
+        pnl_local = qty * (exit_px - entry_px)
+        pnl_chf = pnl_local * fx_exit  # convert exit-day cash back to CHF
+        trade_pnl_rows.append({
+            "exit_date": pd.Timestamp(exit_ts).normalize(),
+            "pnl_chf": pnl_chf,
+        })
+
+    if not trade_pnl_rows:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    pnl_df = pd.DataFrame(trade_pnl_rows)
+    daily = pnl_df.groupby("exit_date")["pnl_chf"].sum().sort_index()
+
+    # Build a continuous daily equity curve across the window.
+    idx = pd.date_range(start, end, freq="D")
+    daily_full = daily.reindex(idx, fill_value=0.0)
+    cum = daily_full.cumsum()
+    # Rebase to % of a nominal book size = number-of-days × notional × 1.0 is
+    # not meaningful. Instead use average deployed capital = sum of all trade
+    # notionals ÷ number of trades — this reports return-on-average-trade.
+    total_notional = notional_per_trade_chf * float(len(trades))
+    avg_deployed = total_notional / float(len(trades)) if len(trades) > 0 else 1.0
+    # Return-on-book = cumulative CHF PnL as % of total capital ever deployed
+    # (conservative: treats each trade's notional as never recycled).
+    denom = total_notional if total_notional > 0 else 1.0
+    ret_pct = (cum / denom) * 100.0
+
+    return pd.DataFrame({
+        "date": cum.index,
+        "cum_chf": cum.values,
+        "return_pct": ret_pct.values,
+    })
+
+
 # Audit fix (main-chart rebuild): yields must NOT be plotted on the same
 # percentage-return scale as equities. This helper builds a rates-only chart
 # frame where the y-value is basis-point change from the window base — the
@@ -5312,6 +5490,39 @@ def add_render_outputs(base_state, chart_window="YTD"):
             except Exception:
                 pass
             fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
+
+            # ── SNIPER equity overlay ─────────────────────────────────────
+            # Overlay the "as-if-traded" SNIPER equity curve (CHF, 15-day hold,
+            # 10k × risk_multiplier per Buy signal, both US and EU combined).
+            # Rendered as a dashed trace so it's visually distinct from the
+            # underlying asset lines. Zero-drawn if empty (no trades) or
+            # unavailable (SNIPER Drive loaders errored).
+            try:
+                _sniper_eq = build_sniper_equity_chf(chart_window_start=start_date)
+                if _sniper_eq is not None and not _sniper_eq.empty:
+                    fig.add_scatter(
+                        x=_sniper_eq["date"], y=_sniper_eq["return_pct"],
+                        mode="lines",
+                        name="SNIPER (CHF, 15d hold, sized)",
+                        line=dict(color="#0F172A", width=2.5, dash="dash"),
+                        hovertemplate="<b>SNIPER (CHF)</b><br>Date: %{x|%d %b %Y}<br>"
+                                      "Cumulative: %{y:+.2f}% of book<extra></extra>",
+                    )
+                    # End-of-line label like the other traces.
+                    _s = _sniper_eq.dropna()
+                    if not _s.empty:
+                        fig.add_annotation(
+                            x=_s["date"].iloc[-1], y=_s["return_pct"].iloc[-1],
+                            text=" SNIPER", xanchor="left", yanchor="middle",
+                            showarrow=False, font=dict(size=11, color="#0F172A"),
+                        )
+            except Exception as _sniper_overlay_exc:
+                # Never let the SNIPER overlay break the chart.
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "SNIPER equity overlay failed: %s: %s",
+                    type(_sniper_overlay_exc).__name__, _sniper_overlay_exc,
+                )
 
         # ── 2. Alternatives panel (Bitcoin + WTI) ──────────────────────────
         alt_df = weekly_df[weekly_df["key"].isin(alt_keys)].copy()

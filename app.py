@@ -605,6 +605,48 @@ CATEGORY_STYLE = {
 
 st.set_page_config(page_title="Daily Market Briefing", layout="wide")
 
+# ── Audit fix (Item 1): password gate ────────────────────────────────────────
+# Minimal shared-password gate for the public Streamlit Cloud URL. When
+# APP_PASSWORD is set in Streamlit Secrets (or .env), the entire app is
+# blocked until the user enters it once per browser session. If APP_PASSWORD
+# is empty/unset, this is a no-op — the app behaves as before. This is *not*
+# a substitute for real SSO / per-user auth (the audit calls that out as
+# still required for professional use) but it prevents casual anonymous
+# access to SNIPER tables and broker research summaries in the meantime.
+def _password_gate() -> None:
+    import hmac
+    expected = get_secret("APP_PASSWORD", "").strip()
+    if not expected:
+        return  # no password configured → open access, unchanged behaviour
+    if st.session_state.get("_auth_ok"):
+        return
+    st.markdown(
+        "<div style='padding:18px 20px;background:#0A2340;color:#FFF;"
+        "border-radius:10px;margin-bottom:14px;'>"
+        "<div style='font-size:11px;letter-spacing:2px;opacity:.6;"
+        "text-transform:uppercase;'>Restricted</div>"
+        "<div style='font-size:20px;font-weight:700;margin-top:4px;'>"
+        "Daily Market Briefing</div>"
+        "<div style='font-size:12px;opacity:.75;margin-top:6px;'>"
+        "Internal decision-support tool. Enter access password to continue."
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+    with st.form("_pw_form", clear_on_submit=False):
+        pw = st.text_input("Password", type="password", label_visibility="collapsed",
+                           placeholder="Access password")
+        ok = st.form_submit_button("Enter", type="primary")
+    if ok:
+        # Constant-time compare to avoid timing side channels.
+        if hmac.compare_digest(pw.strip(), expected):
+            st.session_state["_auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+_password_gate()
+
 st.markdown(
     """
 <style>
@@ -3372,11 +3414,20 @@ def build_bundle():
     today = pd.Timestamp.today().normalize()
     year_start = pd.Timestamp(today.year, 1, 1)
     month_start = pd.Timestamp(today.year, today.month, 1)
-    # Rolling 7-day return (T vs T-7) instead of week-to-date.
-    # WTD reads +0.00% across the board on Mondays, which the reviewer flagged
-    # as uninformative. The column key stays "wtd" to avoid plumbing changes;
-    # the displayed header is updated to "7d" in _dtbl().
-    seven_days_ago = today - pd.Timedelta(days=7)
+    # Audit fix (Item 4): the rolling 7-day anchor collides with the month-start
+    # anchor during the first week of a month, producing identical WTD and MTD
+    # figures across all indices (S&P 500 / Nasdaq / Stoxx 600 / etc.) — which
+    # the audit flagged as looking like a data-quality failure. Anchor WTD to
+    # the *previous Friday close* instead. This is the standard institutional
+    # WTD definition and produces a distinct number vs MTD in every week
+    # except when today == last Friday of the month. If no prior Friday close
+    # exists in the series, value_on_or_before falls back correctly and WTD
+    # becomes None (blank), which is more honest than reporting 0.
+    _wd = today.weekday()  # Mon=0 … Sun=6
+    _days_back = (_wd - 4) % 7  # days since most recent Friday, or 0 if today is Friday
+    if _days_back == 0 and _wd == 4:
+        _days_back = 7  # on Friday itself, anchor to previous Friday close
+    week_anchor = today - pd.Timedelta(days=_days_back)
 
     # NOTE: an earlier version of this loop suppressed d1 when a series'
     # last data point looked stale (>1 calendar day older than the global
@@ -3418,13 +3469,53 @@ def build_bundle():
                 "description": desc,
                 "level": latest,
                 "d1": pct_change(latest, prev),
-                "wtd": pct_change(latest, value_on_or_before(series, seven_days_ago)),
+                "wtd": pct_change(latest, value_on_or_before(series, week_anchor)),
                 "mtd": pct_change(latest, value_on_or_before(series, month_start)),
                 "ytd": pct_change(latest, value_on_or_before(series, year_start)),
             }
         )
 
     return pd.DataFrame(snapshot_rows), history, chart_allowed_keys
+
+
+# Audit fix (main-chart rebuild): yields must NOT be plotted on the same
+# percentage-return scale as equities. This helper builds a rates-only chart
+# frame where the y-value is basis-point change from the window base — the
+# correct unit for a yield series.
+def build_rates_chart_df(history, rate_keys, start_date=None):
+    """Return a long-form frame [date, key, label, delta_bps] for rate series.
+
+    delta_bps = (level_now - level_base) * 100 where level is a yield in %.
+    Weekly-resampled, always including today's latest observation.
+    """
+    if history.empty:
+        return pd.DataFrame(columns=["date", "key", "label", "delta_bps"])
+    df = history.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    max_date = df["date"].max()
+    window_start = pd.Timestamp(start_date) if start_date is not None else pd.Timestamp(max_date.year, 1, 1)
+    df = df[(df["date"] >= window_start) & (df["key"].isin(list(rate_keys)))]
+    parts = []
+    for key, g in df.groupby("key"):
+        g = g.sort_values("date").set_index("date")
+        weekly = g["value"].resample("W-FRI").last().dropna()
+        if weekly.empty:
+            continue
+        latest_daily = g["value"].dropna()
+        if not latest_daily.empty and latest_daily.index[-1] > weekly.index[-1]:
+            weekly.loc[latest_daily.index[-1]] = float(latest_daily.iloc[-1])
+            weekly = weekly.sort_index()
+        base = float(weekly.iloc[0])
+        delta_bps = (weekly - base) * 100.0
+        parts.append(pd.DataFrame({
+            "date":      delta_bps.index,
+            "key":       key,
+            "label":     g["label"].iloc[0],
+            "delta_bps": delta_bps.values,
+        }))
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
+        columns=["date", "key", "label", "delta_bps"]
+    )
 
 
 def build_weekly_chart_df(history, allowed, include_crypto_flag, start_date=None):
@@ -4462,7 +4553,7 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
             [P("Instrument", fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("Level",      fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
              P("1D",         fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
-             P("7d",         fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),
+             P("WTD",        fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7),  # audit fix: header matches new prev-Friday anchor
              P("YTD",        fn="Helvetica-Bold", sz=5.5, col=WHT, lead=7)],
         ]
         cmds = [
@@ -4851,11 +4942,14 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
     )
 
     # ── 7. DISCLAIMER ─────────────────────────────────────────────────────────
-    disc = ("Disclaimer: This briefing is for informational purposes only and does not "
-            "constitute investment advice or a recommendation to buy or sell any financial "
-            "instrument. Information is believed reliable but accuracy cannot be guaranteed. "
-            "Past performance is not indicative of future results. Market data may be delayed. "
-            "Always consult a qualified financial adviser before making investment decisions.")
+    # Audit fix: replace the retail-flavored "consult a qualified financial adviser"
+    # boilerplate with an institutional decision-support disclosure.
+    disc = ("Internal decision-support only. Prices may be delayed or indicative and can differ "
+            "by venue. Returns are shown in local currency unless stated otherwise; indices, ETF "
+            "proxies, futures and yields are not directly comparable. AI-generated text is clearly "
+            "identified and may contain errors. Verify prices, events and research against primary "
+            "sources before trading. Model signals are analytical outputs, not orders, suitability "
+            "determinations or individualized investment recommendations.")
     story += [
         Spacer(1, 0.04*cm),
         HRFlowable(width=PW*cm, thickness=0.4, color=RUL),
@@ -5134,50 +5228,150 @@ def add_render_outputs(base_state, chart_window="YTD"):
 
     weekly_df = build_weekly_chart_df(history, chart_allowed_keys, include_crypto_flag, start_date=start_date)
     fig = None
+    fig_alts = None    # audit fix: alternatives (BTC/WTI) split into their own chart
+    fig_rates = None   # audit fix: rates panel is bp-scaled, not %
     pdf_chart_png = None
+    _window_label = str(chart_window)
 
     if not weekly_df.empty:
-        core_keys = ["msci_world", "sp500", "stoxx600", "gold", "wti", "us10y", "global_bonds"]
-        expanded_keys = ["msci_world", "sp500", "stoxx600", "gold", "wti", "us10y", "global_bonds", "bitcoin", "smi"]
-        selected_keys = core_keys if chart_mode == "Core" else expanded_keys
-        chart_df = weekly_df[weekly_df["key"].isin(selected_keys)].copy()
+        # ── Audit fix (main-chart rebuild) ──────────────────────────────────
+        # Old chart plotted 9 series including US 10Y yield on one % scale.
+        # That mixes returns and yield levels, and Bitcoin + WTI dominate the
+        # axis. Split into three focused panels:
+        #   1. Core cross-asset local returns (equities + bonds + gold + EUR/CHF)
+        #   2. Alternatives (Bitcoin + WTI) — separate axis, only when relevant
+        #   3. Rates — bp change (NOT %), separate y-axis
+        # ────────────────────────────────────────────────────────────────────
+        core_keys = ["msci_world", "sp500", "stoxx600", "global_bonds", "gold", "eurchf"]
+        alt_keys  = ["bitcoin", "wti"]
         short_labels = {
-            "msci_world": "World",
-            "sp500": "S&P 500",
-            "stoxx600": "Europe 600",
-            "gold": "Gold",
-            "wti": "WTI",
-            "us10y": "US 10Y",
+            "msci_world":   "World",
+            "sp500":        "S&P 500",
+            "stoxx600":     "Europe 600",
             "global_bonds": "Global Bonds",
-            "bitcoin": "Bitcoin",
-            "smi": "SMI",
+            "gold":         "Gold",
+            "eurchf":       "EUR/CHF",
+            "bitcoin":      "Bitcoin",
+            "wti":          "WTI",
+            "smi":          "SMI",
         }
-        chart_df["short_label"] = chart_df["key"].map(short_labels).fillna(chart_df["label"])
+        core_palette = ["#103B73", "#1E88E5", "#38A3FF", "#26A69A", "#EF6C00", "#7E57C2"]
+        alt_palette  = ["#FBBF24", "#EA580C"]
 
-        fig = px.line(
-            chart_df,
-            x="date",
-            y="return_pct",
-            color="short_label",
-            title=f"{chart_mode} Cross-Asset Performance — {chart_window} (base = 0%)",
-            color_discrete_sequence=["#103B73", "#1E88E5", "#38A3FF", "#26A69A", "#EF6C00", "#7E57C2", "#6D4C41", "#00897B", "#C62828"],
-        )
-        fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%d %b %Y}<br>YTD: %{y:.2f}%<extra></extra>")
-        fig.update_layout(
-            xaxis_title="Week",
-            yaxis_title="YTD move (%)",
-            height=560,
-            legend_title="",
-            hovermode="closest",
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            margin=dict(l=25, r=20, t=55, b=40),
-        )
-        fig.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
-        fig.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
-        add_event_marker(fig, IRAN_WAR_START_DATE, "Iran conflict start<br>28 Feb 2026", "#C62828", 0.12, 11)
-        add_event_marker(fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire agreed", "#12B76A", 0.10, 11)
-        fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
+        # ── 1. Core returns panel ──────────────────────────────────────────
+        chart_df = weekly_df[weekly_df["key"].isin(core_keys)].copy()
+        if not chart_df.empty:
+            chart_df["short_label"] = chart_df["key"].map(short_labels).fillna(chart_df["label"])
+            fig = px.line(
+                chart_df,
+                x="date",
+                y="return_pct",
+                color="short_label",
+                title=f"Local-currency price return — {_window_label} (base = 0%)",
+                color_discrete_sequence=core_palette,
+            )
+            fig.update_traces(
+                hovertemplate=f"<b>%{{fullData.name}}</b><br>Date: %{{x|%d %b %Y}}<br>{_window_label}: %{{y:.2f}}%<extra></extra>",
+                line=dict(width=2),
+            )
+            fig.update_layout(
+                xaxis_title="",
+                yaxis_title=f"{_window_label} price return (%)",
+                height=460,
+                legend_title="",
+                hovermode="closest",
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                margin=dict(l=25, r=110, t=55, b=40),  # extra right margin for end-of-line labels
+            )
+            fig.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
+            fig.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
+            # End-of-line labels: pin each series' short label to its final
+            # data point on the right edge so the legend can go away.
+            for _short_lbl, _grp in chart_df.groupby("short_label"):
+                _grp = _grp.sort_values("date")
+                fig.add_annotation(
+                    x=_grp["date"].iloc[-1], y=_grp["return_pct"].iloc[-1],
+                    text=f" {_short_lbl}", xanchor="left", yanchor="middle",
+                    showarrow=False,
+                    font=dict(size=11, color="#0F2D52"),
+                )
+            fig.update_layout(showlegend=False)
+            # Event markers ONLY when the marker date falls within the visible
+            # window (audit noted permanent Iran-conflict annotations on
+            # unrelated series in windows where the event was months earlier).
+            _win_start = start_date
+            _win_end = pd.Timestamp.today().normalize()
+            try:
+                _iran_start = pd.Timestamp(IRAN_WAR_START_DATE)
+                if _win_start <= _iran_start <= _win_end:
+                    add_event_marker(fig, IRAN_WAR_START_DATE, "Iran conflict start", "#C62828", 0.12, 11)
+                _iran_end = pd.Timestamp(IRAN_CEASEFIRE_DATE)
+                if _win_start <= _iran_end <= _win_end:
+                    add_event_marker(fig, IRAN_CEASEFIRE_DATE, "Iran ceasefire", "#12B76A", 0.10, 11)
+            except Exception:
+                pass
+            fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
+
+        # ── 2. Alternatives panel (Bitcoin + WTI) ──────────────────────────
+        alt_df = weekly_df[weekly_df["key"].isin(alt_keys)].copy()
+        if not alt_df.empty and include_crypto_flag:
+            alt_df["short_label"] = alt_df["key"].map(short_labels).fillna(alt_df["label"])
+            fig_alts = px.line(
+                alt_df, x="date", y="return_pct", color="short_label",
+                title=f"Alternatives (higher volatility) — {_window_label}",
+                color_discrete_sequence=alt_palette,
+            )
+            fig_alts.update_traces(
+                hovertemplate=f"<b>%{{fullData.name}}</b><br>Date: %{{x|%d %b %Y}}<br>{_window_label}: %{{y:.2f}}%<extra></extra>",
+                line=dict(width=2),
+            )
+            fig_alts.update_layout(
+                xaxis_title="", yaxis_title=f"{_window_label} price return (%)",
+                height=280, legend_title="", plot_bgcolor="white", paper_bgcolor="white",
+                margin=dict(l=25, r=110, t=45, b=35), showlegend=False,
+            )
+            fig_alts.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
+            fig_alts.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
+            for _short_lbl, _grp in alt_df.groupby("short_label"):
+                _grp = _grp.sort_values("date")
+                fig_alts.add_annotation(
+                    x=_grp["date"].iloc[-1], y=_grp["return_pct"].iloc[-1],
+                    text=f" {_short_lbl}", xanchor="left", yanchor="middle",
+                    showarrow=False, font=dict(size=11, color="#0F2D52"),
+                )
+            fig_alts.add_hline(y=0, line_dash="dot", line_color="#78909C")
+
+        # ── 3. Rates panel (bp change, correct unit for yields) ────────────
+        rate_keys = ["us10y", "bund10y", "ch10y"]
+        rates_df_chart = build_rates_chart_df(history, rate_keys, start_date=start_date)
+        if not rates_df_chart.empty:
+            rate_labels = {"us10y": "US 10Y", "bund10y": "Bund 10Y", "ch10y": "CH 10Y"}
+            rates_df_chart["short_label"] = rates_df_chart["key"].map(rate_labels).fillna(rates_df_chart["label"])
+            fig_rates = px.line(
+                rates_df_chart, x="date", y="delta_bps", color="short_label",
+                title=f"Government 10Y yield change — {_window_label} (bp from base)",
+                color_discrete_sequence=["#0F2D52", "#B45309", "#059669"],
+            )
+            fig_rates.update_traces(
+                hovertemplate=f"<b>%{{fullData.name}}</b><br>Date: %{{x|%d %b %Y}}<br>Δ: %{{y:+.1f}} bp<extra></extra>",
+                line=dict(width=2),
+            )
+            fig_rates.update_layout(
+                xaxis_title="", yaxis_title="Δ yield (bp)", height=280,
+                legend_title="", plot_bgcolor="white", paper_bgcolor="white",
+                margin=dict(l=25, r=110, t=45, b=35), showlegend=False,
+            )
+            fig_rates.update_xaxes(showgrid=True, gridcolor="#E6EEF7")
+            fig_rates.update_yaxes(showgrid=True, gridcolor="#E6EEF7")
+            for _short_lbl, _grp in rates_df_chart.groupby("short_label"):
+                _grp = _grp.sort_values("date")
+                fig_rates.add_annotation(
+                    x=_grp["date"].iloc[-1], y=_grp["delta_bps"].iloc[-1],
+                    text=f" {_short_lbl}", xanchor="left", yanchor="middle",
+                    showarrow=False, font=dict(size=11, color="#0F2D52"),
+                )
+            fig_rates.add_hline(y=0, line_dash="dot", line_color="#78909C")
 
         pdf_df = pdf_chart_subset(weekly_df)
         if not pdf_df.empty:
@@ -5267,6 +5461,8 @@ def add_render_outputs(base_state, chart_window="YTD"):
 
     state = dict(base_state)
     state["fig"]           = fig
+    state["fig_alts"]      = fig_alts   # audit fix: alternatives on separate axis
+    state["fig_rates"]     = fig_rates  # audit fix: rates in bp, not %
     state["pdf_bytes"]     = pdf_bytes
     state["pdf_chart_png"] = pdf_chart_png
     state["chart_of_day"]  = cotd
@@ -5297,6 +5493,17 @@ with st.sidebar:
             st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
 
     if st.button("🔄 Refresh", use_container_width=True):
+        # Audit fix: Refresh must actually invalidate cached state, otherwise
+        # in Live mode the frozen snapshot is retained (audit Item 2).
+        # We clear the render-side state so the "Generate Brief" path re-runs
+        # on the next click; and in Live mode with auto_refresh we also
+        # force a rebuild by clearing the snapshot key so a stale live view
+        # cannot masquerade as fresh.
+        for _k in ("snapshot", "history", "writing", "status",
+                   "pdf_bytes", "pdf_chart_png", "chart_of_day",
+                   "snapshot_mode_note"):
+            st.session_state.pop(_k, None)
+        st.session_state["_last_refresh_utc"] = pd.Timestamp.utcnow().isoformat()
         st.rerun()
 
     st.markdown("---")
@@ -5379,6 +5586,9 @@ with st.sidebar:
 if generate:
     znow = now_zurich()
     today_str = znow.date().isoformat()
+    # Audit fix (Item 2): stamp every successful Generate/Refresh so the status
+    # line can show a verifiable "as of" time.
+    st.session_state["_generated_at"] = pd.Timestamp.utcnow().isoformat()
 
     if mode == "Live":
         base_state = build_base_state(include_crypto, use_gemini_writing)
@@ -5445,54 +5655,163 @@ else:
     g_col  = "🟢" if status["gemini_used"]  else "🟡"
     n_col  = "🟢" if status["live_news"]    else "🟡"
     ai_detail = status.get("gemini_reason", "")
-    ai_label  = ai_detail if status["gemini_used"] else f"OFF ({ai_detail[:55]})"
+    # Audit fix (Item 8): the raw upstream error ("AI failed: Gemini/gemini-2.5-flash:
+    # bad JSON …") leaked into the visible status line. Show a calm label to end
+    # users and preserve the raw text as a tooltip / expander for the operator.
+    if status["gemini_used"]:
+        ai_label = ai_detail or "on"
+    else:
+        ai_label = "narrative unavailable — headlines only"
+    # Audit fix (Item 2): show a concrete "as of" timestamp so the Refresh
+    # button is verifiable. Prefers the last successful Generate/Refresh run;
+    # falls back to the snapshot's own timestamp if present.
+    _as_of = st.session_state.get("_last_refresh_utc") or st.session_state.get("_generated_at") or ""
+    if _as_of:
+        try:
+            _as_of_disp = pd.Timestamp(_as_of).tz_convert(ZURICH_TZ).strftime("%d %b %Y %H:%M %Z")
+        except Exception:
+            _as_of_disp = str(_as_of)[:19]
+        _as_of_str = f"  ·  as of {_as_of_disp}"
+    else:
+        _as_of_str = ""
     st.caption(
         f"{mode_note}   |   {g_col} AI {ai_label}  "
         f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
         f"·  {status['article_count']} articles"
+        f"{_as_of_str}"
     )
+    if not status["gemini_used"] and ai_detail:
+        with st.expander("Diagnostics (operator)", expanded=False):
+            st.caption(f"AI provider status: {ai_detail}")
 
     # ── 2. Compact ticker strip ───────────────────────────────────────────────
     render_ticker_strip(snap)
+
+    # Audit fix (Item 3): data provenance strip. Readers need to know provider,
+    # currency, and vintage before comparing numbers. This is the lightweight
+    # first pass — per-instrument metadata is a separate scope item.
+    st.markdown(
+        "<div style='font-size:10.5px;color:#64748B;padding:2px 4px 8px;"
+        "line-height:1.55;'>"
+        "<b>Data provenance.</b> "
+        "Equities · Yahoo Finance (index level, local currency, previous close on "
+        "non-trading days). "
+        "Rates · FRED (US 10Y) with Yahoo <code>^TNX</code> fallback; other yields · Yahoo. "
+        "Yields shown in %, changes in bp. "
+        "Commodities · Yahoo (WTI &amp; Brent = front-month <b>futures</b>, not spot; "
+        "Gold &amp; Silver = spot USD). "
+        "FX · Yahoo (mid, last tick). "
+        "News · Marketaux (live) or RSS fallback. "
+        "AI commentary · Google Gemini when configured; Groq fallback. "
+        "All returns are local-currency price returns (not total returns) unless labelled."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Audit fix (Item 2): the "Show definitions" checkbox previously did
+    # nothing at all — it was declared in the sidebar and never read. Surface
+    # inline instrument definitions (label + description) so the control
+    # actually applies immediately.
+    if show_definitions:
+        with st.expander("Instrument definitions (source: internal reference table)", expanded=True):
+            _def_frames = []
+            for _k in ("equities_df", "rates_df", "commodities_df", "bonds_df", "fx_df"):
+                _df = st.session_state.get(_k)
+                if _df is not None and not _df.empty:
+                    _def_frames.append(definitions_table(_df))
+            if _def_frames:
+                _defs = pd.concat(_def_frames, ignore_index=True).drop_duplicates(subset=["label"])
+                st.dataframe(
+                    _defs,
+                    use_container_width=True,
+                    height=380,
+                    column_config={
+                        "label":       st.column_config.TextColumn("Instrument", width="small"),
+                        "description": st.column_config.TextColumn("Description & what a move means", width="large"),
+                    },
+                )
+            else:
+                st.caption("No definitions available in the current snapshot.")
 
     # ── 3. Narrative: news bullets + what matters + next events ──────────────
     col_news, col_right = st.columns([3, 2], gap="medium")
 
     with col_news:
-        gemini_tag = "" if status["gemini_used"] else " *(enable Gemini for AI commentary)*"
+        # Audit fix (Item 8): the previous copy told the user to "enable Gemini"
+        # while there is no user-facing Gemini setting. Replace with a calm
+        # user-facing state so the fallback stays professionally usable.
+        gemini_tag = "" if status["gemini_used"] else " · *narrative summary unavailable — showing source headlines*"
         st.markdown(f"**📰 What's Moving Markets**{gemini_tag}")
         render_news_bullets(writing, st.session_state["news_df"])
 
     with col_right:
         st.markdown("**📅 Upcoming Events**")
         today = pd.Timestamp.today().normalize()
+        # Audit fix (Item 5): the audit flagged missing FOMC / ECB dates and a
+        # bogus "01 Jan" NFP. Broaden the horizon so users see multiple months
+        # of policy meetings at a glance, and expose the source status so any
+        # scrape failure is visible rather than silent.
         try:
             _events_source = fetch_macro_events_live()
+            _live_status = st.session_state.get("_macro_events_status", {})
         except Exception:
             _events_source = MACRO_EVENTS_FALLBACK
-        upcoming = [e for e in _events_source if pd.Timestamp(e["date"]) >= today][:6]
+            _live_status = {}
+        upcoming = [e for e in _events_source if pd.Timestamp(e["date"]) >= today][:10]
         for ev in upcoming:
             dt = pd.Timestamp(ev["date"])
             days = (dt - today).days
             day_label = "TODAY" if days == 0 else f"in {days}d"
+            # Audit fix (Item 5): expose the source when the fetcher tagged it.
+            _src = ev.get("source") or ev.get("category") or ""
+            _src_tag = (f"<span style='color:#94A3B8;font-size:10.5px;margin-left:6px;'>"
+                        f"· {_src}</span>") if _src else ""
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:3px 0;"
                 f"border-bottom:1px solid #F0F4F8;font-size:12px;'>"
-                f"<span style='color:#0F2D52;'>{ev['event']}</span>"
+                f"<span style='color:#0F2D52;'>{ev['event']}{_src_tag}</span>"
                 f"<span style='color:#64748B;white-space:nowrap;margin-left:8px;'>"
                 f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days==0 else '#475467'};'>{day_label}</b></span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
+        # Provenance line so it's obvious whether the calendar is live or
+        # falling back to the hardcoded list (audit Item 5 + Item 3).
+        _used = _live_status.get("sources_used") or []
+        _failed = _live_status.get("sources_failed") or []
+        if _used or _failed:
+            _bits = []
+            if _used:
+                _bits.append("sources: " + " · ".join(_used))
+            if _failed:
+                _bits.append(
+                    "<span style='color:#B45309;'>fallbacks: "
+                    + " · ".join(_failed) + "</span>"
+                )
+            st.markdown(
+                f"<div style='font-size:10.5px;color:#64748B;margin-top:6px;'>"
+                f"{' · '.join(_bits)}</div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "Prior / consensus columns require a paid economic-calendar feed "
+            "(Bloomberg, TradingEconomics, Investing.com API) and are not "
+            "included in this build."
+        )
 
         st.markdown("<br>", unsafe_allow_html=True)
+        # Audit fix: institutional decision-support disclosure replaces the
+        # retail "consult a qualified financial adviser" language.
         st.markdown(
-            "<div style='background:#FFF8E1;border:1px solid #FFD54F;border-radius:8px;"
-            "padding:8px 10px;font-size:11px;color:#5D4037;'>"
-            "⚠️ <b>Disclaimer:</b> This briefing is for informational purposes only and does not "
-            "constitute investment advice, a solicitation, or a recommendation to buy or sell any "
-            "financial instrument. Past performance is not indicative of future results. Always "
-            "consult a qualified financial adviser before making investment decisions."
+            "<div style='background:#F1F5F9;border:1px solid #CBD5E1;border-radius:8px;"
+            "padding:10px 12px;font-size:11px;color:#334155;line-height:1.55;'>"
+            "<b>Internal decision-support only.</b> Prices may be delayed or indicative and can "
+            "differ by venue. Returns are shown in local currency unless stated otherwise; "
+            "indices, ETF proxies, futures and yields are not directly comparable. AI-generated "
+            "text is clearly identified and may contain errors. Verify prices, events and "
+            "research against primary sources before trading. Model signals are analytical "
+            "outputs, not orders, suitability determinations or individualized investment "
+            "recommendations."
             "</div>",
             unsafe_allow_html=True,
         )
@@ -5530,12 +5849,24 @@ else:
     chart_col, cotd_col = st.columns([3, 2], gap="medium")
 
     with chart_col:
-        if st.session_state["fig"] is not None:
+        # Audit fix (main-chart rebuild): render core-returns panel, then a
+        # bp-scaled rates panel below, then alternatives (BTC/WTI) in a
+        # collapsed expander so they don't compress the primary axis.
+        _fig_main = st.session_state.get("fig")
+        _fig_rates = st.session_state.get("fig_rates")
+        _fig_alts  = st.session_state.get("fig_alts")
+        if _fig_main is not None:
             st.markdown(f"**{writing['headline']}**")
             st.caption(writing["subheadline"])
-            st.plotly_chart(st.session_state["fig"], use_container_width=True, key="main_big_chart")
+            st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
         else:
             st.info("No chart data — market data fetch may have failed.")
+        if _fig_rates is not None:
+            st.plotly_chart(_fig_rates, use_container_width=True, key="main_rates_chart")
+        if _fig_alts is not None:
+            with st.expander("Show alternatives (Bitcoin, WTI) — higher volatility, separate axis",
+                             expanded=False):
+                st.plotly_chart(_fig_alts, use_container_width=True, key="main_alts_chart")
 
     with cotd_col:
         cotd = st.session_state.get("chart_of_day")
@@ -5630,6 +5961,195 @@ else:
         elif status == "empty":
             st.info(f"📭 **{name}** — no rows in the Drive file yet (auto-fire will populate it).")
 
+    # Audit fix (Item 7): replace opaque "Agreement / UNANIMOUS" labels with
+    # an explicit alignment numerator so the reader can see the actual vote
+    # count and which sources are inactive. Example:
+    #   "2 of 2 active bearish · Mosh inactive · composite: Sell"
+    # This is derived deterministically from the per-source signal columns.
+    def _classify_direction(sig):
+        if sig is None:
+            return None
+        s = str(sig).strip().lower()
+        if s in ("", "nan", "none", "-", "n/a", "no action", "no_action", "hold"):
+            return None
+        if any(k in s for k in ("buy", "long", "add", "overweight", "outperform")):
+            return "bull"
+        if any(k in s for k in ("sell", "short", "trim", "underweight", "underperform", "reduce")):
+            return "bear"
+        return None  # unknown / neutral
+
+    def _signal_alignment_row(row, source_cols):
+        """Return a compact human-readable alignment string for one row."""
+        active_bull = active_bear = 0
+        inactive_labels = []
+        for col in source_cols:
+            src_name = col.replace("_signal", "").replace("_", " ").title()
+            direction = _classify_direction(row.get(col))
+            if direction == "bull":
+                active_bull += 1
+            elif direction == "bear":
+                active_bear += 1
+            else:
+                inactive_labels.append(f"{src_name} inactive")
+        active = active_bull + active_bear
+        if active == 0:
+            head = "no active sources"
+        elif active_bull and not active_bear:
+            head = f"{active_bull} of {active} active bullish"
+        elif active_bear and not active_bull:
+            head = f"{active_bear} of {active} active bearish"
+        else:
+            head = f"{active_bull} bullish · {active_bear} bearish of {active} active"
+        composite = row.get("composite_signal")
+        parts = [head]
+        if inactive_labels:
+            parts.append(" · ".join(inactive_labels))
+        if composite is not None and str(composite).strip() and str(composite).lower() != "nan":
+            parts.append(f"composite: {composite}")
+        return " · ".join(parts)
+
+    def _add_alignment_column(df, source_cols):
+        if df is None or df.empty:
+            return df
+        source_cols = [c for c in source_cols if c in df.columns]
+        if not source_cols:
+            return df
+        out = df.copy()
+        out.insert(
+            min(2, len(out.columns)),
+            "signal_alignment",
+            out.apply(lambda r: _signal_alignment_row(r, source_cols), axis=1),
+        )
+        return out
+
+    # Audit fix (deferred Item 2 — Signals as exception dashboard).
+    # Lead with WHAT CHANGED, DISAGREEMENTS, HIGH-CONFIDENCE ALIGNMENTS,
+    # and STALE/UNCOVERED — the raw 147-row US and 28-row EU tables become
+    # a drill-down, not the first thing the reader sees.
+    def _signal_exceptions(df_full, source_cols, name):
+        """Return a dict of DataFrames summarising the four exception classes."""
+        empty = {"changes": pd.DataFrame(), "disagreements": pd.DataFrame(),
+                 "unanimous": pd.DataFrame(), "stale": pd.DataFrame(),
+                 "prev_date": None}
+        if df_full is None or df_full.empty or "date" not in df_full.columns:
+            return empty
+        _today_zh = pd.Timestamp(now_zurich().date())
+        dates = pd.to_datetime(df_full["date"], errors="coerce")
+        valid = dates[dates <= _today_zh].dropna().unique()
+        if len(valid) == 0:
+            return empty
+        latest = pd.Timestamp(max(valid))
+        prev = pd.Timestamp(sorted(valid)[-2]) if len(valid) >= 2 else None
+
+        latest_df = df_full[df_full["date"] == latest].copy()
+        source_cols = [c for c in source_cols if c in latest_df.columns]
+
+        # 1. What changed vs previous available date
+        changes_rows = []
+        if prev is not None:
+            prev_df = df_full[df_full["date"] == prev].set_index("ticker") if "ticker" in df_full.columns else None
+            if prev_df is not None:
+                for _, row in latest_df.iterrows():
+                    tkr = row.get("ticker")
+                    if tkr is None or tkr not in prev_df.index:
+                        continue
+                    prev_row = prev_df.loc[tkr]
+                    if isinstance(prev_row, pd.DataFrame):
+                        prev_row = prev_row.iloc[0]
+                    for col in source_cols + ["composite_signal"]:
+                        if col not in latest_df.columns:
+                            continue
+                        old_val = prev_row.get(col)
+                        new_val = row.get(col)
+                        if pd.isna(old_val) or pd.isna(new_val):
+                            continue
+                        if str(old_val).strip() != str(new_val).strip():
+                            changes_rows.append({
+                                "ticker": tkr,
+                                "field": col.replace("_signal", "").replace("_", " ").title(),
+                                "from": str(old_val).strip(),
+                                "to": str(new_val).strip(),
+                            })
+        changes = pd.DataFrame(changes_rows)
+
+        # 2. Disagreements — both bull and bear present among active sources
+        # 3. Unanimous alignments — all active sources agree
+        # 4. Stale — no active sources at all
+        disagreements_rows = []
+        unanimous_rows = []
+        stale_rows = []
+        for _, row in latest_df.iterrows():
+            n_bull = n_bear = 0
+            for col in source_cols:
+                d = _classify_direction(row.get(col))
+                if d == "bull":
+                    n_bull += 1
+                elif d == "bear":
+                    n_bear += 1
+            active = n_bull + n_bear
+            base = {"ticker": row.get("ticker"),
+                    "composite": row.get("composite_signal")}
+            if active == 0:
+                stale_rows.append(base)
+            elif n_bull and n_bear:
+                disagreements_rows.append(dict(base, bull=n_bull, bear=n_bear, of=active))
+            else:
+                # Only if EVERY listed source is active AND agrees, call it unanimous
+                if active == len(source_cols):
+                    unanimous_rows.append(dict(base,
+                                               direction="bullish" if n_bull else "bearish",
+                                               of=active))
+        return {
+            "changes":       changes,
+            "disagreements": pd.DataFrame(disagreements_rows),
+            "unanimous":     pd.DataFrame(unanimous_rows),
+            "stale":         pd.DataFrame(stale_rows),
+            "prev_date":     prev,
+            "latest_date":   latest,
+        }
+
+    def _render_signal_exceptions(exc, name, source_cols_display):
+        """Compact top-of-panel summary for the exception dashboard."""
+        latest = exc.get("latest_date")
+        prev = exc.get("prev_date")
+        changes = exc.get("changes", pd.DataFrame())
+        disagreements = exc.get("disagreements", pd.DataFrame())
+        unanimous = exc.get("unanimous", pd.DataFrame())
+        stale = exc.get("stale", pd.DataFrame())
+
+        # Headline counters row.
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(f"Changes vs {prev.date() if prev is not None else 'n/a'}",
+                  int(len(changes)))
+        c2.metric("Disagreements",   int(len(disagreements)))
+        c3.metric("Unanimous",       int(len(unanimous)))
+        c4.metric("Uncovered / stale", int(len(stale)))
+
+        # Drill-downs.
+        if not changes.empty:
+            with st.expander(f"Signal changes since {prev.date() if prev is not None else 'previous run'} "
+                             f"({len(changes)} rows)", expanded=True):
+                st.dataframe(changes, use_container_width=True, hide_index=True, height=240)
+        if not disagreements.empty:
+            with st.expander(f"Disagreements — sources split ({len(disagreements)} rows)", expanded=False):
+                st.dataframe(disagreements, use_container_width=True, hide_index=True, height=220)
+        if not unanimous.empty:
+            with st.expander(f"High-confidence unanimous alignments — all "
+                             f"{len(source_cols_display)} sources active + agree "
+                             f"({len(unanimous)} rows)", expanded=False):
+                st.dataframe(unanimous, use_container_width=True, hide_index=True, height=220)
+        if not stale.empty:
+            with st.expander(f"Uncovered / stale — no active sources ({len(stale)} rows)", expanded=False):
+                st.dataframe(stale, use_container_width=True, hide_index=True, height=200)
+
+        # Upgrade/downgrade rollup — informational summary line.
+        if not changes.empty:
+            up = int((changes["to"].str.contains("Buy|Long|Add|Outperform", case=False, na=False) &
+                      ~changes["from"].str.contains("Buy|Long|Add|Outperform", case=False, na=False)).sum())
+            down = int((changes["to"].str.contains("Sell|Short|Trim|Underperform", case=False, na=False) &
+                        ~changes["from"].str.contains("Sell|Short|Trim|Underperform", case=False, na=False)).sum())
+            st.caption(f"↑ {up} upgrade(s) · ↓ {down} downgrade(s) · other transitions: {len(changes) - up - down}")
+
     def _filtered_table(df, columns, search_key, height=260):
         """Render a sortable table with a free-text filter above it.
         Filter matches against any string column (case-insensitive substring).
@@ -5642,7 +6162,7 @@ else:
             "🔍 Filter (matches any column)",
             value="",
             key=search_key,
-            placeholder="e.g. UNANIMOUS, MOSH_OUTLIER, Buy, AAPL, Tech, ...",
+            placeholder="e.g. bearish, Mosh inactive, Sell, AAPL, Tech, ...",
         )
         if query:
             q = query.strip().lower()
@@ -5675,55 +6195,124 @@ else:
             df_macro, st_macro, err_macro = _safe_load(load_research_macro_df_cached, timeout_s=10)
 
             # ── SNIPER 4-way panel ────────────────────────────────────────────
-            st.markdown("### 🎯 SNIPER Agreement — MAN · Mosh · Research · Composite")
+            # Audit fix (Item 7): "Agreement" reads as a claim about consensus.
+            # Rename to "Signal Alignment" and expose the alignment numerator
+            # as its own column derived from the per-source signal fields.
+            st.markdown("### 🎯 SNIPER Signal Alignment — MAN · Mosh · Research · Composite")
             st.markdown(
                 "<div style='font-size:11px;color:#64748b;margin-bottom:6px;'>"
                 "EU refresh 09:20 → 09:28 Zurich · Full US+EU 16:10 → 16:35 Zurich"
                 "</div>",
                 unsafe_allow_html=True,
             )
+            with st.expander("Methodology (signal construction, weightings, cadence)", expanded=False):
+                st.markdown(
+                    "- **Sources.** MAN (internal quant), Mosh (external analyst — US only), "
+                    "Research (aggregated house views), Composite (SNIPER score-weighted combination).\n"
+                    "- **Active vs inactive.** A source is *active* when it emits Buy/Sell for the "
+                    "ticker on the given date. `No Action` / `Hold` / missing = inactive; the source "
+                    "is not counted in the alignment numerator.\n"
+                    "- **Alignment numerator.** `X of Y active bullish` (or bearish). If sources "
+                    "split, both counts are shown. Inactive sources are listed by name.\n"
+                    "- **`composite_scs`.** SNIPER Composite Score (unit-less, scale ~[-1, +1]). "
+                    "Positive tilts bullish; negative tilts bearish. Magnitude is **not** a "
+                    "return forecast — treat as a *sign*, not a *strength*.\n"
+                    "- **Refresh cadence.** EU 09:20–09:28 Zurich (pre-open); Full US+EU 16:10–16:35 "
+                    "Zurich (post US open).\n"
+                    "- **Not an order.** These are analytical outputs, not trading instructions. "
+                    "Verify against your own risk framework and transaction-cost assumptions "
+                    "before acting."
+                )
 
             # US side
+            # Audit fix (Item 6): clip "latest" to today's date so a bad OCR /
+            # hallucinated future row (e.g. "2029-05-26") can't headline the panel.
+            _today_zh = pd.Timestamp(now_zurich().date())
             if st_us == "ok" and "date" in df4.columns:
-                latest_us = df4["date"].max()
+                _us_dates = pd.to_datetime(df4["date"], errors="coerce")
+                _us_valid = _us_dates[_us_dates <= _today_zh]
+                latest_us = _us_valid.max() if not _us_valid.empty else df4["date"].max()
                 st.markdown(f"#### US 4-way · latest {latest_us}")
-                us_today = df4[df4["date"] == latest_us]
-                _filtered_table(
-                    us_today,
-                    columns=[
-                        "ticker", "agreement_label",
-                        "man_signal", "mosh_signal", "research_signal", "composite_signal",
-                        "composite_scs", "research_houses", "live_price",
-                    ],
-                    search_key="sniper_us_filter",
-                    height=300,
+                # Audit fix (Signals-as-exception): lead with what changed,
+                # disagreements, high-confidence alignments, and stale names.
+                _us_exc = _signal_exceptions(
+                    df4,
+                    source_cols=["man_signal", "mosh_signal", "research_signal"],
+                    name="US",
                 )
+                _render_signal_exceptions(_us_exc, "US",
+                                          source_cols_display=["MAN", "Mosh", "Research"])
+                us_today = df4[df4["date"] == latest_us]
+                us_today = _add_alignment_column(
+                    us_today,
+                    source_cols=["man_signal", "mosh_signal", "research_signal"],
+                )
+                with st.expander(f"Raw US table ({len(us_today)} rows) — drill-down",
+                                 expanded=False):
+                    _filtered_table(
+                        us_today,
+                        columns=[
+                            "ticker", "signal_alignment",
+                            "man_signal", "mosh_signal", "research_signal", "composite_signal",
+                            "composite_scs", "research_houses", "live_price",
+                        ],
+                        search_key="sniper_us_filter",
+                        height=300,
+                    )
             else:
                 _status_banner("US 4-way", st_us, err_us)
 
             # EU side
             if st_eu == "ok" and "date" in df4_eu.columns:
-                latest_eu = df4_eu["date"].max()
+                _eu_dates = pd.to_datetime(df4_eu["date"], errors="coerce")
+                _eu_valid = _eu_dates[_eu_dates <= _today_zh]
+                latest_eu = _eu_valid.max() if not _eu_valid.empty else df4_eu["date"].max()
                 st.markdown(f"#### EU 3-way · latest {latest_eu}")
-                eu_today = df4_eu[df4_eu["date"] == latest_eu]
-                _filtered_table(
-                    eu_today,
-                    columns=[
-                        "ticker", "name", "agreement_label",
-                        "man_signal", "research_signal", "composite_signal",
-                        "composite_scs", "research_houses", "price",
-                    ],
-                    search_key="sniper_eu_filter",
-                    height=300,
+                _eu_exc = _signal_exceptions(
+                    df4_eu,
+                    source_cols=["man_signal", "research_signal"],
+                    name="EU",
                 )
+                _render_signal_exceptions(_eu_exc, "EU",
+                                          source_cols_display=["MAN", "Research"])
+                eu_today = df4_eu[df4_eu["date"] == latest_eu]
+                eu_today = _add_alignment_column(
+                    eu_today,
+                    source_cols=["man_signal", "research_signal"],
+                )
+                with st.expander(f"Raw EU table ({len(eu_today)} rows) — drill-down",
+                                 expanded=False):
+                    _filtered_table(
+                        eu_today,
+                        columns=[
+                            "ticker", "name", "signal_alignment",
+                            "man_signal", "research_signal", "composite_signal",
+                            "composite_scs", "research_houses", "price",
+                        ],
+                        search_key="sniper_eu_filter",
+                        height=300,
+                    )
             else:
                 _status_banner("EU 3-way", st_eu, err_eu)
 
             # ── Macro Views panel ────────────────────────────────────────────
+            # Audit fix (Item 6): the "latest 2029-05-26" incident came from
+            # this call. Drop anything dated after today before picking the
+            # panel headline date, and warn if any were dropped so an operator
+            # can inspect the offending source doc.
             if st_macro == "ok" and "date" in df_macro.columns:
-                latest_m = df_macro["date"].max()
+                _mv_dates = pd.to_datetime(df_macro["date"], errors="coerce")
+                _mv_valid_mask = _mv_dates <= _today_zh
+                _n_future = int((~_mv_valid_mask).sum())
+                if _n_future:
+                    st.caption(
+                        f"⚠️ Suppressed {_n_future} macro-view row(s) with dates in the future — "
+                        f"likely OCR or extraction error. Verify source docs."
+                    )
+                df_macro_valid = df_macro[_mv_valid_mask]
+                latest_m = df_macro_valid["date"].max() if not df_macro_valid.empty else df_macro["date"].max()
                 st.markdown(f"### 🌍 Macro Views by Topic · latest {latest_m}")
-                macro_today = df_macro[df_macro["date"] == latest_m]
+                macro_today = df_macro_valid[df_macro_valid["date"] == latest_m]
                 _filtered_table(
                     macro_today,
                     columns=[

@@ -3493,54 +3493,55 @@ def build_sniper_equity_chf(chart_window_start, notional_per_trade_chf=10_000.0,
     if the composite log doesn't cover this (ticker, date)). Empty DataFrame
     on any load / compute failure so the chart never breaks.
     """
+    # Diagnostic fix (2026-09-08): the 4-way logs (load_4way_df_cached, etc.)
+    # are OVERWRITTEN daily — they only carry today's row, so back-testing on
+    # them collapsed to a flat line. The composite log (load_composite_df_cached)
+    # is an append log with full history (verified ~3.3k Buy signals since
+    # 2026-05-22) and already carries region + risk_multiplier per row. Read
+    # trades from the composite log instead.
     import yfinance as yf
     try:
-        from brief_drive_reader import (
-            load_4way_df_cached, load_4way_eu_df_cached, load_composite_df_cached,
-        )
+        from brief_drive_reader import load_composite_df_cached
     except Exception:
         return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
 
     try:
-        df_us   = load_4way_df_cached()
-        df_eu   = load_4way_eu_df_cached()
         df_comp = load_composite_df_cached()
     except Exception:
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+
+    if df_comp is None or df_comp.empty or "signal" not in df_comp.columns:
         return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
 
     start = pd.Timestamp(chart_window_start).normalize()
     end   = pd.Timestamp.today().normalize()
 
-    def _buys(df, currency):
-        if df is None or df.empty or "date" not in df.columns:
-            return pd.DataFrame(columns=["date", "ticker", "currency"])
-        df = df.copy()
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df[df["composite_signal"].astype(str).str.strip().str.lower().eq("buy")]
-        df = df[(df["date"] >= start) & (df["date"] <= end)]
-        if df.empty:
-            return pd.DataFrame(columns=["date", "ticker", "currency"])
-        out = df[["date", "ticker"]].copy()
-        out["currency"] = currency
-        return out
-
-    trades = pd.concat(
-        [_buys(df_us, "USD"), _buys(df_eu, "EUR")],
-        ignore_index=True,
-    )
-    if trades.empty:
+    df = df_comp.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[(df["date"] >= start) & (df["date"] <= end)]
+    # Long-only. Treat both "Buy" and "Strong Buy" as entry signals — the
+    # risk_multiplier already captures the sizing difference between them.
+    _sig = df["signal"].astype(str).str.strip().str.lower()
+    df = df[_sig.isin(["buy", "strong buy"])]
+    # Drop hard rejects if the column is present (SNIPER's own kill switch).
+    if "hard_reject" in df.columns:
+        _hr = pd.to_numeric(df["hard_reject"], errors="coerce").fillna(0)
+        df = df[_hr == 0]
+    if df.empty:
         return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
 
-    # Join risk_multiplier from the composite log on (ticker, date). Fall
-    # back to 1.0 if the log doesn't cover that pair.
-    if df_comp is not None and not df_comp.empty and "risk_multiplier" in df_comp.columns:
-        _comp = df_comp[["date", "ticker", "risk_multiplier"]].copy()
-        _comp["date"] = pd.to_datetime(_comp["date"], errors="coerce")
-        trades = trades.merge(_comp, on=["date", "ticker"], how="left")
-    else:
-        trades["risk_multiplier"] = 1.0
-    trades["risk_multiplier"] = pd.to_numeric(trades["risk_multiplier"], errors="coerce").fillna(1.0).clip(0.0, 1.0)
-    trades = trades[trades["risk_multiplier"] > 0.0].reset_index(drop=True)
+    # Region → currency. Composite log stores lowercase 'us' / 'eu'.
+    df["currency"] = (df["region"].astype(str).str.strip().str.lower()
+                      .map({"us": "USD", "eu": "EUR"}))
+    df = df[df["currency"].isin(["USD", "EUR"])]
+
+    # Sizing: risk_multiplier is in [0, 1] per SNIPER convention.
+    df["risk_multiplier"] = (
+        pd.to_numeric(df.get("risk_multiplier", 1.0), errors="coerce")
+        .fillna(1.0).clip(0.0, 1.0)
+    )
+    df = df[df["risk_multiplier"] > 0.0].reset_index(drop=True)
+    trades = df[["date", "ticker", "currency", "risk_multiplier"]].copy()
     if trades.empty:
         return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
 

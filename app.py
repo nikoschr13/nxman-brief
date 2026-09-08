@@ -3625,36 +3625,76 @@ def build_sniper_equity_chf(chart_window_start, notional_per_trade_chf=10_000.0,
         qty = size_local / entry_px
         pnl_local = qty * (exit_px - entry_px)
         pnl_chf = pnl_local * fx_exit  # convert exit-day cash back to CHF
+        ret_pct_trade = ((exit_px * fx_exit) / (entry_px * fx_entry) - 1.0) * 100.0
         trade_pnl_rows.append({
-            "exit_date": pd.Timestamp(exit_ts).normalize(),
-            "pnl_chf": pnl_chf,
+            "entry_date": pd.Timestamp(entry_ts).normalize(),
+            "exit_date":  pd.Timestamp(exit_ts).normalize(),
+            "pnl_chf":    pnl_chf,
+            "size_chf":   size_chf,
+            "trade_ret_pct": ret_pct_trade,
         })
 
     if not trade_pnl_rows:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
+        return pd.DataFrame(columns=["date", "cum_chf", "return_pct",
+                                     "avg_deployed", "n_open", "trades_stats"])
 
     pnl_df = pd.DataFrame(trade_pnl_rows)
-    daily = pnl_df.groupby("exit_date")["pnl_chf"].sum().sort_index()
 
-    # Build a continuous daily equity curve across the window.
+    # Trade-level summary stats (winners, hit rate, mean/median return).
+    n_total = len(pnl_df)
+    n_win   = int((pnl_df["trade_ret_pct"] > 0).sum())
+    n_loss  = int((pnl_df["trade_ret_pct"] < 0).sum())
+    hit_rate = 100.0 * n_win / max(n_total, 1)
+    mean_ret = float(pnl_df["trade_ret_pct"].mean())
+    med_ret  = float(pnl_df["trade_ret_pct"].median())
+    total_chf_pnl = float(pnl_df["pnl_chf"].sum())
+    trades_stats = {
+        "n_trades": n_total,
+        "n_winners": n_win,
+        "n_losers":  n_loss,
+        "hit_rate_pct": hit_rate,
+        "mean_trade_return_pct": mean_ret,
+        "median_trade_return_pct": med_ret,
+        "total_pnl_chf": total_chf_pnl,
+    }
+
+    # ── Rolling-book equity curve (industry standard) ────────────────────
+    # For each trading day in the window, book size = CHF notional of all
+    # positions currently open on that day. Daily book return = (sum of CHF
+    # PnL closing that day) / (average book size while those trades were
+    # open). Then compound to get the equity curve. This is the correct
+    # "how did the strategy actually perform" number, not the "cumulative
+    # PnL as % of total capital ever deployed" version which understates
+    # the compounded reality by ~10x (since each trade's slot recycles
+    # ~7 times in a 4-month window with a 15-day hold).
     idx = pd.date_range(start, end, freq="D")
-    daily_full = daily.reindex(idx, fill_value=0.0)
-    cum = daily_full.cumsum()
-    # Rebase to % of a nominal book size = number-of-days × notional × 1.0 is
-    # not meaningful. Instead use average deployed capital = sum of all trade
-    # notionals ÷ number of trades — this reports return-on-average-trade.
-    total_notional = notional_per_trade_chf * float(len(trades))
-    avg_deployed = total_notional / float(len(trades)) if len(trades) > 0 else 1.0
-    # Return-on-book = cumulative CHF PnL as % of total capital ever deployed
-    # (conservative: treats each trade's notional as never recycled).
-    denom = total_notional if total_notional > 0 else 1.0
-    ret_pct = (cum / denom) * 100.0
+    # Book value per day = sum of size_chf of trades where
+    # entry_date <= day < exit_date (inclusive of entry).
+    book_per_day = pd.Series(0.0, index=idx)
+    for _, row in pnl_df.iterrows():
+        e = row["entry_date"]; x = row["exit_date"]
+        book_per_day.loc[(book_per_day.index >= e) & (book_per_day.index <= x)] += row["size_chf"]
+    # Daily CHF PnL, indexed on exit_date (position realises on close).
+    daily_pnl = pnl_df.groupby("exit_date")["pnl_chf"].sum().reindex(idx, fill_value=0.0)
+    # Daily return = daily PnL / prior book value (avoid /0 by using max(book, 1)).
+    # Use a small floor so days with 0 book (early days before any trade
+    # opened) yield 0% return, not divide-by-zero.
+    daily_ret = daily_pnl / book_per_day.replace(0.0, float("nan"))
+    daily_ret = daily_ret.fillna(0.0)
+    # Compound: cumulative rolling-book return.
+    equity_mult = (1.0 + daily_ret).cumprod()
+    equity_pct = (equity_mult - 1.0) * 100.0
+
+    # CHF pot value for the tooltip: assume a nominal starting book of
+    # notional_per_trade_chf (10k). Grow it via equity_mult.
+    cum_chf = notional_per_trade_chf * (equity_mult - 1.0)
 
     return pd.DataFrame({
-        "date": cum.index,
-        "cum_chf": cum.values,
-        "return_pct": ret_pct.values,
-    })
+        "date": equity_pct.index,
+        "cum_chf": cum_chf.values,
+        "return_pct": equity_pct.values,
+        "avg_deployed": book_per_day.values,
+    }).assign(trades_stats_json=[trades_stats] * len(equity_pct))
 
 
 # Audit fix (main-chart rebuild): yields must NOT be plotted on the same
@@ -5507,16 +5547,24 @@ def add_render_outputs(base_state, chart_window="YTD"):
                         name="SNIPER (CHF, 15d hold, sized)",
                         line=dict(color="#0F172A", width=2.5, dash="dash"),
                         hovertemplate="<b>SNIPER (CHF)</b><br>Date: %{x|%d %b %Y}<br>"
-                                      "Cumulative: %{y:+.2f}% of book<extra></extra>",
+                                      "Compounded: %{y:+.2f}%<extra></extra>",
                     )
                     # End-of-line label like the other traces.
-                    _s = _sniper_eq.dropna()
+                    _s = _sniper_eq.dropna(subset=["return_pct"])
                     if not _s.empty:
                         fig.add_annotation(
                             x=_s["date"].iloc[-1], y=_s["return_pct"].iloc[-1],
                             text=" SNIPER", xanchor="left", yanchor="middle",
                             showarrow=False, font=dict(size=11, color="#0F172A"),
                         )
+                    # Stash trade stats on session_state so we can render a
+                    # caption below the chart with the underlying numbers.
+                    if "trades_stats_json" in _sniper_eq.columns and not _sniper_eq.empty:
+                        _stats = _sniper_eq["trades_stats_json"].iloc[0]
+                        if isinstance(_stats, dict):
+                            st.session_state["_sniper_backtest_stats"] = _stats
+                            st.session_state["_sniper_backtest_final_pct"] = float(
+                                _s["return_pct"].iloc[-1]) if not _s.empty else None
             except Exception as _sniper_overlay_exc:
                 # Never let the SNIPER overlay break the chart.
                 import logging as _lg
@@ -6145,6 +6193,25 @@ else:
             st.markdown(f"**{writing['headline']}**")
             st.caption(writing["subheadline"])
             st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
+            # SNIPER backtest summary caption right under the chart, using
+            # the stats stashed by build_sniper_equity_chf().
+            _s = st.session_state.get("_sniper_backtest_stats")
+            _final = st.session_state.get("_sniper_backtest_final_pct")
+            if _s:
+                st.markdown(
+                    "<div style='font-size:11.5px;color:#334155;padding:6px 8px 4px;"
+                    "background:#F1F5F9;border-radius:8px;border:1px solid #E2E8F0;'>"
+                    f"<b>SNIPER as-if-traded stats (in this chart window)</b> · "
+                    f"{_s['n_trades']:,} trades · "
+                    f"{_s['n_winners']:,} winners · {_s['n_losers']:,} losers · "
+                    f"hit rate <b>{_s['hit_rate_pct']:.1f}%</b> · "
+                    f"mean trade return <b>{_s['mean_trade_return_pct']:+.2f}%</b> · "
+                    f"median <b>{_s['median_trade_return_pct']:+.2f}%</b> · "
+                    f"total CHF PnL <b>{_s['total_pnl_chf']:+,.0f}</b> · "
+                    f"compounded rolling-book return <b>{(_final or 0.0):+.2f}%</b>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
         else:
             st.info("No chart data — market data fetch may have failed.")
         if _fig_rates is not None:

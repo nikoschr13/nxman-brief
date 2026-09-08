@@ -5680,9 +5680,9 @@ else:
         f"·  {status['article_count']} articles"
         f"{_as_of_str}"
     )
-    if not status["gemini_used"] and ai_detail:
-        with st.expander("Diagnostics (operator)", expanded=False):
-            st.caption(f"AI provider status: {ai_detail}")
+    # Cleanup pass: removed the duplicated "Diagnostics (operator)" expander
+    # that used to sit here; the same content is now surfaced once inside the
+    # Methodology tab under "Operator diagnostics — AI provider raw status".
 
     # ── 2. Compact ticker strip ───────────────────────────────────────────────
     render_ticker_strip(snap)
@@ -5915,7 +5915,10 @@ else:
                         st.markdown(f"📌 **FV CHANGE** {name}: {old} → **{new}** *(from {src})*")
         st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── 4. Main cross-asset chart + Chart of the Day ─── moved to Overview ──
+    # ── 4-6. Overview lower half: main chart | Chart of Day, then FX + tables
+    # Cleanup pass: the earlier version split chart_col/cotd_col across two
+    # `with nav_overview:` blocks which broke Streamlit's column layout —
+    # `with cotd_col:` in the second block was orphaned. Consolidated here.
     with nav_overview:
      chart_col, cotd_col = st.columns([3, 2], gap="medium")
 
@@ -5939,8 +5942,6 @@ else:
                              expanded=False):
                 st.plotly_chart(_fig_alts, use_container_width=True, key="main_alts_chart")
 
-    # cotd_col + FX + detail cards + data tables all belong under Overview.
-    with nav_overview:
      with cotd_col:
         cotd = st.session_state.get("chart_of_day")
         cotd_label = cotd["label"] if cotd else "Chart of the Day"
@@ -5956,20 +5957,13 @@ else:
                           "EUR/USD · USD/CHF · EUR/CHF · DXY · Gold · Oil",
                           "fx_section")
 
-     # ── 6. Detailed cards (collapsed) ─────────────────────────────────────
-     with st.expander("📊 Equities & Asset Class Detail", expanded=False):
-        render_card_strip(snap, hist, INDICATOR_STRIP,
-                          "Market Indicators",
-                          "Equity indices + VIX + DXY. VIX red = fear rising.",
-                          "market_indicators")
-        render_card_strip(snap, hist, ASSET_CLASS_STRIP,
-                          "Asset Class Performance",
-                          "Cross-asset. Yields in bps, all others in %.",
-                          "asset_classes")
-
      # ── 6. Data tables ────────────────────────────────────────────────────
+     # Cleanup pass: removed the separate "📊 Equities & Asset Class Detail"
+     # card expander — it duplicated the data-tables view. Also removed the
+     # inline "Definitions" sub-tab; definitions now live in a single place
+     # (the sidebar checkbox "Show definitions" surfaces them in Overview).
      with st.expander("📋 Full Data Tables", expanded=False):
-        _dt_tabs = st.tabs(["Equities", "Rates", "Commodities", "Bonds & Crypto", "Definitions", "History"])
+        _dt_tabs = st.tabs(["Equities", "Rates", "Commodities", "Bonds & Crypto", "History"])
         with _dt_tabs[0]:
             st.dataframe(compact_table(st.session_state["equities_df"]),   use_container_width=True, height=300)
         with _dt_tabs[1]:
@@ -5979,25 +5973,6 @@ else:
         with _dt_tabs[3]:
             st.dataframe(compact_table(st.session_state.get("bonds_df", st.session_state["commodities_df"])), use_container_width=True, height=260)
         with _dt_tabs[4]:
-            dfs_def = []
-            for key in ["equities_df", "rates_df", "commodities_df"]:
-                df_src = st.session_state.get(key)
-                if df_src is not None:
-                    dfs_def.append(definitions_table(df_src))
-            if dfs_def:
-                combined = pd.concat(dfs_def, ignore_index=True).drop_duplicates()
-                st.dataframe(
-                    combined,
-                    use_container_width=True,
-                    height=520,
-                    column_config={
-                        "label":       st.column_config.TextColumn("Instrument", width="small"),
-                        "description": st.column_config.TextColumn("Description & What a Move Means", width="large"),
-                    },
-                )
-            else:
-                st.info("Generate the brief first.")
-        with _dt_tabs[5]:
             st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
     # Signals tab: SNIPER 4-way alignment + Macro Views (audit reorganization).

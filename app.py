@@ -2,8 +2,9 @@ import os
 import re
 import json
 import time
+from html import escape
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -22,6 +23,8 @@ from reportlab.lib.pagesizes import landscape, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
+
+from ibkr_client import IBKRAPIError, IBKRClient, IBKRConfig, mask_account_id
 
 # Optional: Drive-backed research library feed. If brief_drive_reader isn't
 # importable (e.g. dep not installed locally), Brief falls back to manual upload.
@@ -92,6 +95,23 @@ GIST_FILENAME  = "nxman_snapshots.json"
 # Gmail — for forwarded FT/Bloomberg/work emails as extra news source
 GMAIL_EMAIL        = get_secret("GMAIL_EMAIL")
 GMAIL_APP_PASSWORD = get_secret("GMAIL_APP_PASSWORD")
+
+# Interactive Brokers — read-only portfolio connection.  No order or trading
+# endpoint exists in this application.  The endpoint can be an authenticated
+# Web API service or a locally hosted Client Portal Gateway when running the
+# Streamlit app on the same trusted machine.
+IBKR_BASE_URL      = get_secret("IBKR_BASE_URL")
+IBKR_ACCESS_TOKEN  = get_secret("IBKR_ACCESS_TOKEN")
+IBKR_SESSION_COOKIE = get_secret("IBKR_SESSION_COOKIE")
+IBKR_ACCOUNT_ID    = get_secret("IBKR_ACCOUNT_ID")
+IBKR_VERIFY_SSL    = get_secret("IBKR_VERIFY_SSL", "true").lower() not in {"0", "false", "no"}
+try:
+    IBKR_MARKET_CONIDS = json.loads(get_secret("IBKR_MARKET_CONIDS", "{}"))
+    if not isinstance(IBKR_MARKET_CONIDS, dict):
+        IBKR_MARKET_CONIDS = {}
+except Exception:
+    IBKR_MARKET_CONIDS = {}
+ENABLE_RESEARCH_UPLOADS = get_secret("ENABLE_RESEARCH_UPLOADS", "false").lower() in {"1", "true", "yes"}
 
 ASSETS = [
     ("equities", "sp500",      "S&P 500",
@@ -479,6 +499,11 @@ def _compute_nfp_dates(months_ahead: int = 8) -> list[dict]:
             except ValueError:
                 break
             if cand.weekday() == 4:  # Friday
+                # New Year's Day is a federal holiday; the Employment
+                # Situation release moves to the following Friday rather
+                # than appearing as a bogus 01 Jan event.
+                if cand.month == 1 and cand.day == 1:
+                    cand += timedelta(days=7)
                 out.append({
                     "date": cand.strftime("%Y-%m-%d"),
                     "event": "US Jobs Report (NFP)",
@@ -616,6 +641,16 @@ st.set_page_config(page_title="Daily Market Briefing", layout="wide")
 def _password_gate() -> None:
     import hmac
     expected = get_secret("APP_PASSWORD", "").strip()
+    try:
+        has_drive_credentials = bool(st.secrets.get("gcp_service_account"))
+    except Exception:
+        has_drive_credentials = False
+    if not expected and (IBKR_BASE_URL or has_drive_credentials):
+        st.error(
+            "This deployment has private portfolio or research data configured, but no "
+            "APP_PASSWORD. Add a strong access password in Streamlit Secrets before continuing."
+        )
+        st.stop()
     if not expected:
         return  # no password configured → open access, unchanged behaviour
     if st.session_state.get("_auth_ok"):
@@ -758,10 +793,370 @@ def nice(df):
     return out
 
 
+def _number(value, default=None):
+    """Extract a number from IBKR's scalar or {amount/value: ...} shapes."""
+    if isinstance(value, dict):
+        value = value.get("amount", value.get("value"))
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _summary_value(summary, *keys, default=None):
+    lowered = {str(k).lower(): v for k, v in (summary or {}).items()}
+    for key in keys:
+        if key.lower() in lowered:
+            return _number(lowered[key.lower()], default)
+    return default
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_ibkr_portfolio():
+    """Load a short-lived, read-only portfolio snapshot from IBKR."""
+    cfg = IBKRConfig(
+        base_url=IBKR_BASE_URL,
+        access_token=IBKR_ACCESS_TOKEN,
+        session_cookie=IBKR_SESSION_COOKIE,
+        account_id=IBKR_ACCOUNT_ID,
+        verify_ssl=IBKR_VERIFY_SSL,
+    )
+    return IBKRClient(cfg).portfolio()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_ibkr_market_quotes():
+    """Return configured, entitled IBKR quotes keyed by dashboard instrument."""
+    if not IBKR_BASE_URL or not IBKR_MARKET_CONIDS:
+        return {}
+    cfg = IBKRConfig(
+        base_url=IBKR_BASE_URL,
+        access_token=IBKR_ACCESS_TOKEN,
+        session_cookie=IBKR_SESSION_COOKIE,
+        account_id=IBKR_ACCOUNT_ID,
+        verify_ssl=IBKR_VERIFY_SSL,
+    )
+    conid_to_key = {}
+    for key, conid in IBKR_MARKET_CONIDS.items():
+        try:
+            conid_to_key[int(conid)] = str(key)
+        except (TypeError, ValueError):
+            continue
+    rows = IBKRClient(cfg).market_snapshot(list(conid_to_key))
+    out = {}
+    for row in rows:
+        try:
+            conid = int(row.get("conid"))
+        except (TypeError, ValueError):
+            continue
+        key = conid_to_key.get(conid)
+        if not key:
+            continue
+        last = _number(str(row.get("31", "")).replace(",", ""))
+        change = _number(str(row.get("82", "")).replace("%", "").replace(",", ""))
+        if last is not None:
+            updated_ms = _number(row.get("_updated"))
+            quote_as_of = (
+                datetime.fromtimestamp(updated_ms / 1000, tz=timezone.utc).isoformat()
+                if updated_ms else datetime.now(timezone.utc).isoformat()
+            )
+            out[key] = {
+                "level": last,
+                "d1": change,
+                "conid": conid,
+                "as_of": quote_as_of,
+            }
+    return out
+
+
+def _normalise_ibkr_portfolio(payload):
+    """Return display-ready positions, account metrics and data-quality notes."""
+    positions = pd.DataFrame(payload.get("positions") or [])
+    summary = payload.get("summary") or {}
+    ledger = payload.get("ledger") or {}
+
+    base_entry = ledger.get("BASE") if isinstance(ledger, dict) else {}
+    base_entry = base_entry if isinstance(base_entry, dict) else {}
+    account_id = str(payload.get("account_id") or "")
+    account_rows = payload.get("accounts") or []
+    account_currency = next(
+        (
+            str(row.get("currency") or "").upper()
+            for row in account_rows
+            if isinstance(row, dict)
+            and str(row.get("accountId") or row.get("id") or "") == account_id
+            and row.get("currency")
+        ),
+        "",
+    )
+    base_currency = str(
+        account_currency
+        or next(
+            (
+                v.get("currency")
+                for key, v in summary.items()
+                if str(key).lower() in {"netliquidation", "netliquidationvalue"}
+                and isinstance(v, dict) and v.get("currency")
+            ),
+            "",
+        )
+        or "BASE"
+    ).upper()
+
+    fx_to_base = {base_currency: 1.0}
+    if isinstance(ledger, dict):
+        for currency, values in ledger.items():
+            if isinstance(values, dict):
+                fx = _number(values.get("exchangerate"))
+                if fx and fx > 0:
+                    fx_to_base[str(currency).upper()] = fx
+
+    net_liquidation = _summary_value(summary, "netliquidation", "netliquidationvalue")
+    if net_liquidation is None:
+        net_liquidation = _number(base_entry.get("netliquidationvalue", base_entry.get("netliquidation")))
+    total_cash = _summary_value(summary, "totalcashvalue", "cashbalance")
+    if total_cash is None:
+        total_cash = _number(base_entry.get("cashbalance"), 0.0)
+
+    if positions.empty:
+        return positions, {
+            "base_currency": base_currency,
+            "net_liquidation": net_liquidation,
+            "cash": total_cash,
+            "gross_exposure": 0.0,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "missing_fx": [],
+        }
+
+    aliases = {
+        "ticker": ["ticker", "contractDesc"],
+        "name": ["name", "contractDesc", "ticker"],
+        "quantity": ["position"],
+        "market_price": ["mktPrice"],
+        "market_value_local": ["mktValue"],
+        "average_cost": ["avgCost", "avgPrice"],
+        "unrealized_pnl_local": ["unrealizedPnl"],
+        "realized_pnl_local": ["realizedPnl"],
+        "currency": ["currency"],
+        "asset_class": ["assetClass"],
+        "sector": ["sector", "sectorGroup", "group"],
+    }
+    out = pd.DataFrame(index=positions.index)
+    for target, candidates in aliases.items():
+        source = next((col for col in candidates if col in positions.columns), None)
+        out[target] = positions[source] if source else None
+
+    for col in ["quantity", "market_price", "market_value_local", "average_cost",
+                "unrealized_pnl_local", "realized_pnl_local"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["ticker"] = out["ticker"].fillna("—").astype(str)
+    out["name"] = out["name"].fillna(out["ticker"]).astype(str)
+    out["currency"] = out["currency"].fillna(base_currency).astype(str).str.upper()
+    out["asset_class"] = out["asset_class"].fillna("Other").astype(str)
+    out["sector"] = out["sector"].fillna("Unclassified").astype(str)
+    out["fx_to_base"] = out["currency"].map(fx_to_base)
+    out["market_value_base"] = out["market_value_local"] * out["fx_to_base"]
+    out["unrealized_pnl_base"] = out["unrealized_pnl_local"] * out["fx_to_base"]
+    out["realized_pnl_base"] = out["realized_pnl_local"] * out["fx_to_base"]
+
+    gross = float(out["market_value_base"].abs().sum(skipna=True))
+    out["gross_weight_pct"] = out["market_value_base"].abs() / gross * 100 if gross else 0.0
+    out["nav_weight_pct"] = (
+        out["market_value_base"] / net_liquidation * 100
+        if net_liquidation not in (None, 0) else None
+    )
+    out["position_pnl_pct"] = (
+        out["unrealized_pnl_local"]
+        / (out["market_value_local"].abs() - out["unrealized_pnl_local"]).replace(0, pd.NA)
+        * 100
+    )
+
+    missing_fx = sorted(out.loc[out["fx_to_base"].isna(), "currency"].dropna().unique().tolist())
+    metrics = {
+        "base_currency": base_currency,
+        "net_liquidation": net_liquidation,
+        "cash": total_cash,
+        "gross_exposure": gross,
+        "unrealized_pnl": float(out["unrealized_pnl_base"].sum(skipna=True)),
+        "realized_pnl": float(out["realized_pnl_base"].sum(skipna=True)),
+        "missing_fx": missing_fx,
+    }
+    return out.sort_values("gross_weight_pct", ascending=False), metrics
+
+
+def _money(value, currency):
+    return "Unavailable" if value is None or pd.isna(value) else f"{currency} {float(value):,.0f}"
+
+
+def render_ibkr_portfolio_impact():
+    """Render IBKR-backed allocation, concentration, P&L and change analysis."""
+    st.markdown("### Portfolio Impact")
+    st.caption("Read-only IBKR portfolio view · account identifiers are masked · no order permissions")
+
+    if not IBKR_BASE_URL:
+        st.info(
+            "**IBKR is ready to connect but is not configured yet.** Add the read-only "
+            "Web API endpoint and authentication secrets in Streamlit, then refresh this tab."
+        )
+        st.markdown(
+            "Required: `IBKR_BASE_URL`. Optional: `IBKR_ACCESS_TOKEN` or "
+            "`IBKR_SESSION_COOKIE`, plus `IBKR_ACCOUNT_ID` when the login can see multiple accounts."
+        )
+        st.warning(
+            "Do not paste an IBKR username, password or live session token into this page. "
+            "A Client Portal Gateway running only on your Mac cannot be reached by Streamlit Cloud; "
+            "the deployed app needs a secured Web API connection."
+        )
+        return
+
+    if st.button("Refresh IBKR portfolio", key="refresh_ibkr", use_container_width=False):
+        load_ibkr_portfolio.clear()
+        st.rerun()
+
+    try:
+        payload = load_ibkr_portfolio()
+        positions, metrics = _normalise_ibkr_portfolio(payload)
+        st.session_state["_ibkr_last_success"] = payload
+    except IBKRAPIError as exc:
+        previous = st.session_state.get("_ibkr_last_success")
+        if not previous:
+            st.error(f"IBKR portfolio unavailable: {exc}")
+            st.caption("Check the authenticated Web API session, portfolio permission and endpoint reachability.")
+            return
+        payload = previous
+        positions, metrics = _normalise_ibkr_portfolio(payload)
+        st.warning(f"IBKR refresh failed ({exc}). Showing the last successful in-session snapshot.")
+    except Exception:
+        st.error("IBKR portfolio could not be processed. No account details were exposed.")
+        return
+
+    as_of = payload.get("as_of", "")
+    try:
+        as_of_text = pd.Timestamp(as_of).tz_convert(ZURICH_TZ).strftime("%d %b %Y %H:%M %Z")
+    except Exception:
+        as_of_text = str(as_of)[:19]
+    account_label = mask_account_id(payload.get("account_id", ""))
+    base = metrics["base_currency"]
+    st.success(f"Connected · account {account_label} · data retrieved {as_of_text}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Net liquidation", _money(metrics["net_liquidation"], base))
+    c2.metric("Cash", _money(metrics["cash"], base))
+    c3.metric("Gross exposure", _money(metrics["gross_exposure"], base))
+    c4.metric("Unrealized P&L", _money(metrics["unrealized_pnl"], base))
+
+    if metrics["missing_fx"]:
+        st.warning(
+            "Base-currency weights exclude positions lacking an IBKR ledger FX rate: "
+            + ", ".join(metrics["missing_fx"])
+        )
+    if positions.empty:
+        st.info("IBKR returned no open positions for this account.")
+        return
+
+    left, right = st.columns(2, gap="medium")
+    chart_df = positions.dropna(subset=["market_value_base"])
+    if chart_df.empty:
+        st.warning("Allocation charts are unavailable because no positions could be converted to the account base currency.")
+    else:
+        with left:
+            allocation = (
+                chart_df.assign(gross_value=chart_df["market_value_base"].abs())
+                .groupby("asset_class", as_index=False)["gross_value"].sum()
+            )
+            fig_asset = px.pie(allocation, values="gross_value", names="asset_class", hole=0.55,
+                               title="Gross allocation by asset class")
+            fig_asset.update_layout(height=330, margin=dict(l=10, r=10, t=45, b=10), legend_title="")
+            st.plotly_chart(fig_asset, use_container_width=True, key="ibkr_asset_allocation")
+        with right:
+            sector = (
+                chart_df.assign(gross_value=chart_df["market_value_base"].abs())
+                .groupby("sector", as_index=False)["gross_value"].sum()
+            )
+            sector = sector.sort_values("gross_value", ascending=True).tail(10)
+            fig_sector = px.bar(sector, x="gross_value", y="sector", orientation="h",
+                                title=f"Largest sector exposures ({base})", color_discrete_sequence=[PRIMARY])
+            fig_sector.update_layout(height=330, margin=dict(l=10, r=10, t=45, b=35), showlegend=False)
+            st.plotly_chart(fig_sector, use_container_width=True, key="ibkr_sector_allocation")
+
+    st.markdown("#### Exposure-driven watch items")
+    flags = []
+    top = positions.iloc[0]
+    if _number(top.get("gross_weight_pct"), 0) >= 15:
+        flags.append(f"Largest position: {top['ticker']} is {top['gross_weight_pct']:.1f}% of gross exposure.")
+    gross = metrics["gross_exposure"]
+    sector_weights = chart_df.assign(abs_value=chart_df["market_value_base"].abs()).groupby("sector")["abs_value"].sum()
+    if not sector_weights.empty and gross:
+        sector_name = sector_weights.idxmax()
+        sector_weight = sector_weights.max() / gross * 100
+        if sector_weight >= 30:
+            flags.append(f"Sector concentration: {sector_name} is {sector_weight:.1f}% of gross exposure.")
+    currency_weights = chart_df.assign(abs_value=chart_df["market_value_base"].abs()).groupby("currency")["abs_value"].sum()
+    if not currency_weights.empty and gross:
+        ccy_name = currency_weights.idxmax()
+        ccy_weight = currency_weights.max() / gross * 100
+        if ccy_name != base and ccy_weight >= 40:
+            flags.append(f"Currency concentration: {ccy_name} assets are {ccy_weight:.1f}% of gross exposure before hedges.")
+    if flags:
+        for flag in flags:
+            st.markdown(f"- {flag}")
+    else:
+        st.caption("No concentration threshold was triggered (15% position, 30% sector, 40% non-base currency).")
+    st.caption("Thresholds are monitoring prompts, not mandate limits or suitability conclusions.")
+
+    previous = st.session_state.get("_ibkr_previous_positions")
+    if isinstance(previous, pd.DataFrame) and not previous.empty:
+        before = previous.set_index("ticker")["gross_weight_pct"]
+        after = positions.set_index("ticker")["gross_weight_pct"]
+        changed = pd.concat([before.rename("previous_weight"), after.rename("current_weight")], axis=1).fillna(0)
+        changed["change_pp"] = changed["current_weight"] - changed["previous_weight"]
+        changed = changed.reindex(changed["change_pp"].abs().sort_values(ascending=False).index).head(8)
+        with st.expander("What changed since the previous IBKR refresh", expanded=False):
+            st.dataframe(changed.reset_index(), use_container_width=True, hide_index=True)
+    st.session_state["_ibkr_previous_positions"] = positions.copy()
+
+    st.markdown("#### Positions")
+    display = positions[[
+        "ticker", "name", "quantity", "market_price", "market_value_local",
+        "currency", "market_value_base", "gross_weight_pct", "unrealized_pnl_base",
+        "position_pnl_pct", "asset_class", "sector",
+    ]].copy()
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=min(540, 38 + 35 * len(display)),
+        column_config={
+            "ticker": "Ticker",
+            "name": "Instrument",
+            "quantity": st.column_config.NumberColumn("Quantity", format="%.4f"),
+            "market_price": st.column_config.NumberColumn("Market price", format="%.4f"),
+            "market_value_local": st.column_config.NumberColumn("Market value (local)", format="%.0f"),
+            "currency": "CCY",
+            "market_value_base": st.column_config.NumberColumn(f"Market value ({base})", format="%.0f"),
+            "gross_weight_pct": st.column_config.NumberColumn("Gross weight", format="%.1f%%"),
+            "unrealized_pnl_base": st.column_config.NumberColumn(f"Unrealized P&L ({base})", format="%.0f"),
+            "position_pnl_pct": st.column_config.NumberColumn("Position P&L", format="%.1f%%"),
+            "asset_class": "Asset class",
+            "sector": "Sector",
+        },
+    )
+    st.caption(
+        "Weights use absolute base-currency market values. Short positions remain signed in the value columns. "
+        "IBKR values can be delayed or entitlement-dependent; reconcile to the official account statement before action."
+    )
+
+
 def compact_table(df):
     cols = [c for c in ["label", "level", "d1", "wtd", "mtd", "ytd"] if c in df.columns]
-    out = nice(df[cols].copy())
-    return out.fillna("N/A")
+    out = df[cols].copy()
+    if "level" in out:
+        out["level"] = out["level"].apply(fmt_num)
+    for col in ["d1", "wtd", "mtd", "ytd"]:
+        if col in out:
+            out[col] = out[col].apply(fmt_pct)
+    return out.fillna("Unavailable")
 
 
 def definitions_table(df):
@@ -1799,6 +2194,61 @@ def load_news_gmail(max_emails: int = 20, lookback_hours: int = 36) -> pd.DataFr
 NEWS_COUNT = 12  # fixed — not user-selectable
 
 
+def classify_news_headline(headline: str) -> str:
+    """Conservative topic classifier; avoids category claims on weak keywords."""
+    h = re.sub(r"\s+", " ", (headline or "").lower()).strip()
+
+    def has_any(terms):
+        for term in terms:
+            if " " in term or any(ch in term for ch in "/&-"):
+                if term in h:
+                    return True
+            elif re.search(rf"\b{re.escape(term)}\b", h):
+                return True
+        return False
+
+    if has_any([
+        "bitcoin", "crypto", "ethereum", "blockchain", "decentralized finance",
+        "stablecoin", "tokenized asset",
+    ]):
+        return "Crypto"
+    if has_any(["oil", "gold", "copper", "crude", "brent", "wti", "commodity", "natural gas", "silver", "wheat"]):
+        return "Commodities"
+    if has_any([
+        "earnings", "revenue", "profit", "guidance", "stock", "shares", "equity",
+        "nasdaq", "s&p", "dow", "ipo", "buyback", "dividend", "market cap",
+        "price target", "upgrade", "downgrade", "partnership", "acquisition", "merger",
+    ]):
+        return "Equities"
+    if has_any([
+        "fed", "ecb", "boe", "snb", "inflation", "treasury", "yield", "rates",
+        "rate cut", "rate hike", "cpi", "ppi", "gdp", "fomc", "jobs report",
+        "payroll", "stimulus", "central bank",
+    ]):
+        return "Macro / Rates"
+    if has_any([
+        "war", "ceasefire", "sanction", "nato", "geopolit", "military strike",
+        "missile", "invasion", "tariff", "trade restriction", "export control",
+    ]):
+        return "Geopolitics"
+    return "Other"
+
+
+def classify_news_source(row) -> tuple[str, str]:
+    """Return a transparent source label and content type, not a truth score."""
+    source = str(row.get("source") or "").lower()
+    host = urlparse(str(row.get("url") or "")).netloc.lower()
+    joined = f"{source} {host}"
+    if any(k in joined for k in ["businesswire", "globenewswire", "prnewswire", "accesswire"]):
+        return "Press release", "Corporate release"
+    if any(k in joined for k in [
+        "reuters", "bloomberg", "ft.com", "financial times", "wsj.com",
+        "federalreserve.gov", "ecb.europa.eu", "bls.gov", "treasury.gov",
+    ]):
+        return "Primary / major outlet", "Editorial or official"
+    return "Other source", "Editorial / feed"
+
+
 @st.cache_data(ttl=900)
 def load_news(count=NEWS_COUNT):
     placeholder_items = [
@@ -1817,20 +2267,6 @@ def load_news(count=NEWS_COUNT):
     ]
     placeholder_df = pd.DataFrame(placeholder_items)
     placeholder_df["category"] = "Other"
-
-    def classify(headline: str):
-        h = (headline or "").lower()
-        if any(k in h for k in ["fed", "ecb", "boe", "snb", "inflation", "treasury", "yield", "rates", "cpi", "ppi", "gdp", "fomc"]):
-            return "Macro / Rates"
-        if any(k in h for k in ["iran", "war", "ceasefire", "russia", "ukraine", "china", "tariff", "trade", "sanctions", "nato", "geopolit"]):
-            return "Geopolitics"
-        if any(k in h for k in ["oil", "gold", "copper", "crude", "brent", "wti", "commodity", "gas", "silver", "wheat"]):
-            return "Commodities"
-        if any(k in h for k in ["bitcoin", "crypto", "ethereum", "blockchain", "defi", "token"]):
-            return "Crypto"
-        if any(k in h for k in ["earnings", "stock", "shares", "equity", "nasdaq", "s&p", "dow", "ipo", "buyback", "dividend"]):
-            return "Equities"
-        return "Other"
 
     def score_row(row):
         h = (row.get("headline") or "").lower()
@@ -1892,7 +2328,10 @@ def load_news(count=NEWS_COUNT):
     df = df.drop_duplicates(subset=["headline_key"]).copy()
     df = df[df["headline"].str.len() > 15].copy()   # drop junk short entries
 
-    df["category"] = df["headline"].apply(classify)
+    df["category"] = df["headline"].apply(classify_news_headline)
+    _source_labels = df.apply(classify_news_source, axis=1)
+    df["source_quality"] = [item[0] for item in _source_labels]
+    df["content_type"] = [item[1] for item in _source_labels]
     df["score"]    = df.apply(score_row, axis=1)
     df = df.sort_values(by=["score", "published_at"], ascending=[False, False])
     df = df.drop(columns=["headline_key", "score"], errors="ignore")
@@ -3304,18 +3743,20 @@ def build_bundle():
         try:
             # MSCI World: try multiple tickers in order
             if key == "msci_world":
-                s, _ = fetch_yf_series_with_fallback(MSCI_WORLD_TICKERS, "MSCI World")
+                s, ticker_used = fetch_yf_series_with_fallback(MSCI_WORLD_TICKERS, "MSCI World")
             elif key == "msci_em":
-                s, _ = fetch_yf_series_with_fallback(MSCI_EM_TICKERS, "MSCI EM")
+                s, ticker_used = fetch_yf_series_with_fallback(MSCI_EM_TICKERS, "MSCI EM")
             else:
                 s = fetch_yf_series(ticker)
+                ticker_used = ticker
             history_frames.append(pd.DataFrame({
                 "date":        pd.to_datetime(s.index),
                 "key":         key,
                 "label":       label,
                 "group":       group,
                 "value":       s.values,
-                "source_type": "live",
+                "source_type": "Yahoo Finance",
+                "ticker_used": ticker_used,
             }))
         except Exception:
             pass
@@ -3326,18 +3767,28 @@ def build_bundle():
             chart_allowed_keys.append(key)
 
         s = None
+        source_name = "Unavailable"
+        ticker_used = fred_series or ""
         if key == "us10y":
             try:
                 s = fetch_fred_series("DGS10")
+                source_name = "FRED"
+                ticker_used = "DGS10"
             except Exception:
                 try:
-                    s = fetch_yf_series("^TNX") / 10.0
+                    # Yahoo's ^TNX close is already expressed as a percentage
+                    # yield (for example 5.01 means 5.01%), so do not divide.
+                    s = fetch_yf_series("^TNX")
+                    source_name = "Yahoo Finance fallback"
+                    ticker_used = "^TNX"
                 except Exception:
                     s = None
         elif key == "bund10y":
             s = build_manual_rate_history(MANUAL_BUND_10Y)
+            source_name = "Manual override"
         elif key == "ch10y":
             s = build_manual_rate_history(MANUAL_CH_10Y)
+            source_name = "Manual override"
 
         if s is not None:
             history_frames.append(
@@ -3348,7 +3799,8 @@ def build_bundle():
                         "label": label,
                         "group": group,
                         "value": s.values,
-                        "source_type": "live" if key == "us10y" else "manual",
+                        "source_type": source_name,
+                        "ticker_used": ticker_used,
                     }
                 )
             )
@@ -3393,7 +3845,8 @@ def build_bundle():
                         "label": label,
                         "group": "bonds",
                         "value": s.values,
-                        "source_type": "live",
+                        "source_type": "Yahoo Finance proxy",
+                        "ticker_used": ticker_used,
                     }
                 )
             )
@@ -3408,7 +3861,9 @@ def build_bundle():
     except Exception:
         pass
 
-    history = pd.concat(history_frames, ignore_index=True) if history_frames else pd.DataFrame(columns=["date", "key", "label", "group", "value", "source_type"])
+    history = pd.concat(history_frames, ignore_index=True) if history_frames else pd.DataFrame(
+        columns=["date", "key", "label", "group", "value", "source_type", "ticker_used"]
+    )
 
     snapshot_rows = []
     today = pd.Timestamp.today().normalize()
@@ -3454,6 +3909,9 @@ def build_bundle():
                     "wtd": None,
                     "mtd": None,
                     "ytd": None,
+                    "data_as_of": None,
+                    "source": "Unavailable",
+                    "ticker_used": "",
                 }
             )
             continue
@@ -3461,6 +3919,8 @@ def build_bundle():
         series = pd.Series(g["value"].values, index=pd.to_datetime(g["date"]))
         latest = float(series.iloc[-1])
         prev = float(series.iloc[-2]) if len(series) >= 2 else None
+        source = str(g["source_type"].iloc[-1]) if "source_type" in g else "Unknown"
+        ticker_used = str(g["ticker_used"].iloc[-1]) if "ticker_used" in g else ""
         snapshot_rows.append(
             {
                 "group": group,
@@ -3472,231 +3932,48 @@ def build_bundle():
                 "wtd": pct_change(latest, value_on_or_before(series, week_anchor)),
                 "mtd": pct_change(latest, value_on_or_before(series, month_start)),
                 "ytd": pct_change(latest, value_on_or_before(series, year_start)),
+                "data_as_of": pd.Timestamp(series.index[-1]).isoformat(),
+                "source": source,
+                "ticker_used": ticker_used,
             }
         )
 
-    return pd.DataFrame(snapshot_rows), history, chart_allowed_keys
+    snapshot = pd.DataFrame(snapshot_rows)
 
-
-# ── SNIPER "as-if-traded" equity curve (CHF, 15-day hold, sized by risk_multiplier)
-# Simulates: for every SNIPER Buy signal (US 4-way ∪ EU 3-way), open a long
-# position on the signal date sized at CHF 10,000 × risk_multiplier from the
-# composite log; hold exactly 15 trading days; close at that day's close.
-# Convert USD/EUR PnL to CHF at trade-date FX. Ignore transaction costs. The
-# result is a daily cumulative CHF return series that can overlay the main
-# returns chart.
-def build_sniper_equity_chf(chart_window_start, notional_per_trade_chf=10_000.0,
-                            hold_days=15):
-    """Return DataFrame [date, cum_chf, return_pct] rebased to 0% at window start.
-
-    Long-only. Sizing = notional_per_trade_chf * risk_multiplier (fall-back 1.0
-    if the composite log doesn't cover this (ticker, date)). Empty DataFrame
-    on any load / compute failure so the chart never breaks.
-    """
-    # Diagnostic fix (2026-09-08): the 4-way logs (load_4way_df_cached, etc.)
-    # are OVERWRITTEN daily — they only carry today's row, so back-testing on
-    # them collapsed to a flat line. The composite log (load_composite_df_cached)
-    # is an append log with full history (verified ~3.3k Buy signals since
-    # 2026-05-22) and already carries region + risk_multiplier per row. Read
-    # trades from the composite log instead.
-    import yfinance as yf
-    try:
-        from brief_drive_reader import load_composite_df_cached
-    except Exception:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
-
-    try:
-        df_comp = load_composite_df_cached()
-    except Exception:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
-
-    if df_comp is None or df_comp.empty or "signal" not in df_comp.columns:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
-
-    start = pd.Timestamp(chart_window_start).normalize()
-    end   = pd.Timestamp.today().normalize()
-
-    df = df_comp.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df[(df["date"] >= start) & (df["date"] <= end)]
-    # Long-only. Treat both "Buy" and "Strong Buy" as entry signals — the
-    # risk_multiplier already captures the sizing difference between them.
-    _sig = df["signal"].astype(str).str.strip().str.lower()
-    df = df[_sig.isin(["buy", "strong buy"])]
-    # Drop hard rejects if the column is present (SNIPER's own kill switch).
-    if "hard_reject" in df.columns:
-        _hr = pd.to_numeric(df["hard_reject"], errors="coerce").fillna(0)
-        df = df[_hr == 0]
-    if df.empty:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
-
-    # Region → currency. Composite log stores lowercase 'us' / 'eu'.
-    df["currency"] = (df["region"].astype(str).str.strip().str.lower()
-                      .map({"us": "USD", "eu": "EUR"}))
-    df = df[df["currency"].isin(["USD", "EUR"])]
-
-    # Sizing: risk_multiplier is in [0, 1] per SNIPER convention.
-    df["risk_multiplier"] = (
-        pd.to_numeric(df.get("risk_multiplier", 1.0), errors="coerce")
-        .fillna(1.0).clip(0.0, 1.0)
-    )
-    df = df[df["risk_multiplier"] > 0.0].reset_index(drop=True)
-    trades = df[["date", "ticker", "currency", "risk_multiplier"]].copy()
-    if trades.empty:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct"])
-
-    # yfinance ticker normalisation. US tickers pass through; EU tickers may
-    # need an exchange suffix (SIX, DE, PA, MI, AS, MC …). We use the exact
-    # ticker as SNIPER stored it — if you keep suffixes in the sheet, they
-    # feed straight into yfinance; if not, we log a miss and skip that trade.
-    tickers = sorted(set(trades["ticker"].dropna().astype(str)))
-    prices_by_ticker = {}
-    for t in tickers:
+    # Optional IBKR quote overlay. Historical return series remain on their
+    # documented providers; when an entitled conid is configured, the current
+    # level and 1D move come from IBKR and are labelled accordingly.
+    if IBKR_MARKET_CONIDS:
         try:
-            hist = yf.Ticker(t).history(
-                start=(start - pd.Timedelta(days=5)).date(),
-                end=(end + pd.Timedelta(days=hold_days + 5)).date(),
-                interval="1d", auto_adjust=True,
-            )
-            if not hist.empty and "Close" in hist.columns:
-                s = hist["Close"].copy()
-                s.index = pd.to_datetime(s.index).tz_localize(None)
-                prices_by_ticker[t] = s
-        except Exception:
-            continue
+            ibkr_quotes = load_ibkr_market_quotes()
+            for key, quote in ibkr_quotes.items():
+                mask = snapshot["key"] == key
+                if not mask.any():
+                    continue
+                historical_source = str(snapshot.loc[mask, "source"].iloc[0])
+                snapshot.loc[mask, "level"] = quote["level"]
+                if quote.get("d1") is not None:
+                    snapshot.loc[mask, "d1"] = quote["d1"]
+                snapshot.loc[mask, "source"] = f"IBKR current quote · {historical_source} history"
+                snapshot.loc[mask, "data_as_of"] = quote["as_of"]
+                snapshot.loc[mask, "ticker_used"] = f"IBKR conid {quote['conid']}"
+            st.session_state["_ibkr_market_status"] = {
+                "configured": len(IBKR_MARKET_CONIDS),
+                "received": len(ibkr_quotes),
+                "error": "",
+            }
+        except Exception as exc:
+            st.session_state["_ibkr_market_status"] = {
+                "configured": len(IBKR_MARKET_CONIDS),
+                "received": 0,
+                "error": str(exc),
+            }
 
-    # FX to CHF. Yahoo tickers: USDCHF=X, EURCHF=X.
-    def _fx(pair):
-        try:
-            fx = yf.Ticker(pair).history(
-                start=(start - pd.Timedelta(days=5)).date(),
-                end=(end + pd.Timedelta(days=hold_days + 5)).date(),
-                interval="1d", auto_adjust=False,
-            )
-            if fx.empty or "Close" not in fx.columns:
-                return None
-            s = fx["Close"].copy()
-            s.index = pd.to_datetime(s.index).tz_localize(None)
-            return s
-        except Exception:
-            return None
-
-    usdchf = _fx("USDCHF=X")
-    eurchf = _fx("EURCHF=X")
-
-    def _fx_on(s, dt):
-        if s is None:
-            return None
-        sub = s[s.index <= dt]
-        return float(sub.iloc[-1]) if not sub.empty else None
-
-    # Compute per-trade CHF PnL and the trading day it lands on.
-    trade_pnl_rows = []
-    for _, r in trades.iterrows():
-        t = r["ticker"]
-        s = prices_by_ticker.get(t)
-        if s is None or s.empty:
-            continue
-        entry_dt = pd.Timestamp(r["date"]).normalize()
-        idx_after = s.index[s.index >= entry_dt]
-        if idx_after.empty:
-            continue
-        entry_ts = idx_after[0]
-        entry_pos = s.index.get_loc(entry_ts)
-        exit_pos = min(entry_pos + hold_days, len(s) - 1)
-        exit_ts = s.index[exit_pos]
-        entry_px = float(s.iloc[entry_pos])
-        exit_px = float(s.iloc[exit_pos])
-        if entry_px <= 0:
-            continue
-
-        # Sizing: CHF notional = 10k × risk_multiplier. Convert to local ccy
-        # notional at entry-date FX so we can compute a native-currency
-        # quantity; PnL then comes back to CHF at exit-date FX.
-        size_chf = notional_per_trade_chf * float(r["risk_multiplier"])
-        ccy = r["currency"]
-        fx_series = usdchf if ccy == "USD" else eurchf
-        fx_entry = _fx_on(fx_series, entry_ts)
-        fx_exit  = _fx_on(fx_series, exit_ts)
-        if fx_entry is None or fx_exit is None or fx_entry <= 0:
-            continue
-        # Local-currency notional at entry:
-        size_local = size_chf / fx_entry
-        qty = size_local / entry_px
-        pnl_local = qty * (exit_px - entry_px)
-        pnl_chf = pnl_local * fx_exit  # convert exit-day cash back to CHF
-        ret_pct_trade = ((exit_px * fx_exit) / (entry_px * fx_entry) - 1.0) * 100.0
-        trade_pnl_rows.append({
-            "entry_date": pd.Timestamp(entry_ts).normalize(),
-            "exit_date":  pd.Timestamp(exit_ts).normalize(),
-            "pnl_chf":    pnl_chf,
-            "size_chf":   size_chf,
-            "trade_ret_pct": ret_pct_trade,
-        })
-
-    if not trade_pnl_rows:
-        return pd.DataFrame(columns=["date", "cum_chf", "return_pct",
-                                     "avg_deployed", "n_open", "trades_stats"])
-
-    pnl_df = pd.DataFrame(trade_pnl_rows)
-
-    # Trade-level summary stats (winners, hit rate, mean/median return).
-    n_total = len(pnl_df)
-    n_win   = int((pnl_df["trade_ret_pct"] > 0).sum())
-    n_loss  = int((pnl_df["trade_ret_pct"] < 0).sum())
-    hit_rate = 100.0 * n_win / max(n_total, 1)
-    mean_ret = float(pnl_df["trade_ret_pct"].mean())
-    med_ret  = float(pnl_df["trade_ret_pct"].median())
-    total_chf_pnl = float(pnl_df["pnl_chf"].sum())
-    trades_stats = {
-        "n_trades": n_total,
-        "n_winners": n_win,
-        "n_losers":  n_loss,
-        "hit_rate_pct": hit_rate,
-        "mean_trade_return_pct": mean_ret,
-        "median_trade_return_pct": med_ret,
-        "total_pnl_chf": total_chf_pnl,
-    }
-
-    # ── Rolling-book equity curve (industry standard) ────────────────────
-    # For each trading day in the window, book size = CHF notional of all
-    # positions currently open on that day. Daily book return = (sum of CHF
-    # PnL closing that day) / (average book size while those trades were
-    # open). Then compound to get the equity curve. This is the correct
-    # "how did the strategy actually perform" number, not the "cumulative
-    # PnL as % of total capital ever deployed" version which understates
-    # the compounded reality by ~10x (since each trade's slot recycles
-    # ~7 times in a 4-month window with a 15-day hold).
-    idx = pd.date_range(start, end, freq="D")
-    # Book value per day = sum of size_chf of trades where
-    # entry_date <= day < exit_date (inclusive of entry).
-    book_per_day = pd.Series(0.0, index=idx)
-    for _, row in pnl_df.iterrows():
-        e = row["entry_date"]; x = row["exit_date"]
-        book_per_day.loc[(book_per_day.index >= e) & (book_per_day.index <= x)] += row["size_chf"]
-    # Daily CHF PnL, indexed on exit_date (position realises on close).
-    daily_pnl = pnl_df.groupby("exit_date")["pnl_chf"].sum().reindex(idx, fill_value=0.0)
-    # Daily return = daily PnL / prior book value (avoid /0 by using max(book, 1)).
-    # Use a small floor so days with 0 book (early days before any trade
-    # opened) yield 0% return, not divide-by-zero.
-    daily_ret = daily_pnl / book_per_day.replace(0.0, float("nan"))
-    daily_ret = daily_ret.fillna(0.0)
-    # Compound: cumulative rolling-book return.
-    equity_mult = (1.0 + daily_ret).cumprod()
-    equity_pct = (equity_mult - 1.0) * 100.0
-
-    # CHF pot value for the tooltip: assume a nominal starting book of
-    # notional_per_trade_chf (10k). Grow it via equity_mult.
-    cum_chf = notional_per_trade_chf * (equity_mult - 1.0)
-
-    return pd.DataFrame({
-        "date": equity_pct.index,
-        "cum_chf": cum_chf.values,
-        "return_pct": equity_pct.values,
-        "avg_deployed": book_per_day.values,
-    }).assign(trades_stats_json=[trades_stats] * len(equity_pct))
+    return snapshot, history, chart_allowed_keys
 
 
+# SNIPER signals remain available in the Signals tab; simulated performance
+# and back-tested return claims are intentionally excluded from this app.
 # Audit fix (main-chart rebuild): yields must NOT be plotted on the same
 # percentage-return scale as equities. This helper builds a rates-only chart
 # frame where the y-value is basis-point change from the window base — the
@@ -3956,10 +4233,10 @@ def pick_chart_of_day(history, news_df):
     if not movers:
         return None
     m    = movers[0]
-    rank = 1
     d1s  = f"{m['d1_pct']:+.2f}%" if m['d1_pct'] != 0 else "flat"
     z    = m['zscore']
-    magnitude = "extremely" if z > 3 else ("significantly" if z > 2 else "notably")
+    magnitude = "unusually large" if z > 2 else "notable"
+    article = "an" if magnitude.startswith("unusually") else "a"
 
     # Check if top news keywords relate to this asset
     asset_kws = {
@@ -3976,13 +4253,14 @@ def pick_chart_of_day(history, news_df):
     if asset_kws and top_kws:
         matched = [kw for kw, _ in top_kws if any(a in kw for a in asset_kws)]
         if matched:
-            news_link = f" Today's headlines are dominated by '{matched[0]}'-related news, which directly affects this asset."
+            news_link = (
+                f" {matched[0].capitalize()}-related headlines were prominent, "
+                "although the feed alone does not establish causation."
+            )
 
     reason = (
-        f"{m['label']} is {magnitude} outside its normal 30-day range today "
-        f"(statistical deviation: {z:.1f}× the usual daily variation), moving {d1s} in the latest session. "
-        f"It ranked #{rank} out of all tracked assets for unusual price behaviour.{news_link} "
-        f"Watch whether this move continues or reverts over the next few sessions."
+        f"{m['label']} moved {d1s} in the latest session, {article} {magnitude} move relative to its past 30 days."
+        f"{news_link} Follow-through and market breadth will show whether the move persists."
     )
     return {"key": m["key"], "label": m["label"], "reason": reason, "timeframe_days": 60}
 
@@ -4209,7 +4487,7 @@ def render_ticker_strip(snapshot):
     """One-line compact ticker: name + value + coloured daily change for 10 key instruments."""
     KEYS = [
         ("sp500",     "S&P 500",   "asset"),
-        ("nasdaq100", "Nasdaq",    "asset"),
+        ("nasdaq100", "Nasdaq-100", "asset"),
         ("stoxx600",  "Stoxx 600", "asset"),
         ("smi",       "SMI",       "asset"),
         ("gold",      "Gold",      "asset"),
@@ -4226,17 +4504,24 @@ def render_ticker_strip(snapshot):
             cells.append(
                 f"<td style='padding:4px 10px;text-align:center;border-right:1px solid #E4EDF6;'>"
                 f"<div style='font-size:9px;color:#9AA8B7;font-weight:600;'>{label}</div>"
-                f"<div style='font-size:13px;color:#9AA8B7;'>N/A</div></td>"
+                f"<div style='font-size:13px;color:#9AA8B7;'>Unavailable</div></td>"
             )
             continue
         r = row.iloc[0]
         level, d1 = r["level"], r["d1"]
+        source = str(r.get("source") or "Unknown source")
+        as_of = r.get("data_as_of")
+        try:
+            as_of_label = pd.Timestamp(as_of).strftime("%d %b %Y")
+        except Exception:
+            as_of_label = "date unavailable"
+        provenance = f"Source: {source} · as of {as_of_label}"
 
         if typ == "yield":
             prev = level / (1 + d1 / 100) if level is not None and d1 not in (None, 0) and not pd.isna(d1) else None
             d1v  = bps_change(level, prev) if prev is not None else None
-            val_str   = f"{float(level):.2f}%" if level is not None else "N/A"
-            delta_str = f"{d1v:+.0f} bps" if d1v is not None else "N/A"
+            val_str   = f"{float(level):.2f}%" if level is not None else "Unavailable"
+            delta_str = f"{d1v:+.0f} bps" if d1v is not None else "—"
             up_bad = True; move = d1v
         elif typ == "fear":
             val_str   = fmt_num(level)
@@ -4255,7 +4540,7 @@ def render_ticker_strip(snapshot):
             col = "#64748B"
 
         cells.append(
-            f"<td style='padding:5px 10px;text-align:center;border-right:1px solid #E4EDF6;'>"
+            f"<td title='{provenance}' style='padding:5px 10px;text-align:center;border-right:1px solid #E4EDF6;'>"
             f"<div style='font-size:9px;color:#64748B;font-weight:600;white-space:nowrap;'>{label}</div>"
             f"<div style='font-size:14px;font-weight:800;color:#0F2D52;line-height:1.2;'>{val_str}</div>"
             f"<div style='font-size:11px;font-weight:700;color:{col};'>{delta_str}</div>"
@@ -4270,6 +4555,7 @@ def render_ticker_strip(snapshot):
         "</tr></table></div>",
         unsafe_allow_html=True,
     )
+    st.caption("Change versus prior available close · hover a value for provider and observation date · swipe horizontally on mobile")
 
 
 def render_card_strip(snapshot, history, strip, title, caption, strip_name):
@@ -4390,7 +4676,7 @@ def render_news_bullets(writing, news_df):
 
     # Unmatched sources with inline checkboxes for PDF inclusion
     if news_df is not None and not news_df.empty:
-        with st.expander("📎 Source articles — tick to include in PDF", expanded=True):
+        with st.expander("📎 Source articles — select for PDF", expanded=False):
             st.caption("Checked articles appear in the PDF news table. Changes take effect when you click **Update PDF**.")
 
             selections = {}
@@ -4398,22 +4684,29 @@ def render_news_bullets(writing, news_df):
                 headline = r.get("headline","") or ""
                 url      = r.get("url","")      or ""
                 source   = r.get("source","")   or ""
+                source_quality = r.get("source_quality", "") or ""
+                content_type = r.get("content_type", "") or ""
                 pub      = r.get("published_at","") or ""
                 dt_str   = ""
                 if pub:
                     try: dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
                     except Exception: dt_str = str(pub)[:10]
-                meta = " · ".join([x for x in [source, dt_str] if x])
+                meta = " · ".join([x for x in [source, dt_str, source_quality, content_type] if x])
 
                 c1, c2 = st.columns([0.05, 0.95])
                 with c1:
                     checked = st.checkbox(
-                        "", value=True,
+                        f"Include {headline} in PDF", value=True,
                         key=f"pdf_inc_{i}_{headline[:20]}",
                         label_visibility="collapsed",
                     )
                 with c2:
-                    link_md = f"[{headline}]({url})" if url else headline
+                    safe_headline = escape(headline)
+                    link_md = (
+                        f'<a href="{escape(url, quote=True)}" target="_blank" '
+                        f'aria-label="Open source article: {safe_headline}">{safe_headline}</a>'
+                        if url else safe_headline
+                    )
                     meta_span = (f'  <span style="color:#9AA8B7;font-size:11px;"> — {meta}</span>'
                                  if meta else "")
                     st.markdown(
@@ -5532,47 +5825,6 @@ def add_render_outputs(base_state, chart_window="YTD"):
                 pass
             fig.add_hline(y=0, line_dash="dot", line_color="#78909C")
 
-            # ── SNIPER equity overlay ─────────────────────────────────────
-            # Overlay the "as-if-traded" SNIPER equity curve (CHF, 15-day hold,
-            # 10k × risk_multiplier per Buy signal, both US and EU combined).
-            # Rendered as a dashed trace so it's visually distinct from the
-            # underlying asset lines. Zero-drawn if empty (no trades) or
-            # unavailable (SNIPER Drive loaders errored).
-            try:
-                _sniper_eq = build_sniper_equity_chf(chart_window_start=start_date)
-                if _sniper_eq is not None and not _sniper_eq.empty:
-                    fig.add_scatter(
-                        x=_sniper_eq["date"], y=_sniper_eq["return_pct"],
-                        mode="lines",
-                        name="SNIPER (CHF, 15d hold, sized)",
-                        line=dict(color="#0F172A", width=2.5, dash="dash"),
-                        hovertemplate="<b>SNIPER (CHF)</b><br>Date: %{x|%d %b %Y}<br>"
-                                      "Compounded: %{y:+.2f}%<extra></extra>",
-                    )
-                    # End-of-line label like the other traces.
-                    _s = _sniper_eq.dropna(subset=["return_pct"])
-                    if not _s.empty:
-                        fig.add_annotation(
-                            x=_s["date"].iloc[-1], y=_s["return_pct"].iloc[-1],
-                            text=" SNIPER", xanchor="left", yanchor="middle",
-                            showarrow=False, font=dict(size=11, color="#0F172A"),
-                        )
-                    # Stash trade stats on session_state so we can render a
-                    # caption below the chart with the underlying numbers.
-                    if "trades_stats_json" in _sniper_eq.columns and not _sniper_eq.empty:
-                        _stats = _sniper_eq["trades_stats_json"].iloc[0]
-                        if isinstance(_stats, dict):
-                            st.session_state["_sniper_backtest_stats"] = _stats
-                            st.session_state["_sniper_backtest_final_pct"] = float(
-                                _s["return_pct"].iloc[-1]) if not _s.empty else None
-            except Exception as _sniper_overlay_exc:
-                # Never let the SNIPER overlay break the chart.
-                import logging as _lg
-                _lg.getLogger(__name__).warning(
-                    "SNIPER equity overlay failed: %s: %s",
-                    type(_sniper_overlay_exc).__name__, _sniper_overlay_exc,
-                )
-
         # ── 2. Alternatives panel (Bitcoin + WTI) ──────────────────────────
         alt_df = weekly_df[weekly_df["key"].isin(alt_keys)].copy()
         if not alt_df.empty and include_crypto_flag:
@@ -5761,29 +6013,26 @@ with st.sidebar:
         # cannot masquerade as fresh.
         for _k in ("snapshot", "history", "writing", "status",
                    "pdf_bytes", "pdf_chart_png", "chart_of_day",
-                   "snapshot_mode_note"):
+                   "snapshot_mode_note", "generated_mode"):
             st.session_state.pop(_k, None)
         st.session_state["_last_refresh_utc"] = pd.Timestamp.utcnow().isoformat()
+        load_ibkr_market_quotes.clear()
+        load_ibkr_portfolio.clear()
         st.rerun()
 
     st.markdown("---")
     st.markdown("**📚 Research Library**")
 
-    # Auto-pull PDFs from Google Drive (SNIPER/Research_Processed + Inbox).
-    # This runs once per session; the 🔄 button below forces a re-sync.
-    loaded, failed = autoload_research_from_drive()
+    # Drive research is loaded on demand so a slow or unavailable Google
+    # connection never blocks the dashboard's first paint.
+    loaded, failed = 0, 0
     if _drive_pdf_loader is not None:
         drive_count = len(st.session_state.get("research_docs", {}))
         failed_docs = st.session_state.get("_drive_research_failed", {})
-        if loaded or failed:
-            parts = []
-            if loaded:
-                parts.append(f"☁️ Auto-loaded {loaded} PDF(s) from Drive")
-            if failed:
-                parts.append(f"⚠️ {failed} failed to parse")
-            st.caption(" · ".join(parts))
+        if st.session_state.get("_drive_research_loaded"):
+            st.caption(f"☁️ Drive research loaded · {drive_count} PDF(s) in library.")
         else:
-            st.caption(f"☁️ Drive sync: {drive_count} PDF(s) in library.")
+            st.caption("☁️ Drive research is available but not loaded yet.")
         if failed_docs:
             for fname, err in list(failed_docs.items())[:5]:
                 st.caption(f"⚠️ {fname[:35]} — {str(err)[:60]}")
@@ -5799,18 +6048,24 @@ with st.sidebar:
                     st.caption(f"   ✗ {drop[:90]}")
             elif _drive_pdf_loader is not None:
                 st.caption("🧪 Research themes: Gemini returned no themed output (fallback to per-doc)")
-        if st.button("🔄 Re-sync from Drive", use_container_width=True, key="drive_resync"):
-            autoload_research_from_drive(force_refresh=True)
+        _drive_button = "🔄 Re-sync from Drive" if st.session_state.get("_drive_research_loaded") else "☁️ Load research from Drive"
+        if st.button(_drive_button, use_container_width=True, key="drive_resync"):
+            with st.spinner("Loading the secured research feed…"):
+                autoload_research_from_drive(force_refresh=True)
             st.rerun()
     else:
         st.caption("⚠️ Drive sync unavailable — install google-api-python-client / google-auth.")
 
-    st.caption("Or drop PDFs manually (Morning Call, Equity Universe, Fixed Income, reports…):")
-    uploaded_files = st.file_uploader(
-        "Drop PDFs here", type=["pdf"],
-        accept_multiple_files=True,
-        key="research_uploads",
-    )
+    if ENABLE_RESEARCH_UPLOADS:
+        st.caption("Manual PDFs remain in this browser session only. Do not upload client-identifying material.")
+        uploaded_files = st.file_uploader(
+            "Drop research PDFs here", type=["pdf"],
+            accept_multiple_files=True,
+            key="research_uploads",
+        )
+    else:
+        uploaded_files = []
+        st.caption("🔒 Manual research uploads disabled. Use the secured read-only Drive feed.")
     if uploaded_files:
         # Session-only uploads. Drive upload is disabled — service accounts
         # can't write to personal My Drive folders (Google policy). Add PDFs
@@ -5849,6 +6104,7 @@ if generate:
     # Audit fix (Item 2): stamp every successful Generate/Refresh so the status
     # line can show a verifiable "as of" time.
     st.session_state["_generated_at"] = pd.Timestamp.utcnow().isoformat()
+    st.session_state["generated_mode"] = mode
 
     if mode == "Live":
         base_state = build_base_state(include_crypto, use_gemini_writing)
@@ -5912,16 +6168,7 @@ else:
 
     # ── 1. Compact status line ────────────────────────────────────────────────
     mode_note = st.session_state.get("snapshot_mode_note", "")
-    g_col  = "🟢" if status["gemini_used"]  else "🟡"
-    n_col  = "🟢" if status["live_news"]    else "🟡"
     ai_detail = status.get("gemini_reason", "")
-    # Audit fix (Item 8): the raw upstream error ("AI failed: Gemini/gemini-2.5-flash:
-    # bad JSON …") leaked into the visible status line. Show a calm label to end
-    # users and preserve the raw text as a tooltip / expander for the operator.
-    if status["gemini_used"]:
-        ai_label = ai_detail or "on"
-    else:
-        ai_label = "narrative unavailable — headlines only"
     # Audit fix (Item 2): show a concrete "as of" timestamp so the Refresh
     # button is verifiable. Prefers the last successful Generate/Refresh run;
     # falls back to the snapshot's own timestamp if present.
@@ -5934,12 +6181,19 @@ else:
         _as_of_str = f"  ·  as of {_as_of_disp}"
     else:
         _as_of_str = ""
+    available_count = int(snap["level"].notna().sum()) if "level" in snap else 0
+    total_count = len(snap)
+    news_label = "live" if status["live_news"] else "fallback"
     st.caption(
-        f"{mode_note}   |   {g_col} AI {ai_label}  "
-        f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
-        f"·  {status['article_count']} articles"
-        f"{_as_of_str}"
+        f"{mode_note} · Market coverage {available_count}/{total_count} · "
+        f"News {news_label} ({status['article_count']} articles){_as_of_str}"
     )
+    generated_mode = st.session_state.get("generated_mode")
+    if generated_mode and generated_mode != mode:
+        st.warning(
+            f"The visible brief was generated in **{generated_mode}** mode, while the sidebar is set to "
+            f"**{mode}**. Click Generate Brief to apply the new mode."
+        )
     # Cleanup pass: removed the duplicated "Diagnostics (operator)" expander
     # that used to sit here; the same content is now surfaced once inside the
     # Methodology tab under "Operator diagnostics — AI provider raw status".
@@ -5952,33 +6206,25 @@ else:
     # Research / Methodology so the reader lands on decisions, not on a
     # long list of tables. Every section below is wrapped in `with nav_X:`
     # blocks to route content to the correct tab.
-    nav_overview, nav_pi, nav_signals, nav_research, nav_meth = st.tabs([
-        "📊 Overview",
-        "🎯 Portfolio Impact",
-        "🔔 Signals",
-        "📚 Research",
-        "🛠 Methodology",
-    ])
+    if IBKR_BASE_URL:
+        nav_pi, nav_overview, nav_signals, nav_research, nav_meth = st.tabs([
+            "🎯 Portfolio Impact",
+            "📊 Overview",
+            "🔔 Signals",
+            "📚 Research",
+            "🛠 Methodology",
+        ])
+    else:
+        nav_overview, nav_pi, nav_signals, nav_research, nav_meth = st.tabs([
+            "📊 Overview",
+            "🎯 Portfolio Impact",
+            "🔔 Signals",
+            "📚 Research",
+            "🛠 Methodology",
+        ])
 
-    # ── Portfolio Impact placeholder ────────────────────────────────────────
-    # Requires a holdings + base-currency data model that this build does not
-    # yet have (audit high-value #3 — deferred pending schema decision).
     with nav_pi:
-        st.markdown("### Portfolio Impact")
-        st.info(
-            "**Not yet configured.** A portfolio lens (base-currency P&L "
-            "contribution, largest exposure-driven risks, hedge impact, "
-            "allocation drift, liquidity, \"what changed since yesterday\") "
-            "requires the holdings, mandate and base-currency schema — none "
-            "of which are wired into this build. Once that data source is "
-            "connected this tab becomes the primary landing page."
-        )
-        st.caption(
-            "To enable, provide a portfolio CSV/JSON with columns "
-            "`ticker · quantity · currency · mandate` and a base currency "
-            "for the client, then a follow-up build plugs it into the "
-            "existing snapshot to compute P&L attribution and drift."
-        )
+        render_ibkr_portfolio_impact()
 
     with nav_meth:
         # Audit fix (Item 3): data provenance strip. Readers need to know provider,
@@ -5989,12 +6235,12 @@ else:
             "<div style='font-size:12.5px;color:#334155;padding:2px 4px 12px;"
             "line-height:1.6;'>"
             "<b>Data provenance.</b> "
-            "Equities · Yahoo Finance (index level, local currency, previous close on "
-            "non-trading days). "
-            "Rates · FRED (US 10Y) with Yahoo <code>^TNX</code> fallback; other yields · Yahoo. "
+            "Connected portfolio holdings, valuations and P&amp;L · Interactive Brokers (read-only). "
+            "Broad market history · Yahoo Finance fallback (index or ETF proxy, local currency, "
+            "previous close on non-trading days). "
+            "Rates · FRED (US 10Y) with Yahoo <code>^TNX</code> fallback; other yields · manual override. "
             "Yields shown in %, changes in bp. "
-            "Commodities · Yahoo (WTI &amp; Brent = front-month <b>futures</b>, not spot; "
-            "Gold &amp; Silver = spot USD). "
+            "Commodities · Yahoo futures proxies (WTI, Brent, Gold and Silver; not spot). "
             "FX · Yahoo (mid, last tick). "
             "News · Marketaux (live) or RSS fallback. "
             "AI commentary · Google Gemini when configured; Groq fallback. "
@@ -6002,6 +6248,25 @@ else:
             "</div>",
             unsafe_allow_html=True,
         )
+        _prov_cols = [c for c in ["label", "ticker_used", "source", "data_as_of"] if c in snap.columns]
+        if _prov_cols:
+            _prov = snap[_prov_cols].copy()
+            if "data_as_of" in _prov:
+                _prov["data_as_of"] = pd.to_datetime(_prov["data_as_of"], errors="coerce").dt.strftime("%d %b %Y")
+            with st.expander("Per-instrument provider and observation date", expanded=False):
+                st.dataframe(_prov, use_container_width=True, hide_index=True)
+        _ibkr_quote_status = st.session_state.get("_ibkr_market_status")
+        if _ibkr_quote_status:
+            if _ibkr_quote_status.get("error"):
+                st.caption(
+                    "IBKR quote overlay unavailable; documented historical providers remain active. "
+                    "An active brokerage session and market-data entitlements are required."
+                )
+            else:
+                st.caption(
+                    f"IBKR quote overlay: {_ibkr_quote_status.get('received', 0)}/"
+                    f"{_ibkr_quote_status.get('configured', 0)} configured instruments received."
+                )
         st.markdown("#### Signal construction (SNIPER)")
         st.markdown(
             "- **Sources.** MAN (internal quant), Mosh (external analyst — US only), "
@@ -6193,25 +6458,6 @@ else:
             st.markdown(f"**{writing['headline']}**")
             st.caption(writing["subheadline"])
             st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
-            # SNIPER backtest summary caption right under the chart, using
-            # the stats stashed by build_sniper_equity_chf().
-            _s = st.session_state.get("_sniper_backtest_stats")
-            _final = st.session_state.get("_sniper_backtest_final_pct")
-            if _s:
-                st.markdown(
-                    "<div style='font-size:11.5px;color:#334155;padding:6px 8px 4px;"
-                    "background:#F1F5F9;border-radius:8px;border:1px solid #E2E8F0;'>"
-                    f"<b>SNIPER as-if-traded stats (in this chart window)</b> · "
-                    f"{_s['n_trades']:,} trades · "
-                    f"{_s['n_winners']:,} winners · {_s['n_losers']:,} losers · "
-                    f"hit rate <b>{_s['hit_rate_pct']:.1f}%</b> · "
-                    f"mean trade return <b>{_s['mean_trade_return_pct']:+.2f}%</b> · "
-                    f"median <b>{_s['median_trade_return_pct']:+.2f}%</b> · "
-                    f"total CHF PnL <b>{_s['total_pnl_chf']:+,.0f}</b> · "
-                    f"compounded rolling-book return <b>{(_final or 0.0):+.2f}%</b>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
         else:
             st.info("No chart data — market data fetch may have failed.")
         if _fig_rates is not None:

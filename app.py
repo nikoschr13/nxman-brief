@@ -17,6 +17,12 @@ import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
+# Personal CHF-investor panels (dashboard only — not used by the PDF).
+from brief_personal import (
+    fetch_bund_yield, fetch_swiss_yield,
+    render_what_matters_today, render_chf_lens, render_bond_panel,
+    render_cyprus_news,
+)
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -872,7 +878,8 @@ def load_news_marketaux(count):
         return pd.DataFrame()
 
     try:
-        published_after = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+        # 36h window (was 3 days — let stale stories into a daily brief).
+        published_after = (datetime.utcnow() - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%S")
         r = requests.get(
             "https://api.marketaux.com/v1/news/all",
             params={
@@ -887,6 +894,10 @@ def load_news_marketaux(count):
 
         rows = []
         for item in r.json().get("data", []):
+            # Marketaux aggregates thousands of sites; keep only the trusted
+            # financial-news allowlist (same rule the RSS path already used).
+            if item.get("url") and not _is_financial_url(item.get("url")):
+                continue
             rows.append(
                 {
                     "headline": item.get("title") or "",
@@ -909,14 +920,49 @@ _FINANCIAL_DOMAINS = {
     "seekingalpha.com", "thestreet.com", "businessinsider.com", "fortune.com",
     "economist.com", "morningstar.com", "financialtimes.com", "apnews.com",
     "axios.com", "politico.com", "thehill.com", "bbc.com", "bbc.co.uk",
+    "swissinfo.ch", "nzz.ch", "handelszeitung.ch", "finews.ch", "finews.com",
 }
+
+FINNHUB_API_KEY = get_secret("FINNHUB_API_KEY")
+
+
+@st.cache_data(ttl=600)
+def load_news_finnhub(lookback_hours: int = 36) -> pd.DataFrame:
+    """Finnhub general market news (free personal plan). Active only if
+    FINNHUB_API_KEY is set in secrets / .env."""
+    if not FINNHUB_API_KEY:
+        return pd.DataFrame()
+    try:
+        r = requests.get("https://finnhub.io/api/v1/news",
+                         params={"category": "general", "token": FINNHUB_API_KEY},
+                         timeout=20)
+        r.raise_for_status()
+        cutoff = time.time() - lookback_hours * 3600
+        rows = []
+        for it in r.json() or []:
+            ts = it.get("datetime") or 0
+            if ts < cutoff or not it.get("headline"):
+                continue
+            rows.append({
+                "headline":       it.get("headline", "").strip(),
+                "source":         it.get("source") or "Finnhub",
+                "published_at":   datetime.utcfromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%S"),
+                "url":            it.get("url") or "",
+                "why_it_matters": (it.get("summary") or "")[:200],
+                "provider":       "Finnhub",
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
 
 def _is_financial_url(url: str) -> bool:
     """Return True only if the URL belongs to a trusted financial/news domain."""
     if not url:
         return True
     try:
-        domain = urlparse(url.lower()).netloc.lstrip("www.")
+        # removeprefix, not lstrip: lstrip("www.") strips characters, which
+        # turned "wsj.com" into "sj.com" and rejected it.
+        domain = urlparse(url.lower()).netloc.removeprefix("www.")
         return any(domain == d or domain.endswith("." + d) for d in _FINANCIAL_DOMAINS)
     except Exception:
         return True
@@ -1606,8 +1652,13 @@ def render_research_library():
 
 
 # ── RSS feeds: free, no API key needed ───────────────────────────────────────
+# NOTE (2026-11-24): feeds.reuters.com stopped publishing in June 2020, so the
+# old Reuters entry here returned nothing for years. Reuters is now read via
+# Google News feeds restricted to reuters.com (free, refreshed continuously).
 RSS_FEEDS = [
-    ("Reuters",      "https://feeds.reuters.com/reuters/businessNews"),
+    ("Reuters",      "https://news.google.com/rss/search?q=when:1d+site:reuters.com/markets&hl=en-US&gl=US&ceid=US:en"),
+    ("Reuters",      "https://news.google.com/rss/search?q=when:1d+site:reuters.com/business&hl=en-US&gl=US&ceid=US:en"),
+    ("Reuters",      "https://news.google.com/rss/search?q=when:1d+site:reuters.com/world/europe&hl=en-US&gl=US&ceid=US:en"),
     ("Yahoo Finance","https://finance.yahoo.com/news/rssindex"),
     ("CNBC",         "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
     ("MarketWatch",  "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
@@ -1622,8 +1673,17 @@ def load_news_rss(max_per_feed: int = 8) -> pd.DataFrame:
     cutoff = datetime.utcnow() - timedelta(hours=36)
 
     for source, url in RSS_FEEDS:
+        is_gnews = "news.google.com" in url
         try:
-            feed = feedparser.parse(url)
+            # Fetch with a browser UA — several publishers reject feedparser's
+            # default agent, which silently produced empty feeds.
+            try:
+                _r = requests.get(url, timeout=15, headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) NXMAN-Brief/1.0"})
+                _r.raise_for_status()
+                feed = feedparser.parse(_r.content)
+            except Exception:
+                feed = feedparser.parse(url)
             for entry in feed.entries[:max_per_feed]:
                 pub = ""
                 ts  = None
@@ -1639,8 +1699,14 @@ def load_news_rss(max_per_feed: int = 8) -> pd.DataFrame:
                 # Strip any HTML tags from summary
                 summary  = summary.replace("<b>","").replace("</b>","").replace("<p>","").replace("</p>","")
 
+                if is_gnews:
+                    # Google News links are redirects (news.google.com); the
+                    # query already restricts the publisher. Drop the
+                    # " - Reuters" title suffix and the HTML summary.
+                    headline = re.sub(r"\s+-\s+Reuters\s*$", "", headline)
+                    summary = ""
                 # Only allow articles from known financial news domains
-                if link and not _is_financial_url(link):
+                elif link and not _is_financial_url(link):
                     continue
 
                 if headline:
@@ -1848,8 +1914,21 @@ def load_news(count=NEWS_COUNT):
                 score += 1
         # Boost premium sources (FT, Bloomberg emails are high-quality)
         src = (row.get("source") or "").lower()
-        if "financial times" in src or "bloomberg" in src:
+        if "financial times" in src or "bloomberg" in src or "reuters" in src:
             score += 4
+        # Freshness: a daily brief should lead with the last few hours.
+        try:
+            _ts = pd.to_datetime(row.get("published_at"), utc=True, errors="coerce")
+            if pd.notna(_ts):
+                _age_h = (pd.Timestamp.now(tz="UTC") - _ts).total_seconds() / 3600
+                if _age_h <= 6:
+                    score += 3
+                elif _age_h <= 18:
+                    score += 1
+                elif _age_h > 30:
+                    score -= 2
+        except Exception:
+            pass
         # Penalise minor single-company stories (small/unknown companies)
         minor_signals = ["q1 earnings", "q2 earnings", "q3 earnings", "q4 earnings",
                          "raises dividend", "plans delisting", "reports revenue",
@@ -1868,6 +1947,11 @@ def load_news(count=NEWS_COUNT):
         mdf = load_news_marketaux(count * 3)
         if not mdf.empty:
             frames.append(mdf)
+
+    # Finnhub general market news (optional free key)
+    fdf = load_news_finnhub()
+    if not fdf.empty:
+        frames.append(fdf)
 
     # Free RSS feeds (always attempt)
     rdf = load_news_rss()
@@ -2858,6 +2942,11 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
                 "Shape: {\"lead\": \"<2 sentence today's-message paragraph>\", "
                 "\"bullets\": [\"<bullet 1>\", \"<bullet 2>\", \"<bullet 3>\"]}. "
                 "\n"
+                "The reader is a CHF-based investor. If market_snapshot shows "
+                "EUR/CHF or USD/CHF moving by 0.2% or more on the day, one "
+                "bullet MUST state the move and what it means for the CHF "
+                "value of EUR / USD holdings, using only the snapshot figures.\n"
+                "\n"
                 "The lead is TWO sentences (35-55 words total) written in "
                 "investment-professional voice. Sentence 1 names the prevailing "
                 "market tone with a colour adjective AND the dominant driver(s). "
@@ -3335,9 +3424,21 @@ def build_bundle():
                 except Exception:
                     s = None
         elif key == "bund10y":
-            s = build_manual_rate_history(MANUAL_BUND_10Y)
+            # Live Bundesbank daily yield; manual secret only as last resort.
+            try:
+                s = fetch_bund_yield("10y")
+                _rate_src = "live"
+            except Exception:
+                s = build_manual_rate_history(MANUAL_BUND_10Y)
+                _rate_src = "manual"
         elif key == "ch10y":
-            s = build_manual_rate_history(MANUAL_CH_10Y)
+            # Live SNB Swiss Confederation yield; manual secret as last resort.
+            try:
+                s, _ = fetch_swiss_yield("10y")
+                _rate_src = "live"
+            except Exception:
+                s = build_manual_rate_history(MANUAL_CH_10Y)
+                _rate_src = "manual"
 
         if s is not None:
             history_frames.append(
@@ -3348,7 +3449,7 @@ def build_bundle():
                         "label": label,
                         "group": group,
                         "value": s.values,
-                        "source_type": "live" if key == "us10y" else "manual",
+                        "source_type": "live" if key == "us10y" else _rate_src,
                     }
                 )
             )
@@ -5947,6 +6048,12 @@ else:
     # ── 2. Compact ticker strip ───────────────────────────────────────────────
     render_ticker_strip(snap)
 
+    # ── 2b. What matters today (CHF line + 3 bullets) ───────────────────────
+    try:
+        render_what_matters_today(writing, snap, hist)
+    except Exception as _e:
+        st.caption(f"What-matters block unavailable ({type(_e).__name__}).")
+
     # ── Audit fix: Navigation reorganization (5-tab layout) ─────────────────
     # Grouping the linear scroll into Overview / Portfolio Impact / Signals /
     # Research / Methodology so the reader lands on decisions, not on a
@@ -5991,12 +6098,16 @@ else:
             "<b>Data provenance.</b> "
             "Equities · Yahoo Finance (index level, local currency, previous close on "
             "non-trading days). "
-            "Rates · FRED (US 10Y) with Yahoo <code>^TNX</code> fallback; other yields · Yahoo. "
+            "Rates · FRED (US Treasuries) with Yahoo <code>^TNX</code> fallback; "
+            "German Bunds · Deutsche Bundesbank; Swiss Confederation · SNB data portal "
+            "(manual override only if those fail). "
             "Yields shown in %, changes in bp. "
             "Commodities · Yahoo (WTI &amp; Brent = front-month <b>futures</b>, not spot; "
             "Gold &amp; Silver = spot USD). "
             "FX · Yahoo (mid, last tick). "
-            "News · Marketaux (live) or RSS fallback. "
+            "News · Reuters (via Google News), CNBC, MarketWatch, Yahoo, Investing.com RSS; "
+            "Marketaux and Finnhub when keys are set (trusted-domain filter, 36h window); "
+            "Cyprus · Cyprus Mail and in-cyprus (Philenews). "
             "AI commentary · Google Gemini when configured; Groq fallback. "
             "All returns are local-currency price returns (not total returns) unless labelled."
             "</div>",
@@ -6073,6 +6184,12 @@ else:
         gemini_tag = "" if status["gemini_used"] else " · *narrative summary unavailable — showing source headlines*"
         st.markdown(f"**📰 What's Moving Markets**{gemini_tag}")
         render_news_bullets(writing, st.session_state["news_df"])
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        try:
+            render_cyprus_news()
+        except Exception as _e:
+            st.caption(f"Cyprus news unavailable ({type(_e).__name__}).")
 
      with col_right:
         st.markdown("**📅 Upcoming Events**")
@@ -6235,6 +6352,20 @@ else:
                           "FX & Key Commodities",
                           "EUR/USD · USD/CHF · EUR/CHF · DXY · Gold · Oil",
                           "fx_section")
+
+     # ── 5b. CHF investor lens ─────────────────────────────────────────────
+     with st.expander("🇨🇭 CHF Investor Lens", expanded=True):
+        try:
+            render_chf_lens(hist)
+        except Exception as _e:
+            st.caption(f"CHF lens unavailable ({type(_e).__name__}: {_e}).")
+
+     # ── 5c. Bonds — yields and prices ─────────────────────────────────────
+     with st.expander("🏦 Bonds — Yields & Prices", expanded=True):
+        try:
+            render_bond_panel(hist, FRED_API_KEY)
+        except Exception as _e:
+            st.caption(f"Bond panel unavailable ({type(_e).__name__}: {_e}).")
 
      # ── 6. Data tables ────────────────────────────────────────────────────
      # Cleanup pass: removed the separate "📊 Equities & Asset Class Detail"

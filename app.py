@@ -6356,7 +6356,7 @@ else:
      # ── 5b. CHF investor lens ─────────────────────────────────────────────
      with st.expander("🇨🇭 CHF Investor Lens", expanded=True):
         try:
-            render_chf_lens(hist)
+            render_chf_lens(snap)
         except Exception as _e:
             st.caption(f"CHF lens unavailable ({type(_e).__name__}: {_e}).")
 

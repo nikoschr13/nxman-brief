@@ -36,8 +36,10 @@ BUNDESBANK_SERIES = {
     "30y": "D.REN.EUR.A640.000000WT3030.A",
 }
 # SNB data portal: Swiss Confederation bond yields by maturity.
-# rendoblid = daily; rendoblim = monthly (last resort, flagged as monthly).
-SNB_CUBES = ["rendoblid", "rendoblim"]
+# rendoblid (daily) froze on 2025-07-31. The SNB now publishes the same daily
+# yields in cube rendeiduebd (D0=CHF, D1=<tenor>), but only once a month, so
+# the latest value can be up to ~5 weeks old — the panel shows its date.
+SNB_CUBES = ["rendeiduebd", "rendoblid"]
 
 
 def _parse_sdmx_csv(text: str) -> pd.Series:
@@ -93,15 +95,15 @@ def fetch_bund_yield(tenor: str = "10y") -> pd.Series:
 @st.cache_data(ttl=3600)
 def fetch_swiss_yield(tenor: str = "10y") -> tuple[pd.Series, str]:
     """Swiss Confederation yield (% p.a.) from the SNB data portal.
-    Returns (series, frequency) where frequency is 'daily' or 'monthly'."""
-    code = tenor.lower().replace("y", "J")  # 10y -> 10J (SNB code)
+    Returns (series, note). Note is 'monthly release' because the SNB
+    publishes the daily values once a month."""
+    n = tenor.lower().rstrip("y")
+    codes = {f"{n}J", f"{n}J0"}  # e.g. 10J (rendeiduebd) or 10J0 (rendoblid)
     for cube in SNB_CUBES:
         try:
             r = requests.get(f"https://data.snb.ch/api/cube/{cube}/data/csv/en",
                              headers=_UA, timeout=30)
             r.raise_for_status()
-            # Layout: metadata lines, blank line, then a header like
-            # "Date";"D0";"Value" (cubes may carry extra dimension columns).
             rows, hdr = [], None
             for line in r.text.splitlines():
                 p = [x.strip().strip('"') for x in line.split(";")]
@@ -113,7 +115,9 @@ def fetch_swiss_yield(tenor: str = "10y") -> tuple[pd.Series, str]:
                     continue
                 rec = dict(zip(hdr, p))
                 dims = [rec[c] for c in hdr if c not in ("Date", "Value")]
-                if code not in dims or rec.get("Value") in ("", None):
+                if not codes.intersection(dims) or rec.get("Value") in ("", None):
+                    continue
+                if len(dims) > 1 and "CHF" not in dims:
                     continue
                 try:
                     rows.append((pd.Timestamp(rec["Date"]), float(rec["Value"])))
@@ -123,9 +127,10 @@ def fetch_swiss_yield(tenor: str = "10y") -> tuple[pd.Series, str]:
                 continue
             d, v = zip(*rows)
             s = pd.Series(v, index=pd.DatetimeIndex(d)).sort_index()
+            s = s[~s.index.duplicated(keep="last")]
             s = s[s.index >= pd.Timestamp.today() - pd.Timedelta(days=400)]
-            if len(s) >= (20 if cube == "rendoblid" else 2):
-                return s, ("daily" if cube == "rendoblid" else "monthly")
+            if len(s) >= 20:
+                return s, "monthly release"
         except Exception:
             continue
     raise ValueError(f"SNB {tenor} unavailable")
@@ -187,68 +192,79 @@ CHF_LENS_ASSETS = [
 ]
 
 
-def build_chf_lens(history: pd.DataFrame) -> pd.DataFrame:
-    """Local-currency vs CHF returns. CHF value = local price × FX(ccy→CHF)."""
-    fx = {"USD": _series_from_history(history, "usdchf"),
-          "EUR": _series_from_history(history, "eurchf")}
-    per = _periods()
+def _snap_row(snapshot: pd.DataFrame, key: str):
+    if snapshot is None or snapshot.empty:
+        return None
+    r = snapshot[snapshot["key"] == key]
+    return None if r.empty else r.iloc[0]
+
+
+def _num(v):
+    try:
+        return None if v is None or pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_chf(local, fx):
+    """Compound a local-currency return with the FX return (both in %)."""
+    if local is None or fx is None:
+        return None
+    return ((1 + local / 100) * (1 + fx / 100) - 1) * 100
+
+
+def build_chf_lens(snapshot: pd.DataFrame) -> pd.DataFrame:
+    """Local-currency vs CHF returns, built from the SAME snapshot the rest of
+    the brief shows (frozen at 08:00 in morning-snapshot mode), so the numbers
+    always agree with the cards and tables. CHF return = (1+local)(1+FX)-1."""
+    fx_rows = {"USD": _snap_row(snapshot, "usdchf"), "EUR": _snap_row(snapshot, "eurchf")}
     rows = []
     for key, label, ccy in CHF_LENS_ASSETS:
-        s = _series_from_history(history, key)
-        if s is None or len(s) < 2:
+        r = _snap_row(snapshot, key)
+        if r is None or _num(r.get("level")) is None:
             continue
-        if ccy == "CHF":
-            s_chf = s
-        else:
-            f = fx.get(ccy)
-            if f is None or f.empty:
-                continue
-            f = f.reindex(s.index.union(f.index)).sort_index().ffill().reindex(s.index)
-            s_chf = (s * f).dropna()
+        f = None if ccy == "CHF" else fx_rows.get(ccy)
+        if ccy != "CHF" and f is None:
+            continue
         row = {"Asset": label, "Ccy": ccy}
-        for name, ser in (("local", s), ("chf", s_chf)):
-            last = float(ser.iloc[-1])
-            row[f"1D {name}"] = _pct(last, float(ser.iloc[-2])) if len(ser) >= 2 else None
-            row[f"7D {name}"] = _pct(last, _on_or_before(ser, per["7d"]))
-            row[f"YTD {name}"] = _pct(last, _on_or_before(ser, per["ytd"]))
+        for col, name in (("d1", "1D"), ("wtd", "WTD"), ("ytd", "YTD")):
+            loc = _num(r.get(col))
+            fxv = 0.0 if ccy == "CHF" else _num(f.get(col))
+            row[f"{name} local"] = loc
+            row[f"{name} chf"] = _to_chf(loc, fxv)
         if row["YTD local"] is not None and row["YTD chf"] is not None:
             row["FX effect YTD"] = row["YTD chf"] - row["YTD local"]
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-def _fx_line(history: pd.DataFrame) -> list[dict]:
+def _fx_line(snapshot: pd.DataFrame) -> list[dict]:
     out = []
-    per = _periods()
     for key, label in (("eurchf", "EUR/CHF"), ("usdchf", "USD/CHF"), ("eurusd", "EUR/USD")):
-        s = _series_from_history(history, key)
-        if s is None or len(s) < 2:
+        r = _snap_row(snapshot, key)
+        if r is None or _num(r.get("level")) is None:
             continue
-        last = float(s.iloc[-1])
-        out.append({"label": label, "level": last,
-                    "d1": _pct(last, float(s.iloc[-2])),
-                    "d7": _pct(last, _on_or_before(s, per["7d"])),
-                    "ytd": _pct(last, _on_or_before(s, per["ytd"])),
-                    "as_of": s.index[-1]})
+        out.append({"label": label, "level": _num(r["level"]), "d1": _num(r.get("d1")),
+                    "wtd": _num(r.get("wtd")), "ytd": _num(r.get("ytd"))})
     return out
 
 
-def render_chf_lens(history: pd.DataFrame):
+def render_chf_lens(snapshot: pd.DataFrame):
     st.markdown("#### 🇨🇭 CHF investor lens")
-    fx = _fx_line(history)
+    fx = _fx_line(snapshot)
     if fx:
         cols = st.columns(len(fx))
         for c, r in zip(cols, fx):
             c.metric(r["label"], f"{r['level']:.4f}",
                      f"{r['d1']:+.2f}% 1D" if r["d1"] is not None else None)
-            c.caption(f"7D {_fmt(r['d7'])} · YTD {_fmt(r['ytd'])} · as of {r['as_of']:%d %b}")
+            c.caption(f"WTD {_fmt(r['wtd'])} · YTD {_fmt(r['ytd'])}")
         st.caption("EUR/CHF or USD/CHF falling = the franc is strengthening, which "
                    "reduces the CHF value of EUR / USD holdings.")
-    df = build_chf_lens(history)
+    df = build_chf_lens(snapshot)
     if df.empty:
         st.caption("CHF lens unavailable — FX history missing from this snapshot.")
         return
-    show = df[["Asset", "Ccy", "1D local", "1D chf", "7D local", "7D chf",
+    show = df[["Asset", "Ccy", "1D local", "1D chf", "WTD local", "WTD chf",
                "YTD local", "YTD chf", "FX effect YTD"]]
     num_cols = [c for c in show.columns if c not in ("Asset", "Ccy")]
 
@@ -337,8 +353,8 @@ def build_bond_panel(history: pd.DataFrame, fred_key: str | None):
         ycurves.append(("Germany", t.upper(), (lambda t=t: (fetch_bund_yield(t), "Bundesbank"))))
     for t in ("2y", "5y", "10y", "30y"):
         def f(t=t):
-            s, freq = fetch_swiss_yield(t)
-            return s, "SNB" + (" (monthly)" if freq == "monthly" else "")
+            s, _note = fetch_swiss_yield(t)
+            return s, "SNB (monthly release)"
         ycurves.append(("Switzerland", t.upper(), f))
 
     yrows = []
@@ -390,6 +406,7 @@ def render_bond_panel(history: pd.DataFrame, fred_key: str | None):
         def _yc(v):  # yields up = red (prices fall)
             return f"color: {_colour(v, up_good=False)}" if isinstance(v, (int, float)) else ""
         styled = (ydf.style
+                  .format(na_rep="–")
                   .format({"Yield %": lambda v: "–" if pd.isna(v) else f"{v:.2f}",
                            **{c: (lambda v: _fmt(v, 'bp')) for c in ("1D", "7D", "1M", "YTD")}})
                   .map(_yc, subset=["1D", "7D", "1M", "YTD"]))
@@ -418,7 +435,7 @@ def render_bond_panel(history: pd.DataFrame, fred_key: str | None):
         st.dataframe(styled, use_container_width=True, hide_index=True)
     st.caption("Sources: US Treasury yields · FRED (Yahoo fallback); German Bunds · "
                "Deutsche Bundesbank (current benchmark issue); Swiss Confederation · "
-               "SNB data portal; bond ETFs · Yahoo Finance. Rows marked 'unavailable' "
+               "SNB data portal (published monthly, so up to ~5 weeks behind — see 'As of'); bond ETFs · Yahoo Finance. Rows marked 'unavailable' "
                "failed to load on this run.")
 
 
@@ -448,14 +465,14 @@ def _deterministic_bullets(snapshot: pd.DataFrame) -> list[str]:
     for k, lbl in (("us10y", "US 10Y"), ("bund10y", "Bund 10Y"), ("ch10y", "CH 10Y")):
         r = row(k)
         if r is not None and r["level"] is not None and pd.notna(r["level"]):
-            parts.append(f"{lbl} {float(r['level']):.2f}%")
+            parts.append(f"{lbl} {float(r['level']):.2f}%" + (" (SNB, monthly data)" if k == "ch10y" else ""))
     if parts:
         out.append("Rates: " + " · ".join(parts) + ".")
     return out[:3]
 
 
 def render_what_matters_today(writing: dict, snapshot: pd.DataFrame, history: pd.DataFrame):
-    fx = _fx_line(history)
+    fx = _fx_line(snapshot)
     fx_html = " &nbsp;·&nbsp; ".join(
         f"<b>{r['label']}</b> {r['level']:.4f} "
         f"<span style='color:{_colour(r['d1'])};font-weight:700;'>{_fmt(r['d1'])}</span>"

@@ -472,12 +472,6 @@ def _deterministic_bullets(snapshot: pd.DataFrame) -> list[str]:
 
 
 def render_what_matters_today(writing: dict, snapshot: pd.DataFrame, history: pd.DataFrame):
-    fx = _fx_line(snapshot)
-    fx_html = " &nbsp;·&nbsp; ".join(
-        f"<b>{r['label']}</b> {r['level']:.4f} "
-        f"<span style='color:{_colour(r['d1'])};font-weight:700;'>{_fmt(r['d1'])}</span>"
-        for r in fx[:2])
-
     es = (writing or {}).get("executive_summary") or {}
     lead = (es.get("lead") or "").strip()
     bullets = [b for b in (es.get("bullets") or []) if isinstance(b, str) and b.strip()][:3]
@@ -494,7 +488,7 @@ def render_what_matters_today(writing: dict, snapshot: pd.DataFrame, history: pd
         "<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;'>"
         "<span style='font-size:13px;font-weight:800;color:#0F2D52;letter-spacing:.3px;'>"
         "WHAT MATTERS TODAY</span>"
-        f"<span style='font-size:12.5px;color:#0F2D52;'>{fx_html}</span></div>"
+        "</div>"
         + (f"<div style='font-size:13px;color:#1E293B;margin-top:6px;'>{lead}</div>" if lead else "")
         + f"<ul style='font-size:13px;color:#1E293B;margin:6px 0 2px 18px;padding:0;'>{items}</ul>"
         f"<div style='font-size:10.5px;color:#94A3B8;'>{tag}</div></div>",
@@ -513,8 +507,19 @@ CYPRUS_FEEDS = [
 ]
 
 
+_CY_BUSINESS = re.compile(
+    r"(econom|bank|business|tax|propert|touris|energy|ship|fuel|inflation|invest|"
+    r"market|budget|gdp|compan|cysec|stock|financ|price|wage|job|employ|loan|"
+    r"mortgage|euro|trade|export|import|insurance|fund|profit|revenue|deficit|"
+    r"debt|bond|rating|airport|port|gas|electric|startup|tech|salar|cost|rent|"
+    r"house|housing|construction|retail|ECB|EU funds|recovery)",
+    re.IGNORECASE)
+_CY_SPAM = re.compile(r"(\bRPC\b|casino|best .* providers|sponsored|betting|crypto exchange)",
+                      re.IGNORECASE)
+
+
 @st.cache_data(ttl=1800)
-def load_cyprus_news(max_items: int = 8, lookback_hours: int = 48) -> tuple[pd.DataFrame, list[str]]:
+def load_cyprus_news(max_items: int = 3, lookback_hours: int = 48) -> tuple[pd.DataFrame, list[str]]:
     import feedparser
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
     rows, ok_sources = [], []
@@ -533,7 +538,7 @@ def load_cyprus_news(max_items: int = 8, lookback_hours: int = 48) -> tuple[pd.D
                 title = (e.get("title") or "").strip()
                 if "news.google.com" in url:
                     title = re.sub(r"\s+-\s+[^-]+$", "", title)  # drop " - Cyprus Mail"
-                if len(title) < 15:
+                if len(title) < 15 or _CY_SPAM.search(title) or not _CY_BUSINESS.search(title):
                     continue
                 rows.append({"headline": title, "source": source,
                              "published": ts, "url": e.get("link") or ""})
@@ -555,7 +560,7 @@ def render_cyprus_news():
     st.markdown("**🇨🇾 Cyprus — business & economy**")
     df, used = load_cyprus_news()
     if df.empty:
-        st.caption("No Cyprus headlines in the last 48h (or feeds unreachable).")
+        st.caption("No Cyprus business headlines in the last 48h (or feeds unreachable).")
         return
     for _, r in df.iterrows():
         when = (pd.Timestamp(r["published"]).tz_convert("Europe/Zurich").strftime("%d %b %H:%M")
@@ -568,3 +573,118 @@ def render_cyprus_news():
             unsafe_allow_html=True,
         )
     st.caption("Sources: " + ", ".join(dict.fromkeys(used)))
+
+
+# ── One market table (replaces ticker strip, FX cards and CHF lens) ──────────
+# (key, label, kind, currency). kind: "px" = price, "fx" = FX rate,
+# "yld" = yield in % (changes shown in bp).
+MARKET_TABLE = [
+    ("Equities", [
+        ("smi",        "SMI",              "px",  "CHF"),
+        ("stoxx600",   "Stoxx Europe 600", "px",  "EUR"),
+        ("sp500",      "S&P 500",          "px",  "USD"),
+        ("nasdaq100",  "Nasdaq 100",       "px",  "USD"),
+        ("msci_world", "MSCI World",       "px",  "USD"),
+    ]),
+    ("Currencies", [
+        ("eurchf",     "EUR/CHF",          "fx",  None),
+        ("usdchf",     "USD/CHF",          "fx",  None),
+    ]),
+    ("10-year government yields", [
+        ("ch10y",      "Switzerland 10Y (SNB, monthly)", "yld", None),
+        ("bund10y",    "Germany 10Y",      "yld", None),
+        ("us10y",      "US 10Y",           "yld", None),
+    ]),
+    ("Commodities & crypto", [
+        ("gold",       "Gold",             "px",  "USD"),
+        ("wti",        "WTI Oil",          "px",  "USD"),
+        ("bitcoin",    "Bitcoin",          "px",  "USD"),
+    ]),
+]
+
+
+def _yield_bp(level, pct):
+    """Snapshot stores yield changes as % of the yield level; convert to bp."""
+    if level is None or pct is None or pct <= -100:
+        return None
+    prev = level / (1 + pct / 100)
+    return (level - prev) * 100
+
+
+def build_market_table(snapshot: pd.DataFrame) -> list[tuple[str, list[dict]]]:
+    fx = {"USD": _snap_row(snapshot, "usdchf"), "EUR": _snap_row(snapshot, "eurchf")}
+    out = []
+    for group, items in MARKET_TABLE:
+        rows = []
+        for key, label, kind, ccy in items:
+            r = _snap_row(snapshot, key)
+            level = None if r is None else _num(r.get("level"))
+            if level is None:
+                continue
+            d1, wtd, ytd = (_num(r.get(c)) for c in ("d1", "wtd", "ytd"))
+            row = {"label": label, "kind": kind, "level": level}
+            if kind == "yld":
+                row.update(d1=_yield_bp(level, d1), wtd=_yield_bp(level, wtd),
+                           ytd=_yield_bp(level, ytd), ytd_chf=None)
+            else:
+                row.update(d1=d1, wtd=wtd, ytd=ytd, ytd_chf=None)
+                if kind == "px":
+                    if ccy == "CHF":
+                        row["ytd_chf"] = ytd
+                    elif fx.get(ccy) is not None:
+                        row["ytd_chf"] = _to_chf(ytd, _num(fx[ccy].get("ytd")))
+            rows.append(row)
+        if rows:
+            out.append((group, rows))
+    return out
+
+
+def render_market_table(snapshot: pd.DataFrame):
+    groups = build_market_table(snapshot)
+    if not groups:
+        st.caption("Market data unavailable in this snapshot.")
+        return
+
+    def cell(v, kind):
+        if v is None or pd.isna(v):
+            return "<td style='text-align:right;color:#94A3B8;'>–</td>"
+        if kind == "yld":
+            txt, col = f"{v:+.0f} bp", _colour(v, up_good=False)
+        else:
+            txt, col = f"{v:+.2f}%", _colour(v)
+        return f"<td style='text-align:right;color:{col};font-weight:600;'>{txt}</td>"
+
+    def level_txt(r):
+        v = r["level"]
+        if r["kind"] == "yld":
+            return f"{v:.2f}%"
+        if r["kind"] == "fx":
+            return f"{v:.4f}"
+        return f"{v:,.2f}" if v < 1000 else f"{v:,.0f}"
+
+    th = ("style='text-align:right;padding:4px 8px;font-weight:600;color:#475569;"
+          "border-bottom:2px solid #CBD5E1;'")
+    html = ["<table style='width:100%;border-collapse:collapse;font-size:13px;'>",
+            "<tr><th style='text-align:left;padding:4px 8px;color:#475569;"
+            "border-bottom:2px solid #CBD5E1;'></th>"
+            f"<th {th}>Level</th><th {th}>1 day</th><th {th}>Week to date</th>"
+            f"<th {th}>Year to date</th><th {th}>YTD in CHF</th></tr>"]
+    for group, rows in groups:
+        html.append(f"<tr><td colspan='6' style='padding:8px 8px 2px;font-size:11px;"
+                    f"font-weight:800;color:#0F2D52;letter-spacing:.4px;'>{group.upper()}</td></tr>")
+        for r in rows:
+            html.append(
+                "<tr style='border-bottom:1px solid #EEF2F6;'>"
+                f"<td style='padding:3px 8px;color:#0F172A;'>{r['label']}</td>"
+                f"<td style='text-align:right;padding:3px 8px;color:#0F172A;'>{level_txt(r)}</td>"
+                + cell(r["d1"], r["kind"]) + cell(r["wtd"], r["kind"])
+                + cell(r["ytd"], r["kind"])
+                + (cell(r["ytd_chf"], "px") if r["kind"] == "px" else
+                   "<td style='text-align:right;color:#94A3B8;'>–</td>")
+                + "</tr>")
+    html.append("</table>")
+    st.markdown("".join(html), unsafe_allow_html=True)
+    st.caption("Price returns in each market's own currency. 'YTD in CHF' = what a "
+               "Swiss-franc investor got, unhedged. Yield changes in basis points "
+               "(yield up = bond prices down). Swiss 10Y is published by the SNB "
+               "once a month, so it lags.")

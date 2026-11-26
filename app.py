@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 from brief_personal import (
     fetch_bund_yield, fetch_swiss_yield,
     render_what_matters_today, render_chf_lens, render_bond_panel,
-    render_cyprus_news,
+    render_cyprus_news, render_market_table,
 )
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, A4
@@ -4458,9 +4458,129 @@ def _match_bullet_to_article(bullet: str, news_df) -> dict | None:
     return best.to_dict() if best is not None and best_score >= 2 else None
 
 
-def render_news_bullets(writing, news_df):
-    """AI bullets with inline source links after each one; source list below."""
-    bullets = writing.get("news_bullets") or []
+def render_status_box(status, mode_note, as_of_disp=""):
+    """Plain status: is the AI working, is news live, is research included.
+    Red = needs attention. Shown on every page view, above the tabs."""
+    rs = st.session_state.get("research_state") or {}
+    ok_c, warn_c, bad_c = "#16A34A", "#D97706", "#DC2626"
+
+    if status.get("gemini_used"):
+        ai = (ok_c, "✅ AI working")
+    else:
+        why = str(status.get("gemini_reason") or (
+            "no Gemini API key configured" if not GEMINI_API_KEY else
+            "AI writing switched off in the sidebar" if not globals().get("use_gemini_writing", True)
+            else "no reason reported — see Methodology › Operator diagnostics"))
+        why = why.replace("AI failed:", "").strip()[:140] or (
+            "no Gemini API key configured" if not GEMINI_API_KEY else
+            "no reason reported — see Methodology › Operator diagnostics")
+        ai = (bad_c, f"❌ AI NOT working — {why}")
+    news = ((ok_c, f"✅ News live · {status.get('article_count', 0)} articles")
+            if status.get("live_news") else
+            (warn_c, f"⚠️ News not live — {str(status.get('news_reason') or '')[:80]}"))
+    _rs_state = rs.get("state")
+    if _rs_state == "ok":
+        res = (ok_c, f"✅ Research: {rs.get('message')}")
+    elif _rs_state == "partial":
+        res = (warn_c, f"⚠️ Research: {rs.get('message')} — see Research below")
+    elif _rs_state == "none":
+        res = (warn_c, f"⚪ Research: {rs.get('message')}")
+    else:
+        res = (bad_c, f"❌ Research: {rs.get('message') or 'status unknown'}")
+
+    items = "".join(
+        f"<div style='color:{c};font-weight:700;'>{t}</div>" for c, t in (ai, news, res))
+    foot = " · ".join(x for x in [mode_note.replace("|", "·"), (f"as of {as_of_disp}" if as_of_disp else "")] if x)
+    st.markdown(
+        "<div style='border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;"
+        "margin:2px 0 8px;font-size:12.5px;line-height:1.6;background:#FFFFFF;'>"
+        f"{items}<div style='color:#64748B;font-size:11px;'>{foot}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_research_block():
+    """Research summaries on the Overview, or a clear reason why there are none."""
+    rs = st.session_state.get("research_state") or {}
+    themes = st.session_state.get("research_themes_live") or {}
+    banks = themes.get("banks") or []
+    st.markdown("##### 📚 Research")
+    if banks:
+        st.caption("AI summary of the documents you loaded — check the source before acting.")
+        for b in banks:
+            items = b.get("items") or [{"key_message": x, "portfolio_implication": ""}
+                                         for x in (b.get("bullets") or [])]
+            lines = "".join(
+                f"<li style='margin:2px 0;'>{it.get('key_message','')}"
+                + (f"<br><span style='color:#64748B;font-size:11.5px;'>→ "
+                   f"{it.get('portfolio_implication')}</span>"
+                   if it.get("portfolio_implication") else "")
+                + "</li>" for it in items[:4])
+            st.markdown(
+                f"<div style='font-size:12.5px;margin:4px 0 8px;'><b style='color:#0F2D52;'>"
+                f"{b.get('bank','')}</b><ul style='margin:2px 0 0 16px;padding:0;'>{lines}</ul></div>",
+                unsafe_allow_html=True)
+    state = rs.get("state")
+    if not banks:
+        msg = rs.get("message") or "research status unknown"
+        if state == "none":
+            st.info(f"No research included today: {msg}. Upload PDFs in the sidebar "
+                    "(or put them in the Drive inbox), then press **Generate Brief**.")
+        else:
+            st.error(f"Research not included: {msg}.")
+    problems = [n for n in (rs.get("notes") or []) if "ok" not in str(n)]
+    errs = list((rs.get("parse_errors") or {}).items()) + list((rs.get("drive_failed") or {}).items())
+    if problems or errs:
+        with st.expander(f"Research problems ({len(problems) + len(errs)})", expanded=not banks):
+            for n in problems:
+                st.caption(f"• {n}")
+            for name, err in errs:
+                st.caption(f"• {name[:50]} — could not be read ({str(err)[:90]})")
+    if rs.get("docs"):
+        st.caption(f"Loaded: {len(rs['docs'])} document(s) · summarised sources: "
+                   + (", ".join(rs.get("summarised") or []) or "none"))
+
+
+def render_events_block(months=3):
+    st.markdown(f"##### 📅 Events — next {months} months")
+    today = pd.Timestamp.today().normalize()
+    horizon = today + pd.DateOffset(months=months)
+    try:
+        _events_source = fetch_macro_events_live()
+        _live_status = st.session_state.get("_macro_events_status", {})
+    except Exception:
+        _events_source = MACRO_EVENTS_FALLBACK
+        _live_status = {}
+    upcoming = [e for e in _events_source
+                if today <= pd.Timestamp(e["date"]) <= horizon]
+    upcoming.sort(key=lambda e: pd.Timestamp(e["date"]))
+    if not upcoming:
+        st.caption("No events found in this window.")
+    for ev in upcoming[:25]:
+        dt = pd.Timestamp(ev["date"])
+        days = (dt - today).days
+        day_label = "TODAY" if days == 0 else f"in {days}d"
+        _src = ev.get("source") or ev.get("category") or ""
+        _src_tag = (f"<span style='color:#94A3B8;font-size:10.5px;margin-left:6px;'>"
+                    f"· {_src}</span>") if _src else ""
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;padding:3px 0;"
+            f"border-bottom:1px solid #F0F4F8;font-size:12px;'>"
+            f"<span style='color:#0F2D52;'>{ev['event']}{_src_tag}</span>"
+            f"<span style='color:#64748B;white-space:nowrap;margin-left:8px;'>"
+            f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days==0 else '#475467'};'>{day_label}</b></span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    _failed = _live_status.get("sources_failed") or []
+    if _failed:
+        st.caption("⚠️ Calendar sources that failed (using built-in dates instead): "
+                   + " · ".join(_failed))
+
+
+def render_news_bullets(writing, news_df, limit=5):
+    """AI bullets (or raw headlines when AI is off), capped at `limit`."""
+    bullets = (writing.get("news_bullets") or [])[:limit]
 
     if bullets:
         for b in bullets:
@@ -4481,68 +4601,74 @@ def render_news_bullets(writing, news_df):
         if news_df is None or news_df.empty:
             st.caption("No news available.")
             return
-        for _, r in news_df.head(10).iterrows():
-            cat = r.get("category","")
+        for _, r in news_df.head(limit).iterrows():
             headline = r.get("headline","")
             url = r.get("url","")
-            prefix = f"**{cat}** — " if cat and cat != "Other" else ""
-            link = f" [↗]({url})" if url else ""
-            st.markdown(f"- {prefix}{headline}{link}")
+            src = r.get("source","") or ""
+            # No keyword category prefix: it mislabelled stories (e.g. an
+            # airline order tagged "Macro / Rates"). Show the source instead.
+            link = (f" <a href='{url}' target='_blank' style='font-size:11px;color:#1E88E5;"
+                    f"text-decoration:none;'>↗ {src}</a>") if url else (f" · {src}" if src else "")
+            st.markdown(f"- {headline}{link}", unsafe_allow_html=True)
 
-    # Unmatched sources with inline checkboxes for PDF inclusion
-    if news_df is not None and not news_df.empty:
-        with st.expander("📎 Source articles — tick to include in PDF", expanded=True):
-            st.caption("Checked articles appear in the PDF news table. Changes take effect when you click **Update PDF**.")
+def render_news_pdf_picker(news_df):
+    """Tick which source articles go into the PDF news table."""
+    if news_df is None or news_df.empty:
+        st.caption("No articles loaded.")
+        return
+    st.caption("Checked articles appear in the PDF news table. Changes take effect when you click **Update PDF**.")
 
-            selections = {}
-            for i, (_, r) in enumerate(news_df.head(NEWS_COUNT).iterrows()):
-                headline = r.get("headline","") or ""
-                url      = r.get("url","")      or ""
-                source   = r.get("source","")   or ""
-                pub      = r.get("published_at","") or ""
-                dt_str   = ""
-                if pub:
-                    try: dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
-                    except Exception: dt_str = str(pub)[:10]
-                meta = " · ".join([x for x in [source, dt_str] if x])
+    selections = {}
+    for i, (_, r) in enumerate(news_df.head(NEWS_COUNT).iterrows()):
+        headline = r.get("headline","") or ""
+        url      = r.get("url","")      or ""
+        source   = r.get("source","")   or ""
+        pub      = r.get("published_at","") or ""
+        dt_str   = ""
+        if pub:
+            try: dt_str = pd.Timestamp(pub).strftime("%d %b %H:%M")
+            except Exception: dt_str = str(pub)[:10]
+        meta = " · ".join([x for x in [source, dt_str] if x])
 
-                c1, c2 = st.columns([0.05, 0.95])
-                with c1:
-                    checked = st.checkbox(
-                        "", value=True,
-                        key=f"pdf_inc_{i}_{headline[:20]}",
-                        label_visibility="collapsed",
-                    )
-                with c2:
-                    link_md = f"[{headline}]({url})" if url else headline
-                    meta_span = (f'  <span style="color:#9AA8B7;font-size:11px;"> — {meta}</span>'
-                                 if meta else "")
-                    st.markdown(
-                        f"<div style='padding:2px 0;font-size:12px;line-height:1.4;'>"
-                        f"{link_md}{meta_span}"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                selections[headline] = checked
+        c1, c2 = st.columns([0.05, 0.95])
+        with c1:
+            checked = st.checkbox(
+                "", value=True,
+                key=f"pdf_inc_{i}_{headline[:20]}",
+                label_visibility="collapsed",
+            )
+        with c2:
+            link_md = f"[{headline}]({url})" if url else headline
+            meta_span = (f'  <span style="color:#9AA8B7;font-size:11px;"> — {meta}</span>'
+                         if meta else "")
+            st.markdown(
+                f"<div style='padding:2px 0;font-size:12px;line-height:1.4;'>"
+                f"{link_md}{meta_span}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        selections[headline] = checked
 
-            if st.button("🔄 Update PDF with ticked articles", use_container_width=True, type="secondary"):
-                keep = [h for h, v in selections.items() if v]
-                filtered = news_df[news_df["headline"].isin(keep)].copy()
-                new_pdf = build_pdf(
-                    "Daily Market Briefing",
-                    st.session_state.get("pdf_chart_png"),
-                    st.session_state["equities_df"],
-                    st.session_state["rates_df"],
-                    st.session_state["commodities_df"],
-                    st.session_state.get("bonds_df", st.session_state["commodities_df"]),
-                    st.session_state["metrics"],
-                    st.session_state["writing"],
-                    filtered,
-                    st.session_state["status"],
-                    fx_df=st.session_state.get("fx_df"),
-                )
-                st.session_state["pdf_bytes"] = new_pdf
-                st.success(f"PDF updated with {len(keep)} articles.")
+    if st.button("🔄 Update PDF with ticked articles", use_container_width=True, type="secondary"):
+        keep = [h for h, v in selections.items() if v]
+        filtered = news_df[news_df["headline"].isin(keep)].copy()
+        new_pdf = build_pdf(
+            "Daily Market Briefing",
+            st.session_state.get("pdf_chart_png"),
+            st.session_state["equities_df"],
+            st.session_state["rates_df"],
+            st.session_state["commodities_df"],
+            st.session_state.get("bonds_df", st.session_state["commodities_df"]),
+            st.session_state["metrics"],
+            st.session_state["writing"],
+            filtered,
+            st.session_state["status"],
+            fx_df=st.session_state.get("fx_df"),
+        )
+        st.session_state["pdf_bytes"] = new_pdf
+        st.success(f"PDF updated with {len(keep)} articles.")
+
+
 
 
 def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
@@ -5519,7 +5645,90 @@ def _fig_to_png(fig, width, height, scale=1.5):
             return None
 
 
+def refresh_research(base_state):
+    """Make sure the research summaries match the documents loaded NOW.
+
+    In morning-snapshot mode the research summaries used to be frozen with
+    the 08:00 snapshot, so PDFs uploaded later were never summarised. Market
+    data stays frozen; research is rebuilt whenever the set of loaded
+    documents changes. Also records a plain-language research status for
+    the status box and the Overview research block.
+    """
+    docs = st.session_state.get("research_docs") or {}
+    use_ai = bool(globals().get("use_gemini_writing", True))
+    parse_errors = {n: str(d.get("error"))[:120] for n, d in docs.items()
+                    if isinstance(d, dict) and d.get("error")}
+    usable = {n: d for n, d in docs.items() if n not in parse_errors}
+    drive_failed = st.session_state.get("_drive_research_failed") or {}
+    rs = {"docs": sorted(docs.keys()), "parse_errors": parse_errors,
+          "drive_failed": dict(drive_failed),
+          "drive_available": _drive_pdf_loader is not None,
+          "summarised": [], "notes": [], "state": "", "message": ""}
+
+    themes = {"banks": [], "themes": []}
+    if not docs:
+        snap_themes = base_state.get("research_themes") or {}
+        if snap_themes.get("banks"):
+            themes = snap_themes
+            rs["state"] = "ok"
+            rs["message"] = "from the 08:00 snapshot (no documents loaded in this session)"
+        else:
+            rs["state"] = "none"
+            rs["message"] = ("no research loaded — nothing in the Drive inbox and "
+                             "nothing uploaded this session")
+    elif not usable:
+        rs["state"] = "error"
+        rs["message"] = f"{len(docs)} document(s) loaded but none could be read"
+    elif not use_ai or not GEMINI_API_KEY:
+        rs["state"] = "error"
+        rs["message"] = (f"{len(usable)} document(s) loaded but NOT summarised — "
+                         + ("AI writing is switched off" if not use_ai else
+                            "no Gemini API key configured"))
+    else:
+        sig = (tuple(sorted(usable.keys())), use_ai)
+        cache = st.session_state.get("_research_cache") or {}
+        if cache.get("sig") == sig:
+            themes, dbg = cache["themes"], cache["dbg"]
+        else:
+            themes = build_research_themes(usable, use_ai)
+            dbg = st.session_state.get("_research_themes_debug") or {}
+            # Only cache a complete result, so a failed document is retried
+            # on the next Generate instead of being stuck for the session.
+            if themes.get("banks") and len(dbg.get("banks_rendered") or []) >= 1 \
+                    and not any("ok" not in str(n) for n in (dbg.get("notes") or [])):
+                st.session_state["_research_cache"] = {"sig": sig, "themes": themes, "dbg": dbg}
+        rs["summarised"] = [b.get("bank") for b in themes.get("banks") or []]
+        rs["notes"] = list((dbg or {}).get("notes") or [])[:8]
+        problems = [n for n in rs["notes"] if "ok" not in str(n)]
+        if rs["summarised"] and not problems and not parse_errors:
+            rs["state"] = "ok"
+            rs["message"] = f"{len(usable)} document(s) summarised"
+        elif rs["summarised"]:
+            rs["state"] = "partial"
+            rs["message"] = (f"{len(rs['summarised'])} source(s) summarised, "
+                             f"{len(problems) + len(parse_errors)} problem(s)")
+        else:
+            rs["state"] = "error"
+            rs["message"] = (f"{len(usable)} document(s) loaded but the AI returned "
+                             "no summaries")
+    if drive_failed and rs["state"] in ("ok", "none"):
+        rs["state"] = "partial" if rs["state"] == "ok" else "error"
+        rs["message"] += f"; {len(drive_failed)} Drive file(s) failed to load"
+    if not rs["drive_available"] and rs["state"] == "none":
+        rs["message"] = "no research loaded — Drive sync is not available on this server"
+    base_state["research_themes"] = themes
+    st.session_state["research_themes_live"] = themes
+    st.session_state["research_state"] = rs
+    return base_state
+
+
 def add_render_outputs(base_state, chart_window="YTD"):
+    try:
+        refresh_research(base_state)
+    except Exception as _rex:
+        st.session_state["research_state"] = {
+            "state": "error", "message": f"research step failed ({type(_rex).__name__}: {_rex})",
+            "docs": [], "parse_errors": {}, "drive_failed": {}, "summarised": [], "notes": []}
     # history + chart_allowed_keys are stripped from serialized snapshots
     # (too large for JSON/Gist). Re-hydrate from a fresh build_bundle() call
     # when they're missing so we never KeyError out of a saved snapshot.
@@ -6035,18 +6244,10 @@ else:
         _as_of_str = f"  ·  as of {_as_of_disp}"
     else:
         _as_of_str = ""
-    st.caption(
-        f"{mode_note}   |   {g_col} AI {ai_label}  "
-        f"·  {n_col} News {'live' if status['live_news'] else 'placeholder'}  "
-        f"·  {status['article_count']} articles"
-        f"{_as_of_str}"
-    )
+    render_status_box(status, mode_note, _as_of_disp if _as_of else "")
     # Cleanup pass: removed the duplicated "Diagnostics (operator)" expander
     # that used to sit here; the same content is now surfaced once inside the
     # Methodology tab under "Operator diagnostics — AI provider raw status".
-
-    # ── 2. Compact ticker strip ───────────────────────────────────────────────
-    render_ticker_strip(snap)
 
     # ── 2b. What matters today (CHF line + 3 bullets) ───────────────────────
     try:
@@ -6059,33 +6260,12 @@ else:
     # Research / Methodology so the reader lands on decisions, not on a
     # long list of tables. Every section below is wrapped in `with nav_X:`
     # blocks to route content to the correct tab.
-    nav_overview, nav_pi, nav_signals, nav_research, nav_meth = st.tabs([
+    nav_overview, nav_signals, nav_research, nav_meth = st.tabs([
         "📊 Overview",
-        "🎯 Portfolio Impact",
         "🔔 Signals",
         "📚 Research",
         "🛠 Methodology",
     ])
-
-    # ── Portfolio Impact placeholder ────────────────────────────────────────
-    # Requires a holdings + base-currency data model that this build does not
-    # yet have (audit high-value #3 — deferred pending schema decision).
-    with nav_pi:
-        st.markdown("### Portfolio Impact")
-        st.info(
-            "**Not yet configured.** A portfolio lens (base-currency P&L "
-            "contribution, largest exposure-driven risks, hedge impact, "
-            "allocation drift, liquidity, \"what changed since yesterday\") "
-            "requires the holdings, mandate and base-currency schema — none "
-            "of which are wired into this build. Once that data source is "
-            "connected this tab becomes the primary landing page."
-        )
-        st.caption(
-            "To enable, provide a portfolio CSV/JSON with columns "
-            "`ticker · quantity · currency · mandate` and a base currency "
-            "for the client, then a follow-up build plugs it into the "
-            "existing snapshot to compute P&L attribution and drift."
-        )
 
     with nav_meth:
         # Audit fix (Item 3): data provenance strip. Readers need to know provider,
@@ -6173,18 +6353,23 @@ else:
             else:
                 st.caption("No definitions available in the current snapshot.")
 
-    # ── 3. Narrative: news bullets + what matters + next events ──────────────
+    # ── Overview (2026-11-26 redesign): one screen, every number once ───────
+    #   status box (above tabs) → What matters → market table →
+    #   news (5) + Cyprus (3) | research + events (3 months) → More detail.
     with nav_overview:
+     st.markdown("##### Markets")
+     try:
+        render_market_table(snap)
+     except Exception as _e:
+        st.caption(f"Market table unavailable ({type(_e).__name__}: {_e}).")
+
+     st.markdown("<br>", unsafe_allow_html=True)
      col_news, col_right = st.columns([3, 2], gap="medium")
 
      with col_news:
-        # Audit fix (Item 8): the previous copy told the user to "enable Gemini"
-        # while there is no user-facing Gemini setting. Replace with a calm
-        # user-facing state so the fallback stays professionally usable.
-        gemini_tag = "" if status["gemini_used"] else " · *narrative summary unavailable — showing source headlines*"
-        st.markdown(f"**📰 What's Moving Markets**{gemini_tag}")
-        render_news_bullets(writing, st.session_state["news_df"])
-
+        gemini_tag = "" if status["gemini_used"] else " · *AI off — showing source headlines*"
+        st.markdown(f"##### 📰 What's moving markets{gemini_tag}")
+        render_news_bullets(writing, st.session_state["news_df"], limit=5)
         st.markdown("<br>", unsafe_allow_html=True)
         try:
             render_cyprus_news()
@@ -6192,76 +6377,63 @@ else:
             st.caption(f"Cyprus news unavailable ({type(_e).__name__}).")
 
      with col_right:
-        st.markdown("**📅 Upcoming Events**")
-        today = pd.Timestamp.today().normalize()
-        # Audit fix (Item 5): the audit flagged missing FOMC / ECB dates and a
-        # bogus "01 Jan" NFP. Broaden the horizon so users see multiple months
-        # of policy meetings at a glance, and expose the source status so any
-        # scrape failure is visible rather than silent.
-        try:
-            _events_source = fetch_macro_events_live()
-            _live_status = st.session_state.get("_macro_events_status", {})
-        except Exception:
-            _events_source = MACRO_EVENTS_FALLBACK
-            _live_status = {}
-        upcoming = [e for e in _events_source if pd.Timestamp(e["date"]) >= today][:10]
-        for ev in upcoming:
-            dt = pd.Timestamp(ev["date"])
-            days = (dt - today).days
-            day_label = "TODAY" if days == 0 else f"in {days}d"
-            # Audit fix (Item 5): expose the source when the fetcher tagged it.
-            _src = ev.get("source") or ev.get("category") or ""
-            _src_tag = (f"<span style='color:#94A3B8;font-size:10.5px;margin-left:6px;'>"
-                        f"· {_src}</span>") if _src else ""
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;padding:3px 0;"
-                f"border-bottom:1px solid #F0F4F8;font-size:12px;'>"
-                f"<span style='color:#0F2D52;'>{ev['event']}{_src_tag}</span>"
-                f"<span style='color:#64748B;white-space:nowrap;margin-left:8px;'>"
-                f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days==0 else '#475467'};'>{day_label}</b></span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        # Provenance line so it's obvious whether the calendar is live or
-        # falling back to the hardcoded list (audit Item 5 + Item 3).
-        _used = _live_status.get("sources_used") or []
-        _failed = _live_status.get("sources_failed") or []
-        if _used or _failed:
-            _bits = []
-            if _used:
-                _bits.append("sources: " + " · ".join(_used))
-            if _failed:
-                _bits.append(
-                    "<span style='color:#B45309;'>fallbacks: "
-                    + " · ".join(_failed) + "</span>"
-                )
-            st.markdown(
-                f"<div style='font-size:10.5px;color:#64748B;margin-top:6px;'>"
-                f"{' · '.join(_bits)}</div>",
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Prior / consensus columns require a paid economic-calendar feed "
-            "(Bloomberg, TradingEconomics, Investing.com API) and are not "
-            "included in this build."
-        )
-
+        render_research_block()
         st.markdown("<br>", unsafe_allow_html=True)
-        # Audit fix: institutional decision-support disclosure replaces the
-        # retail "consult a qualified financial adviser" language.
-        st.markdown(
-            "<div style='background:#F1F5F9;border:1px solid #CBD5E1;border-radius:8px;"
-            "padding:10px 12px;font-size:11px;color:#334155;line-height:1.55;'>"
-            "<b>Internal decision-support only.</b> Prices may be delayed or indicative and can "
-            "differ by venue. Returns are shown in local currency unless stated otherwise; "
-            "indices, ETF proxies, futures and yields are not directly comparable. AI-generated "
-            "text is clearly identified and may contain errors. Verify prices, events and "
-            "research against primary sources before trading. Model signals are analytical "
-            "outputs, not orders, suitability determinations or individualized investment "
-            "recommendations."
-            "</div>",
-            unsafe_allow_html=True,
-        )
+        render_events_block(months=3)
+
+     st.markdown("<br>", unsafe_allow_html=True)
+     with st.expander("➕ More detail — charts, bonds, data tables, PDF articles", expanded=False):
+        _md_tabs = st.tabs(["Charts", "Bonds", "Data tables", "Articles for PDF"])
+        with _md_tabs[0]:
+            _fig_main = st.session_state.get("fig")
+            _fig_rates = st.session_state.get("fig_rates")
+            _fig_alts  = st.session_state.get("fig_alts")
+            if _fig_main is not None:
+                if status["gemini_used"]:
+                    st.markdown(f"**{writing['headline']}**")
+                    st.caption(writing["subheadline"])
+                st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
+                _s = st.session_state.get("_sniper_backtest_stats")
+                _final = st.session_state.get("_sniper_backtest_final_pct")
+                if _s:
+                    st.caption(
+                        f"SNIPER as-if-traded (this chart window): {_s['n_trades']:,} trades · "
+                        f"hit rate {_s['hit_rate_pct']:.1f}% · mean trade "
+                        f"{_s['mean_trade_return_pct']:+.2f}% · total CHF PnL "
+                        f"{_s['total_pnl_chf']:+,.0f} · compounded {(_final or 0.0):+.2f}%"
+                    )
+            else:
+                st.info("No chart data — market data fetch may have failed.")
+            if _fig_rates is not None:
+                st.plotly_chart(_fig_rates, use_container_width=True, key="main_rates_chart")
+            if _fig_alts is not None:
+                st.markdown("**Bitcoin and WTI** (higher volatility, separate axis)")
+                st.plotly_chart(_fig_alts, use_container_width=True, key="main_alts_chart")
+            cotd = st.session_state.get("chart_of_day")
+            if cotd:
+                st.markdown(f"**📈 Chart of the Day — {cotd['label']}**")
+                render_chart_of_day(cotd, hist)
+        with _md_tabs[1]:
+            try:
+                render_bond_panel(hist, FRED_API_KEY)
+            except Exception as _e:
+                st.caption(f"Bond panel unavailable ({type(_e).__name__}: {_e}).")
+        with _md_tabs[2]:
+            for _lbl, _k, _h in (("Equities", "equities_df", 300), ("Rates", "rates_df", 180),
+                                 ("Commodities", "commodities_df", 260),
+                                 ("Bonds & crypto", "bonds_df", 260), ("FX", "fx_df", 220)):
+                _df = st.session_state.get(_k)
+                if _df is not None and not _df.empty:
+                    st.markdown(f"**{_lbl}**")
+                    st.dataframe(compact_table(_df), use_container_width=True, height=_h)
+        with _md_tabs[3]:
+            render_news_pdf_picker(st.session_state["news_df"])
+
+     st.caption(
+        "Internal decision-support only. Prices may be delayed; AI text is labelled and "
+        "may contain errors — verify against primary sources before acting. "
+        "Full notes in the Methodology tab."
+     )
 
     # ── 3b. Research Library — moved to Research tab ────────────────────────
     with nav_research:
@@ -6291,99 +6463,6 @@ else:
                     elif ctype == "fv":
                         st.markdown(f"📌 **FV CHANGE** {name}: {old} → **{new}** *(from {src})*")
         st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── 4-6. Overview lower half: main chart | Chart of Day, then FX + tables
-    # Cleanup pass: the earlier version split chart_col/cotd_col across two
-    # `with nav_overview:` blocks which broke Streamlit's column layout —
-    # `with cotd_col:` in the second block was orphaned. Consolidated here.
-    with nav_overview:
-     chart_col, cotd_col = st.columns([3, 2], gap="medium")
-
-     with chart_col:
-        # Audit fix (main-chart rebuild): render core-returns panel, then a
-        # bp-scaled rates panel below, then alternatives (BTC/WTI) in a
-        # collapsed expander so they don't compress the primary axis.
-        _fig_main = st.session_state.get("fig")
-        _fig_rates = st.session_state.get("fig_rates")
-        _fig_alts  = st.session_state.get("fig_alts")
-        if _fig_main is not None:
-            st.markdown(f"**{writing['headline']}**")
-            st.caption(writing["subheadline"])
-            st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
-            # SNIPER backtest summary caption right under the chart, using
-            # the stats stashed by build_sniper_equity_chf().
-            _s = st.session_state.get("_sniper_backtest_stats")
-            _final = st.session_state.get("_sniper_backtest_final_pct")
-            if _s:
-                st.markdown(
-                    "<div style='font-size:11.5px;color:#334155;padding:6px 8px 4px;"
-                    "background:#F1F5F9;border-radius:8px;border:1px solid #E2E8F0;'>"
-                    f"<b>SNIPER as-if-traded stats (in this chart window)</b> · "
-                    f"{_s['n_trades']:,} trades · "
-                    f"{_s['n_winners']:,} winners · {_s['n_losers']:,} losers · "
-                    f"hit rate <b>{_s['hit_rate_pct']:.1f}%</b> · "
-                    f"mean trade return <b>{_s['mean_trade_return_pct']:+.2f}%</b> · "
-                    f"median <b>{_s['median_trade_return_pct']:+.2f}%</b> · "
-                    f"total CHF PnL <b>{_s['total_pnl_chf']:+,.0f}</b> · "
-                    f"compounded rolling-book return <b>{(_final or 0.0):+.2f}%</b>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("No chart data — market data fetch may have failed.")
-        if _fig_rates is not None:
-            st.plotly_chart(_fig_rates, use_container_width=True, key="main_rates_chart")
-        if _fig_alts is not None:
-            with st.expander("Show alternatives (Bitcoin, WTI) — higher volatility, separate axis",
-                             expanded=False):
-                st.plotly_chart(_fig_alts, use_container_width=True, key="main_alts_chart")
-
-     with cotd_col:
-        cotd = st.session_state.get("chart_of_day")
-        cotd_label = cotd["label"] if cotd else "Chart of the Day"
-        st.markdown(f"**📈 Chart of the Day — {cotd_label}**")
-        render_chart_of_day(cotd, hist)
-
-     st.markdown("<br>", unsafe_allow_html=True)
-
-     # ── 5. FX section ─────────────────────────────────────────────────────
-     with st.expander("💱 FX & Commodities", expanded=True):
-        render_card_strip(snap, hist, FX_STRIP,
-                          "FX & Key Commodities",
-                          "EUR/USD · USD/CHF · EUR/CHF · DXY · Gold · Oil",
-                          "fx_section")
-
-     # ── 5b. CHF investor lens ─────────────────────────────────────────────
-     with st.expander("🇨🇭 CHF Investor Lens", expanded=True):
-        try:
-            render_chf_lens(snap)
-        except Exception as _e:
-            st.caption(f"CHF lens unavailable ({type(_e).__name__}: {_e}).")
-
-     # ── 5c. Bonds — yields and prices ─────────────────────────────────────
-     with st.expander("🏦 Bonds — Yields & Prices", expanded=True):
-        try:
-            render_bond_panel(hist, FRED_API_KEY)
-        except Exception as _e:
-            st.caption(f"Bond panel unavailable ({type(_e).__name__}: {_e}).")
-
-     # ── 6. Data tables ────────────────────────────────────────────────────
-     # Cleanup pass: removed the separate "📊 Equities & Asset Class Detail"
-     # card expander — it duplicated the data-tables view. Also removed the
-     # inline "Definitions" sub-tab; definitions now live in a single place
-     # (the sidebar checkbox "Show definitions" surfaces them in Overview).
-     with st.expander("📋 Full Data Tables", expanded=False):
-        _dt_tabs = st.tabs(["Equities", "Rates", "Commodities", "Bonds & Crypto", "History"])
-        with _dt_tabs[0]:
-            st.dataframe(compact_table(st.session_state["equities_df"]),   use_container_width=True, height=300)
-        with _dt_tabs[1]:
-            st.dataframe(compact_table(st.session_state["rates_df"]),      use_container_width=True, height=180)
-        with _dt_tabs[2]:
-            st.dataframe(compact_table(st.session_state["commodities_df"]),use_container_width=True, height=260)
-        with _dt_tabs[3]:
-            st.dataframe(compact_table(st.session_state.get("bonds_df", st.session_state["commodities_df"])), use_container_width=True, height=260)
-        with _dt_tabs[4]:
-            st.dataframe(st.session_state["history"], use_container_width=True, height=480)
 
     # Signals tab: SNIPER 4-way alignment + Macro Views (audit reorganization).
     with nav_signals:

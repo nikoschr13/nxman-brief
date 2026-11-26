@@ -72,21 +72,33 @@ IRAN_CEASEFIRE_DATE = get_secret("IRAN_CEASEFIRE_DATE", "2026-04-07")
 MARKETAUX_API_TOKEN = get_secret("MARKETAUX_API_TOKEN")
 FRED_API_KEY = get_secret("FRED_API_KEY")
 GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
-GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-2.5-flash")
-# Only include models that are CURRENTLY in Google's Gemini API. The 1.5
-# / 1.0 models were deprecated and return HTTP 404, which was previously
-# burning through the fallback chain before reaching Groq. Keep this list
-# current; if you override via secrets, only add models you've verified exist.
-GEMINI_FALLBACK_MODELS = [
-    m.strip()
-    for m in get_secret(
-        "GEMINI_FALLBACK_MODELS",
-        "gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite"
-    ).split(",")
-    if m.strip()
-]
+# AI models (updated 2026-11-26). Providers retire model names without much
+# notice: Groq shut down llama-3.3-70b-versatile / llama-3.1-8b-instant on
+# 2026-08-16, and Google steers new work to the Gemini 3.x Flash models.
+# Any model named in Streamlit secrets is tried FIRST, but the current
+# defaults are always appended, so an out-of-date secret can no longer
+# take the AI down on its own.
+_GEMINI_DEFAULTS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash",
+                    "gemini-2.5-flash"]
+_GROQ_DEFAULTS   = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+
+
+def _model_list(*groups):
+    out = []
+    for g in groups:
+        for m in (g or []):
+            m = (m or "").strip()
+            if m and m not in out:
+                out.append(m)
+    return out
+
+
+GEMINI_MODEL = get_secret("GEMINI_MODEL", _GEMINI_DEFAULTS[0])
+GEMINI_FALLBACK_MODELS = _model_list(
+    (get_secret("GEMINI_FALLBACK_MODELS", "") or "").split(","), _GEMINI_DEFAULTS)
 GROQ_API_KEY   = get_secret("GROQ_API_KEY")
-GROQ_MODEL     = get_secret("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL     = get_secret("GROQ_MODEL", _GROQ_DEFAULTS[0])
+GROQ_MODELS    = _model_list([GROQ_MODEL], _GROQ_DEFAULTS)
 MANUAL_BUND_10Y = get_secret("MANUAL_BUND_10Y")
 MANUAL_CH_10Y   = get_secret("MANUAL_CH_10Y")
 
@@ -2490,12 +2502,7 @@ def try_groq(payload_obj: dict):
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model":       GROQ_MODEL,
-            "messages":    [{"role": "user", "content": user_msg}],
-            "temperature": 0.2,
-            "max_tokens":  2048,
-        },
+        json=_groq_body(GROQ_MODEL, user_msg),
         timeout=60,
     )
     return r
@@ -2550,19 +2557,21 @@ def ai_generate_json(payload: str):
 
     # ── 2. Groq fallback ──────────────────────────────────────────────────────
     if GROQ_API_KEY:
-        try:
-            payload_obj = json.loads(payload)
-            r = try_groq(payload_obj)
-            if r.ok:
-                raw     = r.json()["choices"][0]["message"]["content"].strip()
-                cleaned = _strip_json_fences(raw)
-                return json.loads(cleaned), f"Groq OK ({GROQ_MODEL})"
-            else:
-                errors.append(f"Groq: HTTP {r.status_code}")
-        except Exception as e:
-            errors.append(f"Groq: {type(e).__name__}: {str(e)[:80]}")
+        for gm in GROQ_MODELS:
+            try:
+                payload_obj = json.loads(payload)
+                r = _try_groq_model(payload_obj, gm)
+                if r.ok:
+                    raw     = r.json()["choices"][0]["message"]["content"].strip()
+                    cleaned = _strip_json_fences(raw)
+                    return json.loads(cleaned), f"Groq OK ({gm})"
+                errors.append(f"Groq/{gm}: HTTP {r.status_code}")
+                if r.status_code in (401, 403):
+                    break
+            except Exception as e:
+                errors.append(f"Groq/{gm}: {type(e).__name__}: {str(e)[:80]}")
 
-    return None, "AI failed: " + " | ".join(errors[:6])
+    return None, "AI failed: " + " | ".join(errors[:8])
 
 
 def _ai_generate_json_uncached(payload: str):
@@ -2610,18 +2619,16 @@ def _ai_generate_json_uncached(payload: str):
                             break
                     else:
                         if r.status_code == 429:
-                            # Primary model quota-hit → skip the rest of Gemini,
-                            # go straight to Groq. We'd only burn time on more
-                            # 429s or on deprecated-model 404s.
-                            errors.append(f"Gemini/{model_name}: 429 quota → Groq")
-                            groq_shortcut = True
+                            # Quotas are per model: try the next Gemini model.
+                            errors.append(f"Gemini/{model_name}: 429 quota")
                             break
                         if r.status_code == 404:
-                            # Deprecated model. After 2 404s in a row, bail to Groq.
-                            errors.append(f"Gemini/{model_name}: 404")
-                            consecutive_404s += 1
-                            if consecutive_404s >= 2:
-                                groq_shortcut = True
+                            # Retired model name: try the next one.
+                            errors.append(f"Gemini/{model_name}: 404 (model retired?)")
+                            break
+                        if r.status_code in (400, 401, 403) and "API key" in (r.text or ""):
+                            errors.append(f"Gemini: API key rejected (HTTP {r.status_code})")
+                            groq_shortcut = True
                             break
                         if r.status_code in {500, 503} and attempt == 0:
                             time.sleep(3)
@@ -2639,9 +2646,7 @@ def _ai_generate_json_uncached(payload: str):
         # Try primary Groq model, then fall back to the small fast model if
         # the large one hits TPM / RPM limits. The small model has 10-20x
         # higher token budget on free tier, so it reliably absorbs overflow.
-        groq_models = [GROQ_MODEL]
-        if "llama-3.1-8b-instant" not in GROQ_MODEL:
-            groq_models.append("llama-3.1-8b-instant")
+        groq_models = GROQ_MODELS
 
         for gm in groq_models:
             try:
@@ -2657,13 +2662,23 @@ def _ai_generate_json_uncached(payload: str):
                         continue
                 else:
                     errors.append(f"Groq/{gm}: HTTP {r.status_code}")
-                    # On 429, keep trying the smaller model. On other errors, stop.
-                    if r.status_code != 429:
+                    # Try the next model on anything except a bad key.
+                    if r.status_code in (401, 403):
                         break
             except Exception as e:
                 errors.append(f"Groq/{gm}: {type(e).__name__}: {str(e)[:60]}")
 
     return None, "AI failed: " + " | ".join(errors[:8])
+
+
+def _groq_body(model_name: str, user_msg: str) -> dict:
+    body = {"model": model_name,
+            "messages": [{"role": "user", "content": user_msg}],
+            "temperature": 0.2, "max_tokens": 4096}
+    if "gpt-oss" in model_name:
+        # Reasoning model: keep thinking short so the answer fits.
+        body["reasoning_effort"] = "low"
+    return body
 
 
 def _try_groq_model(payload_obj: dict, model_name: str):
@@ -2688,12 +2703,7 @@ def _try_groq_model(payload_obj: dict, model_name: str):
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model":       model_name,
-            "messages":    [{"role": "user", "content": user_msg}],
-            "temperature": 0.2,
-            "max_tokens":  2048,
-        },
+        json=_groq_body(model_name, user_msg),
         timeout=60,
     )
 
@@ -3396,6 +3406,20 @@ def build_bundle():
                 s, _ = fetch_yf_series_with_fallback(MSCI_WORLD_TICKERS, "MSCI World")
             elif key == "msci_em":
                 s, _ = fetch_yf_series_with_fallback(MSCI_EM_TICKERS, "MSCI EM")
+            elif key == "sp500":
+                # ^GSPC sometimes comes back empty from Yahoo on Streamlit
+                # Cloud (the brief showed S&P 500 "N/A"). Retry once, then use
+                # FRED's official daily S&P 500 close (same index level).
+                s = None
+                for _attempt in range(2):
+                    try:
+                        s = fetch_yf_series(ticker)
+                        break
+                    except Exception:
+                        time.sleep(1)
+                if s is None:
+                    s = fetch_fred_series("SP500")
+                    s = s[s.index >= pd.Timestamp.today() - pd.Timedelta(days=400)]
             else:
                 s = fetch_yf_series(ticker)
             history_frames.append(pd.DataFrame({
@@ -4465,7 +4489,8 @@ def render_status_box(status, mode_note, as_of_disp=""):
     ok_c, warn_c, bad_c = "#16A34A", "#D97706", "#DC2626"
 
     if status.get("gemini_used"):
-        ai = (ok_c, "✅ AI working")
+        ai = (ok_c, "✅ AI working" + (" (AI text added after the 08:00 snapshot — it had failed earlier)"
+                                       if status.get("ai_added_after_snapshot") else ""))
     else:
         why = str(status.get("gemini_reason") or (
             "no Gemini API key configured" if not GEMINI_API_KEY else
@@ -4474,7 +4499,7 @@ def render_status_box(status, mode_note, as_of_disp=""):
         why = why.replace("AI failed:", "").strip()[:140] or (
             "no Gemini API key configured" if not GEMINI_API_KEY else
             "no reason reported — see Methodology › Operator diagnostics")
-        ai = (bad_c, f"❌ AI NOT working — {why}")
+        ai = (bad_c, f"❌ AI NOT working (retried just now) — {why}")
     news = ((ok_c, f"✅ News live · {status.get('article_count', 0)} articles")
             if status.get("live_news") else
             (warn_c, f"⚠️ News not live — {str(status.get('news_reason') or '')[:80]}"))
@@ -4506,7 +4531,8 @@ def render_research_block():
     banks = themes.get("banks") or []
     st.markdown("##### 📚 Research")
     if banks:
-        st.caption("AI summary of the documents you loaded — check the source before acting.")
+        st.caption("Summaries written by the AI (Gemini/Groq) from the documents you loaded "
+                   "— check the source before acting.")
         for b in banks:
             items = b.get("items") or [{"key_message": x, "portfolio_implication": ""}
                                          for x in (b.get("bullets") or [])]
@@ -5645,6 +5671,39 @@ def _fig_to_png(fig, width, height, scale=1.5):
             return None
 
 
+def retry_ai_writing(saved_base, use_gemini_flag):
+    """Morning snapshot built without AI text (AI was down at 08:00)?
+    Retry the AI on the SAME frozen numbers and news, so the brief is not
+    stuck without AI for the rest of the day. Market data is unchanged.
+    Returns True if the AI text was added (caller re-saves the snapshot)."""
+    st_ = saved_base.get("status") or {}
+    if st_.get("gemini_used") or not use_gemini_flag:
+        return False
+    snap = saved_base.get("snapshot")
+    news_df = saved_base.get("news_df")
+    if snap is None or news_df is None:
+        return False
+    research_context = get_research_context(st.session_state.get("research_docs", {}))
+    writing, gstat = build_writing(news_df, snap, use_gemini_flag, research_context)
+    st.session_state["_ai_retry_result"] = gstat.get("reason", "")
+    if not gstat.get("gemini_used"):
+        st_["gemini_reason"] = gstat.get("reason") or st_.get("gemini_reason")
+        saved_base["status"] = st_
+        return False
+    angles = writing.pop("article_angles", [])
+    if angles and not news_df.empty:
+        amap = {a.get("headline", ""): a.get("angle", "") for a in angles if isinstance(a, dict)}
+        news_df = news_df.copy()
+        news_df["gemini_angle"] = news_df["headline"].map(amap).fillna("")
+        saved_base["news_df"] = news_df
+    saved_base["writing"] = writing
+    st_["gemini_used"] = True
+    st_["gemini_reason"] = gstat.get("reason", "")
+    st_["ai_added_after_snapshot"] = True
+    saved_base["status"] = st_
+    return True
+
+
 def refresh_research(base_state):
     """Make sure the research summaries match the documents loaded NOW.
 
@@ -6171,10 +6230,16 @@ if generate:
         saved_base = load_snapshot(today_str)
         if saved_base is not None:
             saved_base["include_crypto_flag"] = include_crypto
+            try:
+                if retry_ai_writing(saved_base, use_gemini_writing):
+                    save_snapshot(saved_base, today_str)
+            except Exception as _aie:
+                st.session_state["_ai_retry_result"] = f"retry failed: {type(_aie).__name__}"
             state = add_render_outputs(saved_base, chart_window)
             st.session_state.update(state)
             requested_note = "ON" if use_gemini_writing else "OFF"
-            snap_note = "ON" if state["status"].get("gemini_used") else "OFF"
+            snap_note = ("added on retry" if state["status"].get("ai_added_after_snapshot")
+                         else "ON" if state["status"].get("gemini_used") else "OFF")
             st.session_state["snapshot_mode_note"] = (
                 f"Morning snapshot mode | frozen snapshot for {today_str} | "
                 f"Gemini requested: {requested_note} | in snapshot: {snap_note}"

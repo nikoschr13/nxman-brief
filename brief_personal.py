@@ -620,6 +620,9 @@ def build_market_table(snapshot: pd.DataFrame) -> list[tuple[str, list[dict]]]:
             r = _snap_row(snapshot, key)
             level = None if r is None else _num(r.get("level"))
             if level is None:
+                # Show the gap instead of silently dropping the row.
+                rows.append({"label": label, "kind": kind, "level": None,
+                             "d1": None, "wtd": None, "ytd": None, "ytd_chf": None})
                 continue
             d1, wtd, ytd = (_num(r.get(c)) for c in ("d1", "wtd", "ytd"))
             row = {"label": label, "kind": kind, "level": level}
@@ -656,6 +659,8 @@ def render_market_table(snapshot: pd.DataFrame):
 
     def level_txt(r):
         v = r["level"]
+        if v is None:
+            return "<span style='color:#DC2626;'>unavailable</span>"
         if r["kind"] == "yld":
             return f"{v:.2f}%"
         if r["kind"] == "fx":

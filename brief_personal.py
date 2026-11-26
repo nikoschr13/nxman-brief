@@ -180,7 +180,7 @@ def _colour(v, up_good=True):
 CHF_LENS_ASSETS = [
     ("smi",          "SMI",                "CHF"),
     ("msci_world",   "MSCI World",         "USD"),
-    ("sp500",        "S&P 500",            "USD"),
+    ("sp500",        "S&P 500 (SPY)",      "USD"),
     ("nasdaq100",    "Nasdaq 100",         "USD"),
     ("stoxx600",     "Stoxx Europe 600",   "EUR"),
     ("global_bonds", "Global Bonds (ETF)", "USD"),
@@ -481,17 +481,17 @@ def render_what_matters_today(writing: dict, snapshot: pd.DataFrame, history: pd
         lead = ""
         tag = "computed from today's data"
 
-    items = "".join(f"<li style='margin:2px 0;'>{b}</li>" for b in bullets)
+    items = "".join(f"<li style='margin:1px 0;'>{b}</li>" for b in bullets)
     st.markdown(
-        "<div style='background:#F8FAFC;border:1px solid #CBD5E1;border-left:5px solid #0F2D52;"
-        "border-radius:10px;padding:10px 14px;margin:4px 0 12px;'>"
+        "<div style='background:#FFFFFF;border:1px solid #CBD5E1;border-left:4px solid #0F2D52;"
+        "border-radius:8px;padding:5px 10px;margin:0 0 6px;'>"
         "<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;'>"
-        "<span style='font-size:13px;font-weight:800;color:#0F2D52;letter-spacing:.3px;'>"
+        "<span style='font-size:11px;font-weight:800;color:#0F2D52;letter-spacing:.5px;'>"
         "WHAT MATTERS TODAY</span>"
         "</div>"
-        + (f"<div style='font-size:13px;color:#1E293B;margin-top:6px;'>{lead}</div>" if lead else "")
-        + f"<ul style='font-size:13px;color:#1E293B;margin:6px 0 2px 18px;padding:0;'>{items}</ul>"
-        f"<div style='font-size:10.5px;color:#94A3B8;'>{tag}</div></div>",
+        + (f"<div style='font-size:12px;color:#1E293B;margin-top:2px;'>{lead}</div>" if lead else "")
+        + f"<ul style='font-size:12px;line-height:1.3;color:#1E293B;margin:2px 0 0 16px;padding:0;'>{items}</ul>"
+        f"<div style='font-size:9.5px;color:#94A3B8;'>{tag}</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -557,22 +557,23 @@ def load_cyprus_news(max_items: int = 3, lookback_hours: int = 48) -> tuple[pd.D
 
 
 def render_cyprus_news():
-    st.markdown("**🇨🇾 Cyprus — business & economy**")
     df, used = load_cyprus_news()
+    head = ("<div style='font-size:11px;font-weight:800;color:#0F2D52;letter-spacing:.5px;"
+            "margin:6px 0 2px;'>🇨🇾 CYPRUS — BUSINESS</div>")
     if df.empty:
-        st.caption("No Cyprus business headlines in the last 48h (or feeds unreachable).")
+        st.markdown(head + "<div style='font-size:11px;color:#94A3B8;'>No Cyprus business "
+                    "headlines in the last 48h (or feeds unreachable).</div>", unsafe_allow_html=True)
         return
+    lines = []
     for _, r in df.iterrows():
         when = (pd.Timestamp(r["published"]).tz_convert("Europe/Zurich").strftime("%d %b %H:%M")
                 if pd.notna(r["published"]) else "")
-        st.markdown(
-            f"<div style='font-size:12.5px;padding:3px 0;border-bottom:1px solid #F0F4F8;'>"
-            f"<a href='{r['url']}' target='_blank' style='color:#0F2D52;text-decoration:none;'>"
-            f"{r['headline']}</a> <span style='color:#94A3B8;font-size:10.5px;'>"
-            f"· {r['source']} · {when}</span></div>",
-            unsafe_allow_html=True,
-        )
-    st.caption("Sources: " + ", ".join(dict.fromkeys(used)))
+        lines.append(
+            f"<li style='margin:1px 0;'><a href='{r['url']}' target='_blank' "
+            f"style='color:#0F172A;text-decoration:none;'>{r['headline']}</a> "
+            f"<span style='color:#94A3B8;font-size:10px;'>{r['source']} · {when}</span></li>")
+    st.markdown(head + "<ul style='font-size:12px;line-height:1.3;margin:0 0 0 16px;padding:0;'>"
+                + "".join(lines) + "</ul>", unsafe_allow_html=True)
 
 
 # ── One market table (replaces ticker strip, FX cards and CHF lens) ──────────
@@ -582,7 +583,7 @@ MARKET_TABLE = [
     ("Equities", [
         ("smi",        "SMI",              "px",  "CHF"),
         ("stoxx600",   "Stoxx Europe 600", "px",  "EUR"),
-        ("sp500",      "S&P 500",          "px",  "USD"),
+        ("sp500",      "S&P 500 (SPY)",    "px",  "USD"),
         ("nasdaq100",  "Nasdaq 100",       "px",  "USD"),
         ("msci_world", "MSCI World",       "px",  "USD"),
     ]),
@@ -650,12 +651,12 @@ def render_market_table(snapshot: pd.DataFrame):
 
     def cell(v, kind):
         if v is None or pd.isna(v):
-            return "<td style='text-align:right;color:#94A3B8;'>–</td>"
+            return "<td style='text-align:right;padding:1px 5px;color:#94A3B8;'>–</td>"
         if kind == "yld":
             txt, col = f"{v:+.0f} bp", _colour(v, up_good=False)
         else:
             txt, col = f"{v:+.2f}%", _colour(v)
-        return f"<td style='text-align:right;color:{col};font-weight:600;'>{txt}</td>"
+        return f"<td style='text-align:right;padding:1px 5px;color:{col};font-weight:600;white-space:nowrap;'>{txt}</td>"
 
     def level_txt(r):
         v = r["level"]
@@ -667,29 +668,27 @@ def render_market_table(snapshot: pd.DataFrame):
             return f"{v:.4f}"
         return f"{v:,.2f}" if v < 1000 else f"{v:,.0f}"
 
-    th = ("style='text-align:right;padding:4px 8px;font-weight:600;color:#475569;"
-          "border-bottom:2px solid #CBD5E1;'")
-    html = ["<table style='width:100%;border-collapse:collapse;font-size:13px;'>",
-            "<tr><th style='text-align:left;padding:4px 8px;color:#475569;"
-            "border-bottom:2px solid #CBD5E1;'></th>"
-            f"<th {th}>Level</th><th {th}>1 day</th><th {th}>Week to date</th>"
-            f"<th {th}>Year to date</th><th {th}>YTD in CHF</th></tr>"]
+    th = ("style='text-align:right;padding:2px 5px;font-weight:600;color:#475569;"
+          "border-bottom:1.5px solid #CBD5E1;white-space:nowrap;'")
+    html = ["<table style='width:100%;border-collapse:collapse;font-size:12px;line-height:1.25;'>",
+            "<tr><th style='text-align:left;padding:2px 5px;border-bottom:1.5px solid #CBD5E1;'></th>"
+            f"<th {th}>Level</th><th {th}>1D</th><th {th}>WTD</th>"
+            f"<th {th}>YTD</th><th {th}>YTD CHF</th></tr>"]
     for group, rows in groups:
-        html.append(f"<tr><td colspan='6' style='padding:8px 8px 2px;font-size:11px;"
-                    f"font-weight:800;color:#0F2D52;letter-spacing:.4px;'>{group.upper()}</td></tr>")
+        html.append(f"<tr><td colspan='6' style='padding:4px 5px 0;font-size:9.5px;"
+                    f"font-weight:800;color:#64748B;letter-spacing:.5px;'>{group.upper()}</td></tr>")
         for r in rows:
             html.append(
                 "<tr style='border-bottom:1px solid #EEF2F6;'>"
-                f"<td style='padding:3px 8px;color:#0F172A;'>{r['label']}</td>"
-                f"<td style='text-align:right;padding:3px 8px;color:#0F172A;'>{level_txt(r)}</td>"
+                f"<td style='padding:1px 5px;color:#0F172A;white-space:nowrap;'>{r['label']}</td>"
+                f"<td style='text-align:right;padding:1px 5px;color:#0F172A;'>{level_txt(r)}</td>"
                 + cell(r["d1"], r["kind"]) + cell(r["wtd"], r["kind"])
                 + cell(r["ytd"], r["kind"])
                 + (cell(r["ytd_chf"], "px") if r["kind"] == "px" else
-                   "<td style='text-align:right;color:#94A3B8;'>–</td>")
+                   "<td style='text-align:right;padding:1px 5px;color:#94A3B8;'>–</td>")
                 + "</tr>")
     html.append("</table>")
     st.markdown("".join(html), unsafe_allow_html=True)
-    st.caption("Price returns in each market's own currency. 'YTD in CHF' = what a "
-               "Swiss-franc investor got, unhedged. Yield changes in basis points "
-               "(yield up = bond prices down). Swiss 10Y is published by the SNB "
-               "once a month, so it lags.")
+    st.markdown("<div style='font-size:10px;color:#94A3B8;margin-top:2px;'>Local-currency price "
+                "returns · YTD CHF = unhedged return for a CHF investor · yields in bp · "
+                "CH 10Y is the SNB monthly release</div>", unsafe_allow_html=True)

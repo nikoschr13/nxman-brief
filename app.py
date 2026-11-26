@@ -112,9 +112,9 @@ GMAIL_EMAIL        = get_secret("GMAIL_EMAIL")
 GMAIL_APP_PASSWORD = get_secret("GMAIL_APP_PASSWORD")
 
 ASSETS = [
-    ("equities", "sp500",      "S&P 500",
-     "Index of 500 large US companies. When it goes UP, US equity prices are rising — good for stock holders. When it goes DOWN, US stocks are losing value.",
-     "^GSPC", True),
+    ("equities", "sp500",      "S&P 500 (SPY)",
+     "SPY — the ETF that tracks the S&P 500 index of 500 large US companies. Price is the ETF's (about 1/10 of the index level); daily and YTD moves track the index. When it goes UP, US equity prices are rising.",
+     "SPY", True),
     ("equities", "nasdaq100",  "Nasdaq 100",
      "Index of the 100 largest non-financial Nasdaq companies, heavily weighted to tech. When UP, tech and growth stocks are gaining. A bigger move than S&P 500 usually signals risk-on sentiment.",
      "^NDX", True),
@@ -193,7 +193,7 @@ RATES = [
 ]
 
 INDICATOR_STRIP = [
-    {"type": "asset", "key": "sp500",     "label": "S&P 500"},
+    {"type": "asset", "key": "sp500",     "label": "S&P 500 (SPY)"},
     {"type": "asset", "key": "nasdaq100", "label": "Nasdaq 100"},
     {"type": "asset", "key": "stoxx600",  "label": "Stoxx Europe 600"},
     {"type": "asset", "key": "msci_world","label": "MSCI World"},
@@ -672,10 +672,15 @@ st.markdown(
 .block-container { padding-top: 0.6rem !important; padding-left: 1rem !important;
                    padding-right: 1rem !important; max-width: 100% !important; }
 .hero { background: linear-gradient(90deg, #103B73, #1E88E5); color: white;
-        padding: 14px 18px; border-radius: 14px; margin-bottom: 10px;
+        padding: 6px 14px; border-radius: 10px; margin-bottom: 4px;
         box-shadow: 0 4px 14px rgba(16,59,115,.14); }
-.hero h1 { margin: 0; font-size: clamp(16px, 4vw, 22px); }
+.hero h1 { margin: 0; font-size: clamp(15px, 3vw, 18px); }
+section.main div[data-testid="stVerticalBlock"] { gap: 0.35rem; }
+header[data-testid="stHeader"] { background: transparent !important; height: 2rem !important; }
+.stMarkdown table td, .stMarkdown table th { border-left: none !important; border-right: none !important; }
+div[data-testid="stTabs"] button { padding-top: 2px !important; padding-bottom: 2px !important; }
 .hero-sub { opacity: .85; margin-top: 3px; font-size: clamp(11px, 2.5vw, 13px); }
+.hero h1 { display: inline; } .hero .hero-sub { display: inline; margin-left: 10px; }
 .section-card { background: white; border-radius: 14px; padding: 12px 14px;
                 box-shadow: 0 3px 12px rgba(16,59,115,.07); margin-bottom: 8px; }
 /* ── Sidebar: compact, no excess whitespace ── */
@@ -3407,19 +3412,14 @@ def build_bundle():
             elif key == "msci_em":
                 s, _ = fetch_yf_series_with_fallback(MSCI_EM_TICKERS, "MSCI EM")
             elif key == "sp500":
-                # ^GSPC sometimes comes back empty from Yahoo on Streamlit
-                # Cloud (the brief showed S&P 500 "N/A"). Retry once, then use
-                # FRED's official daily S&P 500 close (same index level).
-                s = None
-                for _attempt in range(2):
-                    try:
-                        s = fetch_yf_series(ticker)
-                        break
-                    except Exception:
-                        time.sleep(1)
-                if s is None:
-                    s = fetch_fred_series("SP500")
-                    s = s[s.index >= pd.Timestamp.today() - pd.Timedelta(days=400)]
+                # SPY ETF (Nikos's choice, 2026-11-26): ^GSPC came back empty
+                # from Yahoo on Streamlit Cloud. One retry, no index fallback,
+                # so the level never silently switches scale.
+                try:
+                    s = fetch_yf_series(ticker)
+                except Exception:
+                    time.sleep(1)
+                    s = fetch_yf_series(ticker)
             else:
                 s = fetch_yf_series(ticker)
             history_frames.append(pd.DataFrame({
@@ -4333,7 +4333,7 @@ def render_combined_card(item, snapshot_row, history, chart_key):
 def render_ticker_strip(snapshot):
     """One-line compact ticker: name + value + coloured daily change for 10 key instruments."""
     KEYS = [
-        ("sp500",     "S&P 500",   "asset"),
+        ("sp500",     "S&P 500 (SPY)", "asset"),
         ("nasdaq100", "Nasdaq",    "asset"),
         ("stoxx600",  "Stoxx 600", "asset"),
         ("smi",       "SMI",       "asset"),
@@ -4513,62 +4513,58 @@ def render_status_box(status, mode_note, as_of_disp=""):
     else:
         res = (bad_c, f"❌ Research: {rs.get('message') or 'status unknown'}")
 
-    items = "".join(
-        f"<div style='color:{c};font-weight:700;'>{t}</div>" for c, t in (ai, news, res))
+    items = " &nbsp;│&nbsp; ".join(
+        f"<span style='color:{c};font-weight:700;'>{t}</span>" for c, t in (ai, news, res))
     foot = " · ".join(x for x in [mode_note.replace("|", "·"), (f"as of {as_of_disp}" if as_of_disp else "")] if x)
     st.markdown(
-        "<div style='border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;"
-        "margin:2px 0 8px;font-size:12.5px;line-height:1.6;background:#FFFFFF;'>"
-        f"{items}<div style='color:#64748B;font-size:11px;'>{foot}</div></div>",
+        "<div style='border:1px solid #E2E8F0;border-radius:6px;padding:3px 10px;"
+        "margin:0 0 4px;font-size:11.5px;line-height:1.45;background:#FFFFFF;'>"
+        f"{items}<span style='color:#94A3B8;font-size:10px;'> &nbsp;│&nbsp; {foot}</span></div>",
         unsafe_allow_html=True,
     )
 
 
+def _section_label(text):
+    st.markdown(f"<div style='font-size:11px;font-weight:800;color:#0F2D52;letter-spacing:.5px;"
+                f"margin:2px 0 2px;'>{text}</div>", unsafe_allow_html=True)
+
+
 def render_research_block():
-    """Research summaries on the Overview, or a clear reason why there are none."""
+    """Research summaries, or a clear reason why there are none (compact)."""
     rs = st.session_state.get("research_state") or {}
     themes = st.session_state.get("research_themes_live") or {}
     banks = themes.get("banks") or []
-    st.markdown("##### 📚 Research")
+    _section_label("📚 RESEARCH")
     if banks:
-        st.caption("Summaries written by the AI (Gemini/Groq) from the documents you loaded "
-                   "— check the source before acting.")
+        parts = []
         for b in banks:
             items = b.get("items") or [{"key_message": x, "portfolio_implication": ""}
                                          for x in (b.get("bullets") or [])]
-            lines = "".join(
-                f"<li style='margin:2px 0;'>{it.get('key_message','')}"
-                + (f"<br><span style='color:#64748B;font-size:11.5px;'>→ "
-                   f"{it.get('portfolio_implication')}</span>"
-                   if it.get("portfolio_implication") else "")
-                + "</li>" for it in items[:4])
-            st.markdown(
-                f"<div style='font-size:12.5px;margin:4px 0 8px;'><b style='color:#0F2D52;'>"
-                f"{b.get('bank','')}</b><ul style='margin:2px 0 0 16px;padding:0;'>{lines}</ul></div>",
-                unsafe_allow_html=True)
-    state = rs.get("state")
-    if not banks:
+            lis = "".join(f"<li style='margin:1px 0;'>{it.get('key_message','')}</li>"
+                          for it in items[:3])
+            parts.append(f"<div style='margin:0 0 4px;'><b style='color:#0F2D52;'>{b.get('bank','')}</b>"
+                         f"<ul style='margin:0 0 0 15px;padding:0;'>{lis}</ul></div>")
+        st.markdown("<div style='font-size:11.5px;line-height:1.3;'>" + "".join(parts)
+                    + "<div style='font-size:9.5px;color:#94A3B8;'>Written by the AI from your "
+                    "documents — check the source before acting.</div></div>",
+                    unsafe_allow_html=True)
+    else:
         msg = rs.get("message") or "research status unknown"
-        if state == "none":
-            st.info(f"No research included today: {msg}. Upload PDFs in the sidebar "
-                    "(or put them in the Drive inbox), then press **Generate Brief**.")
-        else:
-            st.error(f"Research not included: {msg}.")
+        colour = "#D97706" if rs.get("state") == "none" else "#DC2626"
+        hint = (" Upload PDFs in the sidebar or the Drive inbox, then press Generate Brief."
+                if rs.get("state") == "none" else "")
+        st.markdown(f"<div style='font-size:11.5px;color:{colour};font-weight:600;'>"
+                    f"Not included: {msg}.{hint}</div>", unsafe_allow_html=True)
     problems = [n for n in (rs.get("notes") or []) if "ok" not in str(n)]
     errs = list((rs.get("parse_errors") or {}).items()) + list((rs.get("drive_failed") or {}).items())
     if problems or errs:
-        with st.expander(f"Research problems ({len(problems) + len(errs)})", expanded=not banks):
-            for n in problems:
-                st.caption(f"• {n}")
-            for name, err in errs:
-                st.caption(f"• {name[:50]} — could not be read ({str(err)[:90]})")
-    if rs.get("docs"):
-        st.caption(f"Loaded: {len(rs['docs'])} document(s) · summarised sources: "
-                   + (", ".join(rs.get("summarised") or []) or "none"))
+        lines = [f"• {n}" for n in problems] + [f"• {n[:40]} — unreadable ({str(e)[:60]})" for n, e in errs]
+        st.markdown("<div style='font-size:10.5px;color:#DC2626;'>Problems:<br>"
+                    + "<br>".join(lines) + "</div>", unsafe_allow_html=True)
 
 
 def render_events_block(months=3):
-    st.markdown(f"##### 📅 Events — next {months} months")
+    _section_label(f"📅 EVENTS — NEXT {months} MONTHS")
     today = pd.Timestamp.today().normalize()
     horizon = today + pd.DateOffset(months=months)
     try:
@@ -4577,65 +4573,57 @@ def render_events_block(months=3):
     except Exception:
         _events_source = MACRO_EVENTS_FALLBACK
         _live_status = {}
-    upcoming = [e for e in _events_source
-                if today <= pd.Timestamp(e["date"]) <= horizon]
-    upcoming.sort(key=lambda e: pd.Timestamp(e["date"]))
+    upcoming = sorted([e for e in _events_source if today <= pd.Timestamp(e["date"]) <= horizon],
+                      key=lambda e: pd.Timestamp(e["date"]))
     if not upcoming:
-        st.caption("No events found in this window.")
-    for ev in upcoming[:25]:
+        st.markdown("<div style='font-size:11px;color:#94A3B8;'>No events found in this window.</div>",
+                    unsafe_allow_html=True)
+    rows = []
+    for ev in upcoming[:30]:
         dt = pd.Timestamp(ev["date"])
         days = (dt - today).days
-        day_label = "TODAY" if days == 0 else f"in {days}d"
-        _src = ev.get("source") or ev.get("category") or ""
-        _src_tag = (f"<span style='color:#94A3B8;font-size:10.5px;margin-left:6px;'>"
-                    f"· {_src}</span>") if _src else ""
-        st.markdown(
-            f"<div style='display:flex;justify-content:space-between;padding:3px 0;"
-            f"border-bottom:1px solid #F0F4F8;font-size:12px;'>"
-            f"<span style='color:#0F2D52;'>{ev['event']}{_src_tag}</span>"
-            f"<span style='color:#64748B;white-space:nowrap;margin-left:8px;'>"
-            f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days==0 else '#475467'};'>{day_label}</b></span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        day_label = "TODAY" if days == 0 else f"{days}d"
+        rows.append(
+            "<tr style='border-bottom:1px solid #F0F4F8;'>"
+            f"<td style='padding:1px 4px 1px 0;color:#0F172A;'>{ev['event']}</td>"
+            f"<td style='padding:1px 0;color:#64748B;text-align:right;white-space:nowrap;'>"
+            f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days == 0 else '#475467'};'>{day_label}</b></td></tr>")
+    if rows:
+        st.markdown("<table style='width:100%;border-collapse:collapse;font-size:11.5px;line-height:1.25;'>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
     _failed = _live_status.get("sources_failed") or []
     if _failed:
-        st.caption("⚠️ Calendar sources that failed (using built-in dates instead): "
-                   + " · ".join(_failed))
+        st.markdown("<div style='font-size:10px;color:#D97706;'>Calendar sources failed (built-in "
+                    "dates used): " + " · ".join(_failed) + "</div>", unsafe_allow_html=True)
 
 
 def render_news_bullets(writing, news_df, limit=5):
-    """AI bullets (or raw headlines when AI is off), capped at `limit`."""
+    """AI bullets (or raw headlines when AI is off), capped at `limit`, compact."""
     bullets = (writing.get("news_bullets") or [])[:limit]
-
+    lines = []
     if bullets:
         for b in bullets:
             match = _match_bullet_to_article(b, news_df)
+            link = ""
             if match and match.get("url"):
-                src = match.get("source","") or ""
-                pub = match.get("published_at","") or ""
-                dt_str = ""
-                if pub:
-                    try: dt_str = pd.Timestamp(pub).strftime("%d %b")
-                    except Exception: pass
-                meta = " · ".join([x for x in [src, dt_str] if x])
-                link = f" <a href='{match['url']}' target='_blank' style='font-size:11px;color:#1E88E5;text-decoration:none;'>↗ {meta}</a>" if meta else f" <a href='{match['url']}' target='_blank' style='font-size:11px;color:#1E88E5;'>↗</a>"
-                st.markdown(f"- {b}{link}", unsafe_allow_html=True)
-            else:
-                st.markdown(f"- {b}")
-    else:
-        if news_df is None or news_df.empty:
-            st.caption("No news available.")
-            return
+                src = match.get("source", "") or ""
+                link = (f" <a href='{match['url']}' target='_blank' style='font-size:10px;"
+                        f"color:#1E88E5;text-decoration:none;'>↗ {src}</a>")
+            lines.append(f"<li style='margin:1px 0;'>{b}{link}</li>")
+    elif news_df is not None and not news_df.empty:
         for _, r in news_df.head(limit).iterrows():
-            headline = r.get("headline","")
-            url = r.get("url","")
-            src = r.get("source","") or ""
+            url, src = r.get("url", ""), r.get("source", "") or ""
             # No keyword category prefix: it mislabelled stories (e.g. an
             # airline order tagged "Macro / Rates"). Show the source instead.
-            link = (f" <a href='{url}' target='_blank' style='font-size:11px;color:#1E88E5;"
-                    f"text-decoration:none;'>↗ {src}</a>") if url else (f" · {src}" if src else "")
-            st.markdown(f"- {headline}{link}", unsafe_allow_html=True)
+            link = (f" <a href='{url}' target='_blank' style='font-size:10px;color:#1E88E5;"
+                    f"text-decoration:none;'>↗ {src}</a>") if url else ""
+            lines.append(f"<li style='margin:1px 0;'>{r.get('headline','')}{link}</li>")
+    if not lines:
+        st.markdown("<div style='font-size:11px;color:#94A3B8;'>No news available.</div>",
+                    unsafe_allow_html=True)
+        return
+    st.markdown("<ul style='font-size:12px;line-height:1.3;margin:0 0 0 16px;padding:0;'>"
+                + "".join(lines) + "</ul>", unsafe_allow_html=True)
 
 def render_news_pdf_picker(news_df):
     """Tick which source articles go into the PDF news table."""
@@ -5834,7 +5822,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
         alt_keys  = ["bitcoin", "wti"]
         short_labels = {
             "msci_world":   "World",
-            "sp500":        "S&P 500",
+            "sp500":        "S&P 500 (SPY)",
             "stoxx600":     "Europe 600",
             "global_bonds": "Global Bonds",
             "gold":         "Gold",
@@ -6007,7 +5995,7 @@ def add_render_outputs(base_state, chart_window="YTD"):
             pdf_df = pdf_df.copy()
             pdf_short_labels = {
                 "msci_world": "World",
-                "sp500": "S&P 500",
+                "sp500": "S&P 500 (SPY)",
                 "stoxx600": "Europe 600",
                 "gold": "Gold",
                 "wti": "WTI",
@@ -6314,11 +6302,6 @@ else:
     # that used to sit here; the same content is now surfaced once inside the
     # Methodology tab under "Operator diagnostics — AI provider raw status".
 
-    # ── 2b. What matters today (CHF line + 3 bullets) ───────────────────────
-    try:
-        render_what_matters_today(writing, snap, hist)
-    except Exception as _e:
-        st.caption(f"What-matters block unavailable ({type(_e).__name__}).")
 
     # ── Audit fix: Navigation reorganization (5-tab layout) ─────────────────
     # Grouping the linear scroll into Overview / Portfolio Impact / Signals /
@@ -6422,31 +6405,37 @@ else:
     #   status box (above tabs) → What matters → market table →
     #   news (5) + Cyprus (3) | research + events (3 months) → More detail.
     with nav_overview:
-     st.markdown("##### Markets")
-     try:
-        render_market_table(snap)
-     except Exception as _e:
-        st.caption(f"Market table unavailable ({type(_e).__name__}: {_e}).")
-
-     st.markdown("<br>", unsafe_allow_html=True)
-     col_news, col_right = st.columns([3, 2], gap="medium")
-
-     with col_news:
-        gemini_tag = "" if status["gemini_used"] else " · *AI off — showing source headlines*"
-        st.markdown(f"##### 📰 What's moving markets{gemini_tag}")
+     # Compact one-screen layout (2026-11-26):
+     #   [What matters + Markets] | [News + Cyprus] | [Research + Events]
+     col_a, col_b, col_c = st.columns([5, 4, 3], gap="small")
+     with col_a:
+        try:
+            render_what_matters_today(writing, snap, hist)
+        except Exception as _e:
+            st.caption(f"What-matters block unavailable ({type(_e).__name__}).")
+        _section_label("MARKETS")
+        try:
+            render_market_table(snap)
+        except Exception as _e:
+            st.caption(f"Market table unavailable ({type(_e).__name__}: {_e}).")
+     with col_b:
+        _ai_off = "" if status["gemini_used"] else " <span style='color:#D97706;font-weight:600;'>· AI off — raw headlines</span>"
+        st.markdown("<div style='font-size:11px;font-weight:800;color:#0F2D52;letter-spacing:.5px;"
+                    f"margin:2px 0;'>📰 WHAT'S MOVING MARKETS{_ai_off}</div>", unsafe_allow_html=True)
         render_news_bullets(writing, st.session_state["news_df"], limit=5)
-        st.markdown("<br>", unsafe_allow_html=True)
         try:
             render_cyprus_news()
         except Exception as _e:
             st.caption(f"Cyprus news unavailable ({type(_e).__name__}).")
-
-     with col_right:
-        render_research_block()
-        st.markdown("<br>", unsafe_allow_html=True)
+     with col_c:
+        _n_banks = len((st.session_state.get("research_themes_live") or {}).get("banks") or [])
+        if _n_banks > 3:
+            with st.container(height=300, border=False):
+                render_research_block()
+        else:
+            render_research_block()
         render_events_block(months=3)
 
-     st.markdown("<br>", unsafe_allow_html=True)
      with st.expander("➕ More detail — charts, bonds, data tables, PDF articles", expanded=False):
         _md_tabs = st.tabs(["Charts", "Bonds", "Data tables", "Articles for PDF"])
         with _md_tabs[0]:
@@ -6494,11 +6483,9 @@ else:
         with _md_tabs[3]:
             render_news_pdf_picker(st.session_state["news_df"])
 
-     st.caption(
-        "Internal decision-support only. Prices may be delayed; AI text is labelled and "
-        "may contain errors — verify against primary sources before acting. "
-        "Full notes in the Methodology tab."
-     )
+     st.markdown("<div style='font-size:9.5px;color:#94A3B8;'>Internal decision-support only. "
+                 "Prices may be delayed; AI text may contain errors — verify before acting. "
+                 "Notes in the Methodology tab.</div>", unsafe_allow_html=True)
 
     # ── 3b. Research Library — moved to Research tab ────────────────────────
     with nav_research:

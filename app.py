@@ -265,7 +265,33 @@ MACRO_EVENTS_FALLBACK = [
     {"date": "2026-10-15", "event": "US CPI Release",          "category": "US Data"},
     {"date": "2026-11-12", "event": "US CPI Release",          "category": "US Data"},
     {"date": "2026-12-10", "event": "US CPI Release",          "category": "US Data"},
+    # ── Added 2026-11-26, checked against the official calendars ──────────
+    # SNB (snb.ch event schedule) — decision 09:30 Swiss time
+    {"date": "2026-12-10", "event": "SNB Rate Decision",       "category": "Central Banks"},
+    {"date": "2027-03-18", "event": "SNB Rate Decision",       "category": "Central Banks"},
+    {"date": "2027-06-24", "event": "SNB Rate Decision",       "category": "Central Banks"},
+    # Fed 2027 (revised tentative schedule, federalreserve.gov 12 Nov 2026)
+    {"date": "2027-01-27", "event": "FOMC Rate Decision",      "category": "Central Banks"},
+    {"date": "2027-03-17", "event": "FOMC Rate Decision",      "category": "Central Banks", "time": "19:00"},
+    # ECB 2027 (Governing Council monetary-policy meetings)
+    {"date": "2027-02-04", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    {"date": "2027-03-18", "event": "ECB Rate Decision",       "category": "Central Banks"},
+    # US CPI 2027 (bls.gov release schedule)
+    {"date": "2027-01-13", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2027-02-11", "event": "US CPI Release",          "category": "US Data"},
+    {"date": "2027-03-10", "event": "US CPI Release",          "category": "US Data"},
 ]
+
+# Usual announcement time in Swiss time (CET/CEST). A "time" key on a single
+# event overrides this (e.g. US daylight saving starts before Europe's, so
+# the March FOMC is at 19:00 Swiss time).
+EVENT_TIMES_CH = {
+    "SNB Rate Decision":    "09:30",
+    "ECB Rate Decision":    "14:15",
+    "US CPI Release":       "14:30",
+    "US Jobs Report (NFP)": "14:30",
+    "FOMC Rate Decision":   "20:00",
+}
 
 # Backwards-compat alias — older code paths read MACRO_EVENTS directly.
 # Pointed at the fallback so anything that hasn't been migrated still works.
@@ -497,6 +523,9 @@ def _compute_nfp_dates(months_ahead: int = 8) -> list[dict]:
             except ValueError:
                 break
             if cand.weekday() == 4:  # Friday
+                # New Year's Day: BLS publishes a week later (8 Jan 2027).
+                if cand.month == 1 and cand.day == 1:
+                    cand = cand + timedelta(days=7)
                 out.append({
                     "date": cand.strftime("%Y-%m-%d"),
                     "event": "US Jobs Report (NFP)",
@@ -572,12 +601,23 @@ def fetch_macro_events_live() -> list[dict]:
         # Top up missing event types from fallback so we never have a gap
         # (e.g. live FOMC scrape works but ECB scrape fails — fill ECB
         # from the fallback list).
-        live_types = {ev["event"] for ev in events}
+        # Fixed 2026-11-26: this used to add only the FIRST fallback date of
+        # each missing type (an April date, already past), so the Fed / ECB /
+        # CPI rows disappeared whenever a website read failed. Now every
+        # verified date is merged; a fallback date is skipped only if the live
+        # source already has the same event within 3 days.
+        live = {}
+        for ev in events:
+            live.setdefault(ev["event"], []).append(pd.Timestamp(ev["date"]))
+        added = 0
         for fb in MACRO_EVENTS_FALLBACK:
-            if fb["event"] not in live_types:
-                events.append(fb)
-                sources_used.append(f"fallback for {fb['event']}")
-                live_types.add(fb["event"])
+            d = pd.Timestamp(fb["date"])
+            if any(abs((d - x).days) <= 3 for x in live.get(fb["event"], [])):
+                continue
+            events.append(dict(fb))
+            added += 1
+        if added:
+            sources_used.append(f"built-in calendar ({added} dates)")
 
     # Drop events whose date has already passed.
     today = datetime.now().date()
@@ -4564,7 +4604,7 @@ def render_research_block():
 
 
 def render_events_block(months=3):
-    _section_label(f"📅 EVENTS — NEXT {months} MONTHS")
+    _section_label(f"📅 EVENTS — NEXT {months} MONTHS <span style='font-weight:400;color:#94A3B8;letter-spacing:0;'>(Swiss time)</span>")
     today = pd.Timestamp.today().normalize()
     horizon = today + pd.DateOffset(months=months)
     try:
@@ -4574,7 +4614,8 @@ def render_events_block(months=3):
         _events_source = MACRO_EVENTS_FALLBACK
         _live_status = {}
     upcoming = sorted([e for e in _events_source if today <= pd.Timestamp(e["date"]) <= horizon],
-                      key=lambda e: pd.Timestamp(e["date"]))
+                      key=lambda e: (pd.Timestamp(e["date"]),
+                                     e.get("time") or EVENT_TIMES_CH.get(e.get("event", ""), "99:99")))
     if not upcoming:
         st.markdown("<div style='font-size:11px;color:#94A3B8;'>No events found in this window.</div>",
                     unsafe_allow_html=True)
@@ -4583,11 +4624,12 @@ def render_events_block(months=3):
         dt = pd.Timestamp(ev["date"])
         days = (dt - today).days
         day_label = "TODAY" if days == 0 else f"{days}d"
+        _t = ev.get("time") or EVENT_TIMES_CH.get(ev.get("event", ""), "")
         rows.append(
             "<tr style='border-bottom:1px solid #F0F4F8;'>"
             f"<td style='padding:1px 4px 1px 0;color:#0F172A;'>{ev['event']}</td>"
             f"<td style='padding:1px 0;color:#64748B;text-align:right;white-space:nowrap;'>"
-            f"{dt.strftime('%d %b')} · <b style='color:{'#EF4444' if days == 0 else '#475467'};'>{day_label}</b></td></tr>")
+            f"{dt.strftime('%a %d %b')}{(' ' + _t) if _t else ''} · <b style='color:{'#EF4444' if days == 0 else '#475467'};'>{day_label}</b></td></tr>")
     if rows:
         st.markdown("<table style='width:100%;border-collapse:collapse;font-size:11.5px;line-height:1.25;'>"
                     + "".join(rows) + "</table>", unsafe_allow_html=True)

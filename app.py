@@ -232,69 +232,9 @@ FX_STRIP = [
 # - CPI releases mid-month on a published BLS schedule (typically Tue/Wed/Thu)
 # The live fetcher in fetch_macro_events_live() supersedes this list when
 # any source returns data.
-MACRO_EVENTS_FALLBACK = [
-    # ECB monetary policy meetings 2026 (always Thursdays)
-    {"date": "2026-04-16", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-06-04", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-07-23", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-09-10", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-10-29", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2026-12-17", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    # Fed FOMC 2026 (decisions on Wednesdays — verify against fed published cal)
-    {"date": "2026-04-29", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-06-17", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-07-29", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-09-16", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-10-28", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2026-12-09", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    # NFP 2026 (always first Friday of each month — deterministic)
-    {"date": "2026-05-01", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-06-05", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-07-03", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-08-07", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-09-04", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-10-02", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-11-06", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    {"date": "2026-12-04", "event": "US Jobs Report (NFP)",    "category": "US Data"},
-    # US CPI 2026 (BLS published schedule — verify quarterly)
-    {"date": "2026-05-13", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-06-10", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-07-15", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-08-12", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-09-10", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-10-15", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-11-12", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2026-12-10", "event": "US CPI Release",          "category": "US Data"},
-    # ── Added 2026-11-26, checked against the official calendars ──────────
-    # SNB (snb.ch event schedule) — decision 09:30 Swiss time
-    {"date": "2026-12-10", "event": "SNB Rate Decision",       "category": "Central Banks"},
-    {"date": "2027-03-18", "event": "SNB Rate Decision",       "category": "Central Banks"},
-    {"date": "2027-06-24", "event": "SNB Rate Decision",       "category": "Central Banks"},
-    # Fed 2027 (revised tentative schedule, federalreserve.gov 12 Nov 2026)
-    {"date": "2027-01-27", "event": "FOMC Rate Decision",      "category": "Central Banks"},
-    {"date": "2027-03-17", "event": "FOMC Rate Decision",      "category": "Central Banks", "time": "19:00"},
-    # ECB 2027 (Governing Council monetary-policy meetings)
-    {"date": "2027-02-04", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    {"date": "2027-03-18", "event": "ECB Rate Decision",       "category": "Central Banks"},
-    # US CPI 2027 (bls.gov release schedule)
-    {"date": "2027-01-13", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2027-02-11", "event": "US CPI Release",          "category": "US Data"},
-    {"date": "2027-03-10", "event": "US CPI Release",          "category": "US Data"},
-]
-
-# Usual announcement time in Swiss time (CET/CEST). A "time" key on a single
-# event overrides this (e.g. US daylight saving starts before Europe's, so
-# the March FOMC is at 19:00 Swiss time).
-EVENT_TIMES_CH = {
-    "SNB Rate Decision":    "09:30",
-    "ECB Rate Decision":    "14:15",
-    "US CPI Release":       "14:30",
-    "US Jobs Report (NFP)": "14:30",
-    "FOMC Rate Decision":   "20:00",
-}
-
-# Backwards-compat alias — older code paths read MACRO_EVENTS directly.
-# Pointed at the fallback so anything that hasn't been migrated still works.
+# Built-in date list removed 2026-11-26 (Nikos): dates come only from the
+# official websites; a failed source is shown as an error, not filled in.
+MACRO_EVENTS_FALLBACK: list[dict] = []
 MACRO_EVENTS = MACRO_EVENTS_FALLBACK
 
 
@@ -314,6 +254,8 @@ MACRO_EVENTS = MACRO_EVENTS_FALLBACK
 _FOMC_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 _ECB_URL  = "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"
 _CPI_URL  = "https://www.bls.gov/schedule/news_release/cpi.htm"
+_NFP_URL  = "https://www.bls.gov/schedule/news_release/empsit.htm"
+_SNB_URL  = "https://www.snb.ch/en/services-events/digital-services/event-schedule"
 
 _HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; nxman-brief/1.0; +daily-market-briefing)",
@@ -336,341 +278,188 @@ def _http_get(url: str, timeout: int = 12) -> str:
     return r.text
 
 
+def _page_text(html: str) -> str:
+    """Tag-stripped, whitespace-collapsed page text."""
+    txt = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    txt = re.sub(r"<[^>]+>", " ", txt)
+    txt = txt.replace("&nbsp;", " ").replace("&amp;", "&")
+    return re.sub(r"\s+", " ", txt)
+
+
+def _to_zurich(d, hhmm: str, tz: str) -> tuple[str, str]:
+    """Convert a local announcement time to Swiss time (handles daylight
+    saving on both sides). Returns (YYYY-MM-DD, HH:MM) in Zurich."""
+    from zoneinfo import ZoneInfo
+    h, m = (int(x) for x in hhmm.split(":"))
+    local = datetime(d.year, d.month, d.day, h, m, tzinfo=ZoneInfo(tz))
+    z = local.astimezone(ZoneInfo("Europe/Zurich"))
+    return z.strftime("%Y-%m-%d"), z.strftime("%H:%M")
+
+
+_MON_ABBR = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7,
+             "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
 def _scrape_fomc_dates(html: str | None = None) -> list[dict]:
-    """Parse the Fed's fomccalendars.htm page.
-
-    The page lists meetings under headers like '<h4>2026 FOMC Meetings</h4>'
-    and each meeting block contains a month and day-range (e.g. 'April 28-29').
-    The DECISION date is the second day of the range (announce day, Wed).
-
-    We extract all (month, day_range) pairs after the year-2026+ headings
-    and emit one event per meeting on the announce day.
-    """
+    """Fed meeting calendar. Each meeting is 'Month' followed by a day RANGE
+    ('December 8-9*', 'Apr/May 30-1'); the decision is the second day at
+    14:00 New York time. Requiring a range keeps out the 'Released ...'
+    minutes dates on the same page. Strategy-only meetings (no rate
+    decision) are skipped."""
     if html is None:
         html = _http_get(_FOMC_URL)
-    out: list[dict] = []
-    today_year = datetime.now().year
-    # Anchor: split on year headers like "2026 FOMC Meetings"
-    year_blocks = re.split(r"(?i)(\d{4})\s+FOMC\s+Meetings?", html)
-    # year_blocks: [pre, year1, body1, year2, body2, ...]
-    for i in range(1, len(year_blocks), 2):
-        try:
-            year = int(year_blocks[i])
-        except ValueError:
-            continue
-        if year < today_year or year > today_year + 2:
-            continue
-        body = year_blocks[i + 1] if i + 1 < len(year_blocks) else ""
-        # Find every "Month  Day-Day" pattern. The Fed's HTML separates the
-        # month and day range across multiple cells; collapse whitespace
-        # first so a regex can span them.
-        flat = re.sub(r"\s+", " ", body)
-        # Patterns to catch:
-        #   "January 27-28"
-        #   "April 28-29*"  (the asterisk on projected meetings)
-        #   "Sep/Oct  29-30"  (cross-month meetings)
-        for m in re.finditer(
-            r"\b("
-            r"January|February|March|April|May|June|"
-            r"July|August|September|October|November|December|"
-            r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
-            r")\b"
-            r"(?:\s*/\s*(?:January|February|March|April|May|June|"
-            r"July|August|September|October|November|December|"
-            r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec))?"
-            r"\s+"
-            r"(\d{1,2})\s*(?:[-–]\s*(\d{1,2}))?",
-            flat,
-        ):
-            mon_word = m.group(1).lower()
-            day1 = int(m.group(2))
-            day2 = int(m.group(3)) if m.group(3) else day1
-            if mon_word not in _MONTH_NUM:
-                continue
-            month = _MONTH_NUM[mon_word]
-            # If the range spans months (e.g. "Oct 28-Nov 5"), the regex
-            # above only catches the start month — close enough; we use
-            # day2 as the announce day on the start month. If day2 < day1
-            # that means the range crossed; fall back to day1.
-            announce_day = day2 if day2 >= day1 else day1
-            try:
-                d = datetime(year, month, announce_day).date()
-            except ValueError:
-                continue
-            out.append({
-                "date": d.strftime("%Y-%m-%d"),
-                "event": "FOMC Rate Decision",
-                "category": "Central Banks",
-            })
-    # Dedupe within source.
-    seen = set()
-    deduped = []
-    for ev in out:
-        if ev["date"] not in seen:
-            seen.add(ev["date"])
-            deduped.append(ev)
-    return deduped
-
-
-def _scrape_ecb_dates(html: str | None = None) -> list[dict]:
-    """Parse ECB's monetary-policy calendar page.
-
-    The ECB page lists meetings with a date pattern like '4 June 2026' or
-    '04/06/2026' depending on the format. We extract dates that appear
-    near the words 'monetary policy' or in the structured meeting list.
-    """
-    if html is None:
-        html = _http_get(_ECB_URL)
-    out: list[dict] = []
-    today_year = datetime.now().year
-    flat = re.sub(r"\s+", " ", html)
-    # Match patterns like "5 March 2026" or "5 Mar 2026"
-    for m in re.finditer(
-        r"\b(\d{1,2})\s+("
-        r"January|February|March|April|May|June|"
-        r"July|August|September|October|November|December|"
-        r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
-        r")\s+(\d{4})\b",
-        flat,
-    ):
-        try:
-            day = int(m.group(1))
-            month = _MONTH_NUM[m.group(2).lower()]
-            year = int(m.group(3))
-        except (KeyError, ValueError):
-            continue
-        if year < today_year or year > today_year + 2:
-            continue
-        try:
-            d = datetime(year, month, day).date()
-        except ValueError:
-            continue
-        # ECB rate decisions are always Thursdays — this is the cleanest
-        # day-of-week filter to separate monetary-policy meetings from other
-        # ECB events listed on the page (speeches, conferences, etc.).
-        if d.weekday() != 3:  # 3 = Thursday
-            continue
-        out.append({
-            "date": d.strftime("%Y-%m-%d"),
-            "event": "ECB Rate Decision",
-            "category": "Central Banks",
-        })
-    seen = set()
-    deduped = []
-    for ev in out:
-        if ev["date"] not in seen:
-            seen.add(ev["date"])
-            deduped.append(ev)
-    return deduped
-
-
-def _scrape_cpi_dates(html: str | None = None) -> list[dict]:
-    """Parse the BLS CPI release schedule page.
-
-    Page layout: a table where each row carries a release date in the form
-    'July 15, 2026' (long form) for upcoming releases.
-    """
-    if html is None:
-        html = _http_get(_CPI_URL)
-    out: list[dict] = []
-    today_year = datetime.now().year
-    for m in re.finditer(
-        r"\b("
-        r"January|February|March|April|May|June|"
-        r"July|August|September|October|November|December"
-        r")\s+(\d{1,2}),?\s+(\d{4})\b",
-        html,
-    ):
-        try:
-            month = _MONTH_NUM[m.group(1).lower()]
-            day = int(m.group(2))
-            year = int(m.group(3))
-        except (KeyError, ValueError):
-            continue
-        if year < today_year or year > today_year + 1:
-            continue
-        try:
-            d = datetime(year, month, day).date()
-        except ValueError:
-            continue
-        out.append({
-            "date": d.strftime("%Y-%m-%d"),
-            "event": "US CPI Release",
-            "category": "US Data",
-        })
-    seen = set()
-    deduped = []
-    for ev in out:
-        if ev["date"] not in seen:
-            seen.add(ev["date"])
-            deduped.append(ev)
-    return deduped
-
-
-def _compute_nfp_dates(months_ahead: int = 8) -> list[dict]:
-    """NFP releases on the first Friday of each month — deterministic.
-
-    Returns events for the next `months_ahead` first-Fridays starting from
-    the current month.
-    """
+    text = _page_text(html)
     out = []
-    today = datetime.now().date()
-    year, month = today.year, today.month
-    for _ in range(months_ahead + 1):
-        for day in range(1, 8):
+    this_year = datetime.now().year
+    blocks = re.split(r"(\d{4}) FOMC Meetings", text)
+    for i in range(1, len(blocks) - 1, 2):
+        year = int(blocks[i])
+        if year < this_year or year > this_year + 1:
+            continue
+        body = blocks[i + 1]
+        for m in re.finditer(
+                r"\b(January|February|March|April|May|June|July|August|September|"
+                r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+                r"(?:/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)?"
+                r" (\d{1,2})-(\d{1,2})\*?", body):
+            after = body[m.end():m.end() + 80]
+            if "Strategy Meeting" in after:
+                continue
+            mon = _MONTH_NUM.get(m.group(1).lower()) or _MON_ABBR.get(m.group(1).lower()[:3])
+            d1, d2 = int(m.group(2)), int(m.group(3))
+            y, mo = year, mon
+            if d2 < d1:                       # 'Apr/May 30-1' → decision in May
+                mo += 1
+                if mo == 13:
+                    y, mo = y + 1, 1
             try:
-                cand = datetime(year, month, day).date()
+                d = datetime(y, mo, d2).date()
             except ValueError:
-                break
-            if cand.weekday() == 4:  # Friday
-                # New Year's Day: BLS publishes a week later (8 Jan 2027).
-                if cand.month == 1 and cand.day == 1:
-                    cand = cand + timedelta(days=7)
-                out.append({
-                    "date": cand.strftime("%Y-%m-%d"),
-                    "event": "US Jobs Report (NFP)",
-                    "category": "US Data",
-                })
-                break
-        month += 1
-        if month > 12:
-            month = 1
-            year += 1
+                continue
+            day, hhmm = _to_zurich(d, "14:00", "America/New_York")
+            out.append({"date": day, "time": hhmm, "event": "FOMC Rate Decision",
+                        "category": "Central Banks"})
     return out
 
 
-@st.cache_data(ttl=86400)  # 24 hours
-def fetch_macro_events_live() -> list[dict]:
-    """Combine live-source events into a single sorted, deduped list. Falls
-    back to MACRO_EVENTS_FALLBACK if every live source fails. Drops events
-    whose date has already passed. Caches for 24h.
+def _scrape_ecb_dates(html: str | None = None) -> list[dict]:
+    """ECB Governing Council calendar: the rate decision is the date marked
+    'monetary policy meeting ... (Day 2), followed by press conference'
+    (or a one-day meeting followed by a press conference). Decision at
+    14:15 Frankfurt time. 'non-monetary policy' meetings are excluded."""
+    if html is None:
+        html = _http_get(_ECB_URL)
+    text = _page_text(html)
+    out = []
+    for m in re.finditer(
+            r"(\d{2})/(\d{2})/(\d{4}) Governing Council of the ECB: monetary policy meeting"
+            r"[^/]{0,80}?followed by press conference", text):
+        try:
+            d = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).date()
+        except ValueError:
+            continue
+        day, hhmm = _to_zurich(d, "14:15", "Europe/Berlin")
+        out.append({"date": day, "time": hhmm, "event": "ECB Rate Decision",
+                    "category": "Central Banks"})
+    return out
 
-    Diagnostic — which sources contributed — is stashed in session_state
-    under '_macro_events_status' so the sidebar can show it.
-    """
+
+def _scrape_bls_schedule(url: str, event: str, html: str | None = None) -> list[dict]:
+    """BLS release schedule table rows: 'November 2026 Dec. 10, 2026 08:30 AM'
+    (reference month, release date, release time in New York time)."""
+    if html is None:
+        html = _http_get(url)
+    text = _page_text(html)
+    out = []
+    for m in re.finditer(
+            r"(?:January|February|March|April|May|June|July|August|September|October|"
+            r"November|December) \d{4} "
+            r"(Jan|Feb|Mar|Apr|May|Jun|June|Jul|July|Aug|Sep|Sept|Oct|Nov|Dec)\.? "
+            r"(\d{1,2}), (\d{4}) (\d{1,2}):(\d{2}) (AM|PM)", text):
+        try:
+            d = datetime(int(m.group(3)), _MON_ABBR[m.group(1).lower()[:3] if m.group(1).lower() != "sept" else "sep"],
+                         int(m.group(2))).date()
+        except (KeyError, ValueError):
+            continue
+        h = int(m.group(4)) % 12 + (12 if m.group(6) == "PM" else 0)
+        day, hhmm = _to_zurich(d, f"{h:02d}:{m.group(5)}", "America/New_York")
+        out.append({"date": day, "time": hhmm, "event": event, "category": "US Data"})
+    return out
+
+
+def _scrape_cpi_dates(html: str | None = None) -> list[dict]:
+    return _scrape_bls_schedule(_CPI_URL, "US CPI Release", html)
+
+
+def _scrape_nfp_dates(html: str | None = None) -> list[dict]:
+    return _scrape_bls_schedule(_NFP_URL, "US Jobs Report (NFP)", html)
+
+
+def _scrape_snb_dates(html: str | None = None) -> list[dict]:
+    """SNB event schedule: '10.12.2026 09:30 Monetary policy assessment of
+    10 December 2026 (press release)'. Times are already Swiss time."""
+    if html is None:
+        html = _http_get(_SNB_URL)
+    text = _page_text(html)
+    out = []
+    for m in re.finditer(
+            r"(\d{2})\.(\d{2})\.(\d{4}) (\d{2}:\d{2}) Monetary policy assessment of "
+            r"[^()]{0,40}\(press release\)", text):
+        try:
+            d = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).date()
+        except ValueError:
+            continue
+        out.append({"date": d.strftime("%Y-%m-%d"), "time": m.group(4),
+                    "event": "SNB Rate Decision", "category": "Central Banks"})
+    return out
+
+
+def fetch_macro_events_live() -> list[dict]:
+    """Cached read (3h) of all official calendars; publishes the per-source
+    status for the Events block on every call (cache hits included)."""
+    events, status = _fetch_macro_events_cached()
+    try:
+        st.session_state["_macro_events_status"] = status
+    except Exception:
+        pass
+    return events
+
+
+@st.cache_data(ttl=10800)  # 3 hours — a failed read is retried soon
+def _fetch_macro_events_cached() -> tuple[list[dict], dict]:
+    """Read every calendar from its official website. NO built-in or
+    calculated dates (Nikos, 2026-11-26: show an error, never invent).
+    A source that fails is listed in '_macro_events_status' so the Events
+    block can say exactly which calendar is missing."""
     events: list[dict] = []
     sources_used: list[str] = []
     sources_failed: list[str] = []
+    for label, fn in (("Fed (federalreserve.gov)", _scrape_fomc_dates),
+                      ("ECB (ecb.europa.eu)", _scrape_ecb_dates),
+                      ("SNB (snb.ch)", _scrape_snb_dates),
+                      ("US inflation (bls.gov)", _scrape_cpi_dates),
+                      ("US jobs report (bls.gov)", _scrape_nfp_dates)):
+        try:
+            got = fn()
+            if got:
+                events.extend(got)
+                sources_used.append(f"{label}: {len(got)} dates")
+            else:
+                sources_failed.append(f"{label}: page read but no dates found")
+        except Exception as e:
+            sources_failed.append(f"{label}: {type(e).__name__}: {str(e)[:60]}")
 
-    # 1. NFP — deterministic, always works.
-    try:
-        nfp = _compute_nfp_dates(months_ahead=8)
-        events.extend(nfp)
-        sources_used.append(f"NFP (deterministic, {len(nfp)} dates)")
-    except Exception as e:
-        sources_failed.append(f"NFP calc: {type(e).__name__}: {e}")
-
-    # 2. Fed FOMC — scrape.
-    try:
-        fomc = _scrape_fomc_dates()
-        if fomc:
-            events.extend(fomc)
-            sources_used.append(f"Fed.gov ({len(fomc)} FOMC dates)")
-        else:
-            sources_failed.append("Fed.gov: parsed 0 dates")
-    except Exception as e:
-        sources_failed.append(f"Fed.gov: {type(e).__name__}: {str(e)[:80]}")
-
-    # 3. ECB — scrape.
-    try:
-        ecb = _scrape_ecb_dates()
-        if ecb:
-            events.extend(ecb)
-            sources_used.append(f"ECB.europa.eu ({len(ecb)} dates)")
-        else:
-            sources_failed.append("ECB: parsed 0 dates")
-    except Exception as e:
-        sources_failed.append(f"ECB: {type(e).__name__}: {str(e)[:80]}")
-
-    # 4. BLS CPI — scrape.
-    try:
-        cpi = _scrape_cpi_dates()
-        if cpi:
-            events.extend(cpi)
-            sources_used.append(f"BLS.gov ({len(cpi)} CPI dates)")
-        else:
-            sources_failed.append("BLS CPI: parsed 0 dates")
-    except Exception as e:
-        sources_failed.append(f"BLS CPI: {type(e).__name__}: {str(e)[:80]}")
-
-    # If we got nothing live, use the corrected hardcoded fallback.
-    if not events:
-        events = list(MACRO_EVENTS_FALLBACK)
-        sources_used.append("hardcoded fallback (all live sources failed)")
-    else:
-        # Top up missing event types from fallback so we never have a gap
-        # (e.g. live FOMC scrape works but ECB scrape fails — fill ECB
-        # from the fallback list).
-        # Fixed 2026-11-26: this used to add only the FIRST fallback date of
-        # each missing type (an April date, already past), so the Fed / ECB /
-        # CPI rows disappeared whenever a website read failed. Now every
-        # verified date is merged; a fallback date is skipped only if the live
-        # source already has the same event within 3 days.
-        live = {}
-        for ev in events:
-            live.setdefault(ev["event"], []).append(pd.Timestamp(ev["date"]))
-        added = 0
-        for fb in MACRO_EVENTS_FALLBACK:
-            d = pd.Timestamp(fb["date"])
-            if any(abs((d - x).days) <= 3 for x in live.get(fb["event"], [])):
-                continue
-            events.append(dict(fb))
-            added += 1
-        if added:
-            sources_used.append(f"built-in calendar ({added} dates)")
-
-    # Drop events whose date has already passed.
     today = datetime.now().date()
-    events = [
-        ev for ev in events
-        if datetime.strptime(ev["date"], "%Y-%m-%d").date() >= today
-    ]
-
-    # Dedupe by (date, event) and sort.
-    seen = set()
-    deduped = []
-    for ev in events:
+    events = [ev for ev in events
+              if datetime.strptime(ev["date"], "%Y-%m-%d").date() >= today]
+    seen, deduped = set(), []
+    for ev in sorted(events, key=lambda e: (e["date"], e.get("time", ""))):
         k = (ev["date"], ev["event"])
         if k not in seen:
             seen.add(k)
             deduped.append(ev)
-    deduped.sort(key=lambda e: e["date"])
+    return deduped, {"sources_used": sources_used, "sources_failed": sources_failed}
 
-    # Diagnostic surface.
-    try:
-        import streamlit as _st
-        _st.session_state["_macro_events_status"] = {
-            "sources_used": sources_used,
-            "sources_failed": sources_failed,
-            "count": len(deduped),
-            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-    except Exception:
-        pass
-
-    return deduped
-
-# ── News category style map ───────────────────────────────────────────────────
-CATEGORY_STYLE = {
-    "Macro / Rates":  {"bg": "#DBEAFE", "text": "#1E3A5F", "border": "#93C5FD"},
-    "Geopolitics":    {"bg": "#FEE2E2", "text": "#7F1D1D", "border": "#FCA5A5"},
-    "Equities":       {"bg": "#DCFCE7", "text": "#14532D", "border": "#86EFAC"},
-    "Commodities":    {"bg": "#FEF3C7", "text": "#78350F", "border": "#FCD34D"},
-    "Crypto":         {"bg": "#EDE9FE", "text": "#4C1D95", "border": "#C4B5FD"},
-    "Other":          {"bg": "#F3F4F6", "text": "#374151", "border": "#D1D5DB"},
-}
-
-
-st.set_page_config(page_title="Daily Market Briefing", layout="wide")
-
-# ── Audit fix (Item 1): password gate ────────────────────────────────────────
-# Minimal shared-password gate for the public Streamlit Cloud URL. When
-# APP_PASSWORD is set in Streamlit Secrets (or .env), the entire app is
-# blocked until the user enters it once per browser session. If APP_PASSWORD
-# is empty/unset, this is a no-op — the app behaves as before. This is *not*
-# a substitute for real SSO / per-user auth (the audit calls that out as
-# still required for professional use) but it prevents casual anonymous
-# access to SNIPER tables and broker research summaries in the meantime.
 def _password_gate() -> None:
     import hmac
     expected = get_secret("APP_PASSWORD", "").strip()
@@ -1924,22 +1713,6 @@ NEWS_COUNT = 12  # fixed — not user-selectable
 
 @st.cache_data(ttl=900)
 def load_news(count=NEWS_COUNT):
-    placeholder_items = [
-        {"headline": "Oil remains central as geopolitical tension stays elevated",       "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Higher oil prices support inflation concerns and affect rates, equities and currencies.", "provider": "Placeholder"},
-        {"headline": "Markets remain sensitive to higher-for-longer rate expectations",  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "If rates stay elevated, bonds and equities may both face valuation pressure.",            "provider": "Placeholder"},
-        {"headline": "Risk sentiment mixed across regions",                              "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Regional leadership remains uneven, which supports diversification.",                     "provider": "Placeholder"},
-        {"headline": "Dollar strength weighs on emerging-market assets",                 "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "A strong USD tightens financial conditions in EM economies.",                             "provider": "Placeholder"},
-        {"headline": "Gold holds near highs amid central bank demand",                   "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Central bank buying underpins gold as a reserve diversification tool.",                   "provider": "Placeholder"},
-        {"headline": "China stimulus expectations support commodity demand",             "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Chinese policy stimulus could lift industrial metals and energy prices.",                  "provider": "Placeholder"},
-        {"headline": "European equities outperform on valuation re-rating",             "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Cheaper valuations attract flows when US growth expectations moderate.",                   "provider": "Placeholder"},
-        {"headline": "Credit spreads stable; no systemic stress signals",               "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Tight spreads suggest credit markets are not pricing in near-term recession risk.",        "provider": "Placeholder"},
-        {"headline": "Crypto volatility elevated; Bitcoin tests key resistance",        "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Bitcoin remains a high-beta risk asset, often amplifying broader sentiment moves.",       "provider": "Placeholder"},
-        {"headline": "Swiss franc holds safe-haven bid; EUR/CHF under pressure",        "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "CHF strength can compress Swiss equity earnings and affects EUR-denominated portfolios.", "provider": "Placeholder"},
-        {"headline": "Global equities digest mixed macro signals",                      "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Uneven growth signals are keeping cross-asset correlations unstable.",                    "provider": "Placeholder"},
-        {"headline": "Bond markets price in fewer rate cuts for 2026",                  "source": "Placeholder", "published_at": "", "url": "", "why_it_matters": "Fewer expected cuts support yields but put pressure on equity valuations.",               "provider": "Placeholder"},
-    ]
-    placeholder_df = pd.DataFrame(placeholder_items)
-    placeholder_df["category"] = "Other"
 
     def classify(headline: str):
         h = (headline or "").lower()
@@ -2021,9 +1794,11 @@ def load_news(count=NEWS_COUNT):
         frames.append(gdf)
 
     if not frames:
-        return placeholder_df.head(count), {
+        # No invented headlines (Nikos, 2026-11-26): return nothing and say why.
+        return pd.DataFrame(columns=["headline", "source", "published_at", "url",
+                                     "why_it_matters", "provider", "category"]), {
             "live_news": False, "article_count": 0, "url_count": 0,
-            "reason": "No live sources returned data — showing placeholders",
+            "reason": "No news source returned articles (Finnhub, Marketaux, RSS, Gmail all empty or failed)",
         }
 
     df = pd.concat(frames, ignore_index=True)
@@ -2757,15 +2532,11 @@ def build_writing(news_df, snapshot, use_gemini, research_context=""):
     local_summary = build_local_news_summary(news_df)
 
     fallback = {
-        "headline": "Mixed market tone as rates remain in focus",
-        "subheadline": "Markets remain driven by a mix of rates, currencies, commodities and uneven regional equity performance.",
+        # No generic text when the AI fails (Nikos, 2026-11-26).
+        "headline": "",
+        "subheadline": "",
         "news_summary": local_summary,
-        "what_matters": [
-            "Rates remain central because higher yields usually pressure existing bond prices.",
-            "Energy and geopolitics still matter because oil can affect inflation expectations and risk sentiment.",
-            "Currencies remain important for CHF-based and EUR-linked investors.",
-            "Cross-asset performance is mixed, so leadership should be monitored rather than assumed.",
-        ],
+        "what_matters": [],
         "news_bullets": [],
         "executive_summary": {"lead": "", "bullets": []},
         "portfolio_implications": [],
@@ -3488,21 +3259,19 @@ def build_bundle():
                 except Exception:
                     s = None
         elif key == "bund10y":
-            # Live Bundesbank daily yield; manual secret only as last resort.
+            # Live Bundesbank daily yield only — a failure shows "unavailable".
             try:
                 s = fetch_bund_yield("10y")
                 _rate_src = "live"
             except Exception:
-                s = build_manual_rate_history(MANUAL_BUND_10Y)
-                _rate_src = "manual"
+                s = None
         elif key == "ch10y":
-            # Live SNB Swiss Confederation yield; manual secret as last resort.
+            # Live SNB Swiss Confederation yield only — a failure shows "unavailable".
             try:
                 s, _ = fetch_swiss_yield("10y")
                 _rate_src = "live"
             except Exception:
-                s = build_manual_rate_history(MANUAL_CH_10Y)
-                _rate_src = "manual"
+                s = None
 
         if s is not None:
             history_frames.append(
@@ -4542,7 +4311,7 @@ def render_status_box(status, mode_note, as_of_disp=""):
         ai = (bad_c, f"❌ AI NOT working (retried just now) — {why}")
     news = ((ok_c, f"✅ News live · {status.get('article_count', 0)} articles")
             if status.get("live_news") else
-            (warn_c, f"⚠️ News not live — {str(status.get('news_reason') or '')[:80]}"))
+            (bad_c, f"❌ News failed — {str(status.get('news_reason') or '')[:80]}"))
     _rs_state = rs.get("state")
     if _rs_state == "ok":
         res = (ok_c, f"✅ Research: {rs.get('message')}")
@@ -4553,8 +4322,16 @@ def render_status_box(status, mode_note, as_of_disp=""):
     else:
         res = (bad_c, f"❌ Research: {rs.get('message') or 'status unknown'}")
 
+    try:
+        fetch_macro_events_live()
+        _cal_fail = (st.session_state.get("_macro_events_status") or {}).get("sources_failed") or []
+    except Exception as _e:
+        _cal_fail = [f"calendar reader crashed: {type(_e).__name__}"]
+    cal = ((ok_c, "✅ Calendars read") if not _cal_fail else
+           (bad_c, f"❌ Calendars: {len(_cal_fail)} failed — "
+                   + ", ".join(f.split(':')[0] for f in _cal_fail)))
     items = " &nbsp;│&nbsp; ".join(
-        f"<span style='color:{c};font-weight:700;'>{t}</span>" for c, t in (ai, news, res))
+        f"<span style='color:{c};font-weight:700;'>{t}</span>" for c, t in (ai, news, res, cal))
     foot = " · ".join(x for x in [mode_note.replace("|", "·"), (f"as of {as_of_disp}" if as_of_disp else "")] if x)
     st.markdown(
         "<div style='border:1px solid #E2E8F0;border-radius:6px;padding:3px 10px;"
@@ -4610,12 +4387,11 @@ def render_events_block(months=3):
     try:
         _events_source = fetch_macro_events_live()
         _live_status = st.session_state.get("_macro_events_status", {})
-    except Exception:
-        _events_source = MACRO_EVENTS_FALLBACK
-        _live_status = {}
+    except Exception as _e:
+        _events_source = []
+        _live_status = {"sources_failed": [f"calendar reader crashed: {type(_e).__name__}: {str(_e)[:60]}"]}
     upcoming = sorted([e for e in _events_source if today <= pd.Timestamp(e["date"]) <= horizon],
-                      key=lambda e: (pd.Timestamp(e["date"]),
-                                     e.get("time") or EVENT_TIMES_CH.get(e.get("event", ""), "99:99")))
+                      key=lambda e: (pd.Timestamp(e["date"]), e.get("time") or "99:99"))
     if not upcoming:
         st.markdown("<div style='font-size:11px;color:#94A3B8;'>No events found in this window.</div>",
                     unsafe_allow_html=True)
@@ -4624,7 +4400,7 @@ def render_events_block(months=3):
         dt = pd.Timestamp(ev["date"])
         days = (dt - today).days
         day_label = "TODAY" if days == 0 else f"{days}d"
-        _t = ev.get("time") or EVENT_TIMES_CH.get(ev.get("event", ""), "")
+        _t = ev.get("time") or ""
         rows.append(
             "<tr style='border-bottom:1px solid #F0F4F8;'>"
             f"<td style='padding:1px 4px 1px 0;color:#0F172A;'>{ev['event']}</td>"
@@ -4635,8 +4411,9 @@ def render_events_block(months=3):
                     + "".join(rows) + "</table>", unsafe_allow_html=True)
     _failed = _live_status.get("sources_failed") or []
     if _failed:
-        st.markdown("<div style='font-size:10px;color:#D97706;'>Calendar sources failed (built-in "
-                    "dates used): " + " · ".join(_failed) + "</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:10.5px;color:#DC2626;font-weight:600;margin-top:3px;'>"
+                    "❌ Missing — these calendars could not be read, so their dates are NOT shown:<br>"
+                    + "<br>".join(f"• {f}" for f in _failed) + "</div>", unsafe_allow_html=True)
 
 
 def render_news_bullets(writing, news_df, limit=5):
@@ -4661,7 +4438,9 @@ def render_news_bullets(writing, news_df, limit=5):
                     f"text-decoration:none;'>↗ {src}</a>") if url else ""
             lines.append(f"<li style='margin:1px 0;'>{r.get('headline','')}{link}</li>")
     if not lines:
-        st.markdown("<div style='font-size:11px;color:#94A3B8;'>No news available.</div>",
+        _why = (st.session_state.get("status") or {}).get("news_reason") or "no source returned articles"
+        st.markdown("<div style='font-size:11px;color:#DC2626;font-weight:600;'>❌ News failed — "
+                    f"{_why}. Nothing is shown rather than invented headlines.</div>",
                     unsafe_allow_html=True)
         return
     st.markdown("<ul style='font-size:12px;line-height:1.3;margin:0 0 0 16px;padding:0;'>"
@@ -4927,7 +4706,10 @@ def build_pdf(title, chart_png, equities_df, rates_df, commodities_df, bonds_df,
         if ri < len(bullets)-1:
             bul_cmds.append(("LINEBELOW",(0,ri),(-1,ri), 0.3, RUL))
 
-    bul_tbl = Table(bul_rows or [[P(""),P("")]], colWidths=[(NAR_W-2.2)*cm, 2.2*cm])
+    if not bul_rows:
+        bul_rows = [[P("News unavailable — no source returned articles. Nothing invented.",
+                       fn="Helvetica-Bold", sz=5.6, col=colors.HexColor("#DC2626"), lead=7), P("")]]
+    bul_tbl = Table(bul_rows, colWidths=[(NAR_W-2.2)*cm, 2.2*cm])
     bul_tbl.setStyle(TableStyle(bul_cmds))
 
     # Narrative cell — "Market Recap" title + 1-sentence AI summary
@@ -5517,6 +5299,21 @@ def deserialize_state(data):
                 pass
         else:
             out[k] = v
+    # Snapshots saved before 2026-11-26 could hold invented placeholder
+    # headlines; strip them so they are never shown again.
+    nd = out.get("news_df")
+    if isinstance(nd, pd.DataFrame) and not nd.empty:
+        mask = pd.Series(False, index=nd.index)
+        for col in ("source", "provider"):
+            if col in nd.columns:
+                mask |= nd[col].astype(str).eq("Placeholder")
+        if mask.any():
+            out["news_df"] = nd[~mask].reset_index(drop=True)
+            st_ = out.get("status")
+            if isinstance(st_, dict) and out["news_df"].empty:
+                st_["live_news"] = False
+                st_["article_count"] = 0
+                st_["news_reason"] = "news failed when the 08:00 snapshot was taken"
     return out
 
 
@@ -6318,7 +6115,7 @@ else:
     # ── 1. Compact status line ────────────────────────────────────────────────
     mode_note = st.session_state.get("snapshot_mode_note", "")
     g_col  = "🟢" if status["gemini_used"]  else "🟡"
-    n_col  = "🟢" if status["live_news"]    else "🟡"
+    n_col  = "🟢" if status["live_news"]    else "🔴"
     ai_detail = status.get("gemini_reason", "")
     # Audit fix (Item 8): the raw upstream error ("AI failed: Gemini/gemini-2.5-flash:
     # bad JSON …") leaked into the visible status line. Show a calm label to end
@@ -6485,7 +6282,7 @@ else:
             _fig_rates = st.session_state.get("fig_rates")
             _fig_alts  = st.session_state.get("fig_alts")
             if _fig_main is not None:
-                if status["gemini_used"]:
+                if status["gemini_used"] and writing.get("headline"):
                     st.markdown(f"**{writing['headline']}**")
                     st.caption(writing["subheadline"])
                 st.plotly_chart(_fig_main, use_container_width=True, key="main_big_chart")
